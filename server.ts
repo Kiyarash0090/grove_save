@@ -2863,11 +2863,31 @@ async function installBgutilPotServer(): Promise<{ entryPath: string; pluginInst
       const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
       const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
       const buildEnv: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'development' };
-      await execFileAsync(npmCmd, ['ci', '--include=dev'], {
-        cwd: serverDir,
-        env: buildEnv,
-        timeout: 180000,
-      });
+       try {
+         await execFileAsync(npmCmd, ['install', '--legacy-peer-deps', '--no-audit', '--no-fund'], {
+           cwd: serverDir,
+           env: buildEnv,
+           timeout: 180000,
+         });
+       } catch (installErr) {
+         try {
+           const pkgJsonPath = path.join(serverDir, 'package.json');
+           if (fs.existsSync(pkgJsonPath)) {
+             const pkgContent = await fs.promises.readFile(pkgJsonPath, 'utf8');
+             const pkg = JSON.parse(pkgContent);
+             if (pkg.dependencies && pkg.dependencies.canvas) delete pkg.dependencies.canvas;
+             if (pkg.devDependencies && pkg.devDependencies.canvas) delete pkg.devDependencies.canvas;
+             await fs.promises.writeFile(pkgJsonPath, JSON.stringify(pkg, null, 2), 'utf8');
+           }
+           await execFileAsync(npmCmd, ['install', '--legacy-peer-deps', '--no-audit', '--no-fund', '--ignore-scripts'], {
+             cwd: serverDir,
+             env: buildEnv,
+             timeout: 180000,
+           });
+         } catch (fallbackErr) {
+           throw installErr;
+         }
+       }
       const localTsc = path.join(
         serverDir,
         'node_modules',

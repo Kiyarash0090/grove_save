@@ -24,11 +24,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install yt-dlp and bgutil-ytdlp-pot-provider plugin
 RUN pip3 install --no-cache-dir --break-system-packages --prefer-binary bgutil-ytdlp-pot-provider yt-dlp || true
 
-# Clone and build bgutil-ytdlp-pot-provider plugin server to /opt/bgutil
-RUN git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil \
-    && if [ -d "/opt/bgutil/server" ]; then \
-         cd /opt/bgutil/server \
-         && npm install --legacy-peer-deps \
+# Clone and build bgutil-ytdlp-pot-provider plugin server to /opt/bgutil-pot
+RUN git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-pot \
+    && if [ -d "/opt/bgutil-pot/server" ]; then \
+         cd /opt/bgutil-pot/server \
+         && (npm install --legacy-peer-deps --no-audit --no-fund || (node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("package.json","utf8")); delete p.dependencies?.canvas; delete p.devDependencies?.canvas; fs.writeFileSync("package.json", JSON.stringify(p, null, 2))' && npm install --legacy-peer-deps --no-audit --no-fund --ignore-scripts) || true) \
          && (npx tsc || npm run build || true); \
        fi \
     && mkdir -p /root/.yt-dlp/plugins /root/yt-dlp-plugins /root/.config/yt-dlp \
