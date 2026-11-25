@@ -18,9 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install yt-dlp and bgutil-ytdlp-pot-provider plugin
 RUN pip3 install --no-cache-dir --break-system-packages --prefer-binary bgutil-ytdlp-pot-provider yt-dlp || true
 
-# Clone and install bgutil-ytdlp-pot-provider plugin server to /opt/bgutil
+# Clone and build bgutil-ytdlp-pot-provider plugin server to /opt/bgutil
 RUN git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil \
-    && if [ -d "/opt/bgutil/server" ]; then cd /opt/bgutil/server && npm install && (npx tsc || true); fi \
+    && if [ -d "/opt/bgutil/server" ]; then \
+         cd /opt/bgutil/server \
+         && npm install \
+         && (npx tsc || npm run build || true); \
+       fi \
     && mkdir -p /root/.yt-dlp/plugins /root/yt-dlp-plugins /root/.config/yt-dlp \
     && echo '--extractor-args "youtubepot:provider=http://127.0.0.1:4416"' > /etc/yt-dlp.conf \
     && cp /etc/yt-dlp.conf /root/.config/yt-dlp/config
