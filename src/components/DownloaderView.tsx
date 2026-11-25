@@ -443,11 +443,35 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
 
   const isTelegramReady = Boolean(readyJob?.fileId);
 
-  const triggerFileSaveFromSite = (jobId: string, fileId?: string | null) => {
-    const link = document.createElement('a');
-    link.href = fileId
+  const triggerFileSaveFromSite = async (jobId: string, fileId?: string | null) => {
+    const href = fileId
       ? `${apiBase}/api/download/${encodeURIComponent(fileId)}`
       : `${apiBase}/api/media/files/${encodeURIComponent(jobId)}`;
+    // The endpoint answers failures with JSON. Triggering the save blindly would
+    // make the browser store that error document as `<uuid>.json`, so check the
+    // link first and surface the real message instead.
+    try {
+      const probe = await fetch(href, { method: 'HEAD' });
+      if (!probe.ok) {
+        // Errors are JSON, so a one-byte range request reads the reason without
+        // pulling the media itself.
+        let detail = '';
+        try {
+          const failed = await fetch(href, { headers: { Range: 'bytes=0-0' } });
+          const body = (await failed.json()) as { error?: string };
+          if (typeof body?.error === 'string') detail = body.error;
+        } catch {
+          // Not JSON or not reachable: fall back to the generic message.
+        }
+        setErrorMsg(detail || t.downloadFailed);
+        return;
+      }
+    } catch {
+      setErrorMsg(t.downloadFailed);
+      return;
+    }
+    const link = document.createElement('a');
+    link.href = href;
     link.download = '';
     document.body.appendChild(link);
     link.click();

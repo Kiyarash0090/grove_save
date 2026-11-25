@@ -66,24 +66,20 @@ const XRAY_CONFIG_FILE = path.resolve(DATA_DIR, 'xray-runtime.json');
 const BACKUP_DIR = path.resolve(DATA_DIR, 'backups');
 
 function ensureDataDir(): void {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(CACHE_DIR)) {
-      fs.mkdirSync(CACHE_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(BIN_DIR)) {
-      fs.mkdirSync(BIN_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(YT_DLP_PLUGINS_DIR)) {
-      fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(BACKUP_DIR)) {
-      fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    }
-  } catch (err: unknown) {
-    console.error('Warning: Failed to create DATA_DIR with permissions, using fallback tempdir:', err);
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(BIN_DIR)) {
+    fs.mkdirSync(BIN_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(YT_DLP_PLUGINS_DIR)) {
+    fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(BACKUP_DIR)) {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
   }
 }
 
@@ -1041,20 +1037,55 @@ interface ResolvedTelegramFile {
   size: number;
 }
 
+/**
+ * Builds the InputFileLocation for a message's media.
+ *
+ * GramJS's `utils.getFileInfo` is unusable here: for a `Message` input it
+ * assigns `location = message.media` but then re-tests the original message
+ * with `instanceof MessageMediaDocument`, which is never true, so every call
+ * throws "Cannot cast Message to any kind of InputFileLocation". We unwrap the
+ * media ourselves and only then hand it to the helper. Note that the helper
+ * also rejects a bare `Document`/`Photo`, so the MessageMedia wrapper matters.
+ */
+function telegramFileLocation(message: any): { dcId: number; location: any; size: number } {
+  let media = message?.media;
+
+  // CustomMessage exposes `.document` / `.photo` instead, so re-wrap those too.
+  if ((!media || media.className === 'MessageMediaEmpty') && message?.document) {
+    media = new Api.MessageMediaDocument({ document: message.document });
+  } else if ((!media || media.className === 'MessageMediaEmpty') && message?.photo) {
+    media = new Api.MessageMediaPhoto({ photo: message.photo });
+  }
+
+  if (!media || media.className === 'MessageMediaEmpty') {
+    throw new Error('The stored Telegram message has no downloadable media.');
+  }
+
+  const info = tgUtils.getFileInfo(media as never);
+  const dcId =
+    typeof info.dcId === 'number'
+      ? info.dcId
+      : media.document?.dcId ?? media.photo?.dcId ?? undefined;
+  const size = typeof info.size === 'number' ? info.size : Number(info.size) || 0;
+  if (typeof dcId !== 'number') {
+    throw new Error('Could not determine the Telegram data center for this file.');
+  }
+  if (!info.location) {
+    throw new Error('Could not resolve a Telegram file location for this message.');
+  }
+  return { dcId, location: info.location, size };
+}
+
 async function resolveTelegramFile(client: TelegramClient, row: TelegramFileRow): Promise<ResolvedTelegramFile> {
   // File references expire, so the message is re-fetched on every request
   // instead of persisting the reference bytes in the database.
   const messages = await client.getMessages(row.chat_id, { ids: row.message_id });
-  const message = Array.isArray(messages) ? messages[0] : undefined;
-  if (!message) {
+  const message = (Array.isArray(messages) ? messages[0] : undefined) as any;
+  if (!message || message.className === 'MessageEmpty' || message.id === undefined) {
     throw new Error('The stored Telegram message no longer exists in the channel.');
   }
-  const info = tgUtils.getFileInfo(message as never);
-  const size = typeof info.size === 'number' ? info.size : Number(info.size) || row.size_bytes;
-  if (typeof info.dcId !== 'number') {
-    throw new Error('Could not determine the Telegram data center for this file.');
-  }
-  return { message, dcId: info.dcId, location: info.location, size };
+  const { dcId, location, size } = telegramFileLocation(message);
+  return { message, dcId, location, size: size || row.size_bytes };
 }
 
 /**
@@ -1142,7 +1173,9 @@ async function streamTelegramFile(row: TelegramFileRow, req: Request, res: Respo
     }
   }
 
-  if (length === 0) {
+  if (length === 0 || req.method === 'HEAD') {
+    // HEAD is used by the UI to verify the link before triggering a save, so
+    // answer from metadata alone instead of pulling bytes from Telegram.
     res.end();
     return;
   }
