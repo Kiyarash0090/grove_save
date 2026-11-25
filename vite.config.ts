@@ -79,6 +79,7 @@ export default defineConfig(() => {
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
       allowedHosts: [
         'grovesave-production.up.railway.app',
+        'grovesave-production-ce075981.up.railway.app',
         '.railway.app',
         'localhost',
       ],
