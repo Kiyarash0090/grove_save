@@ -50,7 +50,6 @@ RUN npm install --omit=dev --legacy-peer-deps
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.ts ./
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/data ./data
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
