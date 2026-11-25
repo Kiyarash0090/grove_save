@@ -30,10 +30,13 @@ interface StoredUser {
   passwordHash?: string;
   passwordSalt?: string;
   provider: 'email' | 'google';
+  role: 'user' | 'admin';
   preferences: {
     theme: 'dark' | 'light';
     language: 'en' | 'fa' | 'ru' | 'zh';
     defaultQuality: string;
+    youtubeCookies?: string;
+    youtubePoToken?: string;
   };
 }
 
@@ -135,6 +138,7 @@ if (ADMIN_EMAIL && ADMIN_PASSWORD) {
     passwordHash: hash,
     passwordSalt: salt,
     provider: 'email',
+    role: 'admin',
     preferences: existing?.preferences || {
       theme: 'dark',
       language: 'en',
@@ -269,12 +273,16 @@ function extractYouTubeId(parsed: URL): string | null {
 let cachedYtDlpPath: string | null | undefined;
 let cachedYtDlpVersion: string | null | undefined;
 
+// Use python -m yt_dlp for cross-platform compatibility (Windows .exe issue)
+const YTDLP_CMD = process.platform === 'win32' ? 'python' : 'yt-dlp';
+const YTDLP_ARGS = process.platform === 'win32' ? ['-m', 'yt_dlp'] : [];
+
 async function getYtDlpPath(): Promise<string | null> {
   if (cachedYtDlpPath !== undefined) return cachedYtDlpPath;
   try {
-    const { stdout } = await execFileAsync('which', ['yt-dlp'], { timeout: 2000 });
-    const found = stdout.trim();
-    cachedYtDlpPath = found || null;
+    // Just verify yt-dlp is available via python module
+    const { stdout } = await execFileAsync(YTDLP_CMD, [...YTDLP_ARGS, '--version'], { timeout: 5000 });
+    cachedYtDlpPath = stdout.trim() ? 'available' : null;
   } catch {
     cachedYtDlpPath = null;
   }
@@ -286,7 +294,7 @@ async function getYtDlpVersion(): Promise<string | null> {
   const ytdlp = await getYtDlpPath();
   if (!ytdlp) return null;
   try {
-    const { stdout } = await execFileAsync(ytdlp, ['--version'], { timeout: 5000 });
+    const { stdout } = await execFileAsync(YTDLP_CMD, [...YTDLP_ARGS, '--version'], { timeout: 5000 });
     cachedYtDlpVersion = stdout.trim();
   } catch {
     cachedYtDlpVersion = null;
@@ -391,12 +399,12 @@ async function startServer() {
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', async (_req: Request, res: Response) => {
-    const ytdlp = await getYtDlpPath();
-    const ytdlpVersion = ytdlp ? await getYtDlpVersion() : null;
+    const ytdlpVersion = await getYtDlpVersion();
+    const ytdlpAvailable = Boolean(ytdlpVersion);
     res.json({
       status: 'ok',
-      engine: ytdlp ? 'express-ytdlp' : 'express-ytdl-core',
-      ytdlpAvailable: Boolean(ytdlp),
+      engine: ytdlpAvailable ? 'express-ytdlp' : 'express-ytdl-core',
+      ytdlpAvailable,
       ytdlpVersion,
     });
   });
@@ -433,6 +441,7 @@ async function startServer() {
       displayName,
       passwordHash: hash,
       passwordSalt: salt,
+      role: 'user',
       provider: 'email',
       preferences: {
         theme: 'dark',
@@ -506,6 +515,7 @@ async function startServer() {
           email,
           displayName: data.name || email.split('@')[0],
           provider: 'google',
+          role: 'user',
           preferences: {
             theme: 'dark',
             language: 'en',
@@ -555,6 +565,74 @@ async function startServer() {
     res.json({ user: publicUserView(user) });
   });
 
+  // YouTube Authentication endpoints (admin only)
+  app.get('/api/admin/youtube-auth', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    res.json({
+      youtubeCookies: user.preferences.youtubeCookies || '',
+      youtubePoToken: user.preferences.youtubePoToken || '',
+    });
+  });
+
+  app.put('/api/admin/youtube-auth', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = req.body as { youtubeCookies?: unknown; youtubePoToken?: unknown };
+    if (typeof body.youtubeCookies === 'string') {
+      user.preferences.youtubeCookies = body.youtubeCookies.trim();
+    }
+    if (typeof body.youtubePoToken === 'string') {
+      user.preferences.youtubePoToken = body.youtubePoToken.trim();
+    }
+    usersByEmail.set(user.email, user);
+    saveUsers(usersByEmail);
+    res.json({ success: true });
+  });
+
+  app.post('/api/admin/youtube-auth/test', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+    const available = await getYtDlpPath();
+    if (!available) {
+      res.status(500).json({ error: 'yt-dlp not available' });
+      return;
+    }
+    try {
+      const args = buildYtDlpArgs([
+        '--dump-single-json',
+        '--no-playlist',
+        '--no-warnings',
+        '--',
+        testUrl,
+      ]);
+      // Add cookies and PO token if configured
+      if (user.preferences.youtubeCookies) {
+        const cookieFile = path.join(CACHE_DIR, `cookies-${user.id}.txt`);
+        await fs.promises.writeFile(cookieFile, user.preferences.youtubeCookies);
+        args.splice(args.indexOf('--'), 0, '--cookies', cookieFile);
+      }
+      if (user.preferences.youtubePoToken) {
+        args.splice(args.indexOf('--'), 0, '--extractor-args', `youtube:po_token=${user.preferences.youtubePoToken}`);
+      }
+      const { stdout } = await execFileAsync(YTDLP_CMD, [...YTDLP_ARGS, ...args], { timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
+      const info = JSON.parse(stdout);
+      res.json({ success: true, title: info.title || 'Test video' });
+    } catch (err) {
+      res.json({ success: false, error: err instanceof Error ? err.message : 'Test failed' });
+    }
+  });
+
   app.post('/api/media/inspect', async (req: Request, res: Response) => {
     const body = req.body as { url?: unknown };
     const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
@@ -565,13 +643,13 @@ async function startServer() {
     }
 
     const ytId = extractYouTubeId(parsed);
-    const ytdlp = await getYtDlpPath();
+    const available = await getYtDlpPath();
 
-    if (ytdlp) {
+    if (available) {
       try {
         const { stdout } = await execFileAsync(
-          ytdlp,
-          buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', parsed.toString()]),
+          YTDLP_CMD,
+          [...YTDLP_ARGS, ...buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', parsed.toString()])],
           { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }
         );
         const info = JSON.parse(stdout) as {
@@ -706,9 +784,18 @@ async function startServer() {
     const isAudio = job.quality === 'audio';
     const ytId = extractYouTubeId(parsed);
 
+    // Get admin user for YouTube auth (first admin found)
+    let adminUser: StoredUser | undefined;
+    for (const u of usersByEmail.values()) {
+      if (u.role === 'admin') {
+        adminUser = u;
+        break;
+      }
+    }
+
     try {
-      const ytdlp = await getYtDlpPath();
-      if (ytdlp) {
+      const available = await getYtDlpPath();
+      if (available) {
         const targetH = String(selectTargetHeight(job.quality));
         const baseArgs = isAudio
           ? ['-x', '--audio-format', 'mp3', '-o', job.filePath, '--', parsed.toString()]
@@ -725,9 +812,29 @@ async function startServer() {
               '--',
               parsed.toString(),
             ];
+        // Build yt-dlp args with YouTube auth if available
+        let finalArgs = buildYtDlpArgs(baseArgs);
+        if (adminUser) {
+          if (adminUser.preferences.youtubeCookies) {
+            const cookieFile = path.join(CACHE_DIR, `cookies-${adminUser.id}.txt`);
+            await fs.promises.writeFile(cookieFile, adminUser.preferences.youtubeCookies);
+            // Insert before '--'
+            const dashIndex = finalArgs.indexOf('--');
+            if (dashIndex !== -1) {
+              finalArgs.splice(dashIndex, 0, '--cookies', cookieFile);
+            }
+          }
+          if (adminUser.preferences.youtubePoToken) {
+            const dashIndex = finalArgs.indexOf('--');
+            if (dashIndex !== -1) {
+              finalArgs.splice(dashIndex, 0, '--extractor-args', `youtube:po_token=${adminUser.preferences.youtubePoToken}`);
+            }
+          }
+        }
+
         // Use spawn to capture progress output
         await new Promise<void>((resolve, reject) => {
-          const child = spawn(ytdlp, buildYtDlpArgs(baseArgs), { shell: false });
+          const child = spawn(YTDLP_CMD, [...YTDLP_ARGS, ...finalArgs], { shell: false });
           let stderr = '';
           child.stdout.on('data', (data) => {
             const output = data.toString();
@@ -1110,8 +1217,8 @@ async function startServer() {
     const contentDisposition = buildContentDisposition(rawTitle, quality, ext);
     const ytId = extractYouTubeId(parsed);
 
-    const ytdlp = await getYtDlpPath();
-    if (ytdlp) {
+    const available = await getYtDlpPath();
+    if (available) {
       const targetH = String(selectTargetHeight(quality));
       const baseArgs = isAudio
         ? ['-x', '--audio-format', 'mp3', '-o', '-', '--', parsed.toString()]
@@ -1125,13 +1232,37 @@ async function startServer() {
             '--',
             parsed.toString(),
           ];
-      const args = buildYtDlpArgs(baseArgs);
+      // Build yt-dlp args with YouTube auth if available
+      let adminUser: StoredUser | undefined;
+      for (const u of usersByEmail.values()) {
+        if (u.role === 'admin') {
+          adminUser = u;
+          break;
+        }
+      }
+      let finalArgs = buildYtDlpArgs(baseArgs);
+      if (adminUser) {
+        if (adminUser.preferences.youtubeCookies) {
+          const cookieFile = path.join(CACHE_DIR, `cookies-${adminUser.id}.txt`);
+          await fs.promises.writeFile(cookieFile, adminUser.preferences.youtubeCookies);
+          const dashIndex = finalArgs.indexOf('--');
+          if (dashIndex !== -1) {
+            finalArgs.splice(dashIndex, 0, '--cookies', cookieFile);
+          }
+        }
+        if (adminUser.preferences.youtubePoToken) {
+          const dashIndex = finalArgs.indexOf('--');
+          if (dashIndex !== -1) {
+            finalArgs.splice(dashIndex, 0, '--extractor-args', `youtube:po_token=${adminUser.preferences.youtubePoToken}`);
+          }
+        }
+      }
 
       res.setHeader('Content-Type', isAudio ? 'audio/mpeg' : 'video/mp4');
       res.setHeader('Content-Disposition', contentDisposition);
       res.setHeader('X-Grove-Stream-Mode', 'live');
 
-      const child = spawn(ytdlp, args, { shell: false });
+      const child = spawn(YTDLP_CMD, [...YTDLP_ARGS, ...finalArgs], { shell: false });
       child.stdout.pipe(res);
       req.on('close', () => {
         if (!child.killed) child.kill('SIGTERM');

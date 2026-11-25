@@ -29,6 +29,7 @@ interface SettingsViewProps {
   user: AuthUser | null;
   onOpenAuth: () => void;
   onSignOut: () => void;
+  apiBase: string;
 }
 
 const LANGUAGES: { code: AppLanguage; label: string }[] = [
@@ -49,10 +50,82 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   user,
   onOpenAuth,
   onSignOut,
+  apiBase,
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const [clearedFeedback, setClearedFeedback] = useState(false);
+  const [youtubeCookies, setYoutubeCookies] = useState('');
+  const [youtubePoToken, setYoutubePoToken] = useState('');
+  const [youtubeLoading, setYoutubeLoading] = useState(false);
+  const [youtubeMessage, setYoutubeMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const fetchYouTubeAuth = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/admin/youtube-auth`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('grove_auth_token')}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setYoutubeCookies(data.youtubeCookies || '');
+        setYoutubePoToken(data.youtubePoToken || '');
+      }
+    } catch {}
+  };
+
+  const saveYouTubeAuth = async () => {
+    setYoutubeLoading(true);
+    setYoutubeMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/youtube-auth`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('grove_auth_token')}`,
+        },
+        body: JSON.stringify({ youtubeCookies, youtubePoToken }),
+      });
+      if (res.ok) {
+        setYoutubeMessage({ type: 'success', text: t.youtubeSaved });
+      } else {
+        setYoutubeMessage({ type: 'error', text: 'Failed to save' });
+      }
+    } catch {
+      setYoutubeMessage({ type: 'error', text: 'Failed to save' });
+    } finally {
+      setYoutubeLoading(false);
+    }
+  };
+
+  const testYouTubeAuth = async () => {
+    setYoutubeLoading(true);
+    setYoutubeMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/youtube-auth/test`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('grove_auth_token')}`,
+        },
+      });
+      const data = await res.json();
+      if (data.success) {
+        setYoutubeMessage({ type: 'success', text: t.youtubeTestSuccess });
+      } else {
+        setYoutubeMessage({ type: 'error', text: `${t.youtubeTestFailed}: ${data.error}` });
+      }
+    } catch {
+      setYoutubeMessage({ type: 'error', text: t.youtubeTestFailed });
+    } finally {
+      setYoutubeLoading(false);
+    }
+  };
+
+  // Load YouTube auth on mount if admin
+  React.useEffect(() => {
+    if (user?.role === 'admin') {
+      fetchYouTubeAuth();
+    }
+  }, [user]);
 
   const ChevronIcon = t.dir === 'rtl' ? ChevronLeft : ChevronRight;
 
@@ -256,6 +329,71 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       </section>
+
+      {/* Section 5: YouTube Authentication (Admin Only) */}
+      {user?.role === 'admin' && (
+        <section aria-labelledby="settings-youtube">
+          <h2
+            id="settings-youtube"
+            className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
+          >
+            <span className="text-red-600 dark:text-red-400 text-xs px-2 py-0.5 rounded bg-red-50 dark:bg-red-900/30">{t.adminOnly}</span>
+            {t.sectionYouTube}
+          </h2>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <div className="px-4 py-3 border-b border-black/10 dark:border-white/10">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.youtubeCookiesDesc}</p>
+            </div>
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1">{t.youtubeCookiesLabel}</label>
+                <textarea
+                  value={youtubeCookies}
+                  onChange={(e) => setYoutubeCookies(e.target.value)}
+                  placeholder={t.youtubeCookiesPlaceholder}
+                  rows={4}
+                  className="w-full px-3 py-2 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 text-sm text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                />
+              </div>
+              <div className="h-px bg-black/10 dark:bg-white/10" />
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1">{t.youtubePoTokenLabel}</label>
+                <input
+                  type="password"
+                  value={youtubePoToken}
+                  onChange={(e) => setYoutubePoToken(e.target.value)}
+                  placeholder={t.youtubePoTokenPlaceholder}
+                  className="w-full px-3 py-2 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 text-sm text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                />
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{t.youtubePoTokenDesc}</p>
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={saveYouTubeAuth}
+                  disabled={youtubeLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold disabled:opacity-50"
+                >
+                  {youtubeLoading ? '...' : t.youtubeSaveBtn}
+                </button>
+                <button
+                  type="button"
+                  onClick={testYouTubeAuth}
+                  disabled={youtubeLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold disabled:opacity-50"
+                >
+                  {t.youtubeTestBtn}
+                </button>
+              </div>
+              {youtubeMessage && (
+                <div className={`text-xs p-2 rounded-lg ${youtubeMessage.type === 'success' ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400'}`}>
+                  {youtubeMessage.text}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
 
       {showIOSGuide && (
         <div

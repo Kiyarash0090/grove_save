@@ -75,6 +75,21 @@ export interface TranslationDict {
   continueAsGuest: string;
   authErrorRequired: string;
   offlineBanner: string;
+  // YouTube Auth Settings
+  sectionYouTube: string;
+  youtubeCookiesLabel: string;
+  youtubeCookiesDesc: string;
+  youtubeCookiesPlaceholder: string;
+  youtubePoTokenLabel: string;
+  youtubePoTokenDesc: string;
+  youtubePoTokenPlaceholder: string;
+  youtubeSaveBtn: string;
+  youtubeSaved: string;
+  youtubeTestBtn: string;
+  youtubeTestSuccess: string;
+  youtubeTestFailed: string;
+  adminOnly: string;
+  sectionAdmin: string;
 }
 
 export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
@@ -159,6 +174,21 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueAsGuest: 'Continue as Guest',
     authErrorRequired: 'Please enter a valid email and a password of at least 6 characters.',
     offlineBanner: 'Offline mode — connect to fetch or save media.',
+    // YouTube Auth Settings
+    sectionYouTube: 'YouTube Authentication',
+    youtubeCookiesLabel: 'Cookies',
+    youtubeCookiesDesc: 'Export cookies from browser (Netscape format) for age-restricted/private videos',
+    youtubeCookiesPlaceholder: 'Paste cookies in Netscape format...',
+    youtubePoTokenLabel: 'PO Token',
+    youtubePoTokenDesc: 'Proof of Origin token from youtube.com (optional, for bot detection bypass)',
+    youtubePoTokenPlaceholder: 'Paste PO token...',
+    youtubeSaveBtn: 'Save YouTube Auth',
+    youtubeSaved: 'YouTube authentication saved',
+    youtubeTestBtn: 'Test Connection',
+    youtubeTestSuccess: 'YouTube authentication working',
+    youtubeTestFailed: 'YouTube authentication failed',
+    adminOnly: 'Admin only',
+    sectionAdmin: 'Admin Panel',
   },
   fa: {
     dir: 'rtl',
@@ -241,6 +271,21 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueAsGuest: 'ادامه به عنوان مهمان',
     authErrorRequired: 'لطفاً جیمیل معتبر و رمز عبور حداقل ۶ کاراکتری وارد کنید.',
     offlineBanner: 'حالت آفلاین — برای دریافت فایل به اینترنت متصل شوید.',
+    // YouTube Auth Settings
+    sectionYouTube: 'احراز هویت یوتیوب',
+    youtubeCookiesLabel: 'کوکی‌ها',
+    youtubeCookiesDesc: 'کوکی‌ها را از مرورگر صادر کنید (فرمت نتسکیپ) برای ویدیوهای محدود سنی/خصوصی',
+    youtubeCookiesPlaceholder: 'کوکی‌ها را در فرمت نتسکیپ جایگذاری کنید...',
+    youtubePoTokenLabel: 'توکن PO',
+    youtubePoTokenDesc: 'توکن Proof of Origin از youtube.com (اختیاری، برای عبور از تشخیص ربات)',
+    youtubePoTokenPlaceholder: 'توکن PO را جایگذاری کنید...',
+    youtubeSaveBtn: 'ذخیره احراز هویت یوتیوب',
+    youtubeSaved: 'احراز هویت یوتیوب ذخیره شد',
+    youtubeTestBtn: 'تست اتصال',
+    youtubeTestSuccess: 'احراز هویت یوتیوب کار می‌کند',
+    youtubeTestFailed: 'احراز هویت یوتیوب ناموفق بود',
+    adminOnly: 'فقط ادمین',
+    sectionAdmin: 'پنل مدیریت',
   },
   ru: {
     dir: 'ltr',
@@ -323,6 +368,21 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueAsGuest: 'Продолжить как гость',
     authErrorRequired: 'Введите корректный email и пароль не менее 6 символов.',
     offlineBanner: 'Нет сети — подключитесь к интернету для загрузки.',
+    // YouTube Auth Settings
+    sectionYouTube: 'YouTube аутентификация',
+    youtubeCookiesLabel: 'Cookies',
+    youtubeCookiesDesc: 'Экспортируйте cookies из браузера (формат Netscape) для возрастно ограниченных/приватных видео',
+    youtubeCookiesPlaceholder: 'Вставьте cookies в формате Netscape...',
+    youtubePoTokenLabel: 'PO Token',
+    youtubePoTokenDesc: 'Proof of Origin токен с youtube.com (опционально, для обхода обнаружения ботов)',
+    youtubePoTokenPlaceholder: 'Вставьте PO токен...',
+    youtubeSaveBtn: 'Сохранить YouTube аутентификацию',
+    youtubeSaved: 'YouTube аутентификация сохранена',
+    youtubeTestBtn: 'Тест соединения',
+    youtubeTestSuccess: 'YouTube аутентификация работает',
+    youtubeTestFailed: 'YouTube аутентификация не удалась',
+    adminOnly: 'Только для админа',
+    sectionAdmin: 'Панель админа',
   },
   zh: {
     dir: 'ltr',
@@ -405,5 +465,20 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueAsGuest: '继续作为访客',
     authErrorRequired: '请输入有效邮箱和至少 6 位的密码。',
     offlineBanner: '离线状态 — 请连接网络以解析或保存媒体。',
+    // YouTube Auth Settings
+    sectionYouTube: 'YouTube 认证',
+    youtubeCookiesLabel: 'Cookies',
+    youtubeCookiesDesc: '从浏览器导出 cookies (Netscape 格式) 用于年龄限制/私密视频',
+    youtubeCookiesPlaceholder: '粘贴 Netscape 格式的 cookies...',
+    youtubePoTokenLabel: 'PO Token',
+    youtubePoTokenDesc: '来自 youtube.com 的 Proof of Origin 令牌 (可选，用于绕过机器人检测)',
+    youtubePoTokenPlaceholder: '粘贴 PO 令牌...',
+    youtubeSaveBtn: '保存 YouTube 认证',
+    youtubeSaved: 'YouTube 认证已保存',
+    youtubeTestBtn: '测试连接',
+    youtubeTestSuccess: 'YouTube 认证正常工作',
+    youtubeTestFailed: 'YouTube 认证失败',
+    adminOnly: '仅管理员',
+    sectionAdmin: '管理员面板',
   },
 };
