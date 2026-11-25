@@ -35,9 +35,26 @@ export default function App() {
     }
   });
 
-  // Auth token stays in React memory only (never localStorage)
-  const [authToken, setAuthToken] = useState<string | null>(null);
-  const [user, setUser] = useState<AuthUser | null>(null);
+  // Load auth token from localStorage on initial render
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('grove_auth_token');
+    }
+    return null;
+  });
+  const [user, setUser] = useState<AuthUser | null>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('grove_user');
+      if (saved) {
+        try {
+          return JSON.parse(saved) as AuthUser;
+        } catch {
+          return null;
+        }
+      }
+    }
+    return null;
+  });
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [isRedGlow, setIsRedGlow] = useState(false);
 
@@ -113,6 +130,8 @@ export default function App() {
   const handleAuthenticated = (token: string, authedUser: AuthUser) => {
     setAuthToken(token);
     setUser(authedUser);
+    localStorage.setItem('grove_auth_token', token);
+    localStorage.setItem('grove_user', JSON.stringify(authedUser));
     if (authedUser.preferences) {
       if (authedUser.preferences.theme === 'dark' || authedUser.preferences.theme === 'light') {
         setTheme(authedUser.preferences.theme);
@@ -134,6 +153,8 @@ export default function App() {
   const handleSignOut = () => {
     setAuthToken(null);
     setUser(null);
+    localStorage.removeItem('grove_auth_token');
+    localStorage.removeItem('grove_user');
   };
 
   const switchTab = (next: TabIndex) => {

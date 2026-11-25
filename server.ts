@@ -714,9 +714,11 @@ async function startServer() {
           ? ['-x', '--audio-format', 'mp3', '-o', job.filePath, '--', parsed.toString()]
           : [
               '-f',
-              `best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`,
+              // Flexible format selection with fallback chain
+              `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`,
               '--merge-output-format',
               'mp4',
+              '--recode-video', 'mp4',  // Force recode to mp4 if needed
               '-o',
               job.filePath,
               '--',
@@ -1090,7 +1092,9 @@ async function startServer() {
         ? ['-x', '--audio-format', 'mp3', '-o', '-', '--', parsed.toString()]
         : [
             '-f',
-            `best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`,
+            // Flexible format selection with fallback chain
+            `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`,
+            '--recode-video', 'mp4',  // Force recode to mp4 if needed
             '-o',
             '-',
             '--',
