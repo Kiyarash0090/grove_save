@@ -1,17 +1,17 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -e
 
-DATA_PATH="${DATA_DIR:-${RAILWAY_VOLUME_MOUNT_PATH:-/app/data}}"
+# Ensure data and cache directories exist and are writable (fixing Railway volume permission issues)
+mkdir -p /app/data/cache /app/data/bin /app/data/yt-dlp-plugins /app/data/backups
+chmod -R 777 /app/data || true
 
-mkdir -p "$DATA_PATH/cache" "$DATA_PATH/bin" "$DATA_PATH/yt-dlp-plugins"
-
-if [ -d "/opt/bgutil-pot/plugin/yt_dlp_plugins" ] && [ ! -e "$DATA_PATH/yt-dlp-plugins/yt_dlp_plugins/extractor/getpot_bgutil.py" ]; then
-  cp -r /opt/bgutil-pot/plugin/yt_dlp_plugins "$DATA_PATH/yt-dlp-plugins/" 2>/dev/null || true
+# Start bgutil PO token provider server in background on port 4416
+if [ -d "/opt/bgutil/server" ]; then
+    echo "Starting bgutil YouTube PO Token provider server..."
+    cd /opt/bgutil/server
+    npm start &
+    cd /app
 fi
 
-if [ "$(id -u)" = "0" ]; then
-  chown -R grovesave:nodejs "$DATA_PATH" 2>/dev/null || true
-  exec su-exec grovesave "$@"
-fi
-
+# Start the main Node.js application
 exec "$@"

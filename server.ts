@@ -66,20 +66,24 @@ const XRAY_CONFIG_FILE = path.resolve(DATA_DIR, 'xray-runtime.json');
 const BACKUP_DIR = path.resolve(DATA_DIR, 'backups');
 
 function ensureDataDir(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(CACHE_DIR)) {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(BIN_DIR)) {
-    fs.mkdirSync(BIN_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(YT_DLP_PLUGINS_DIR)) {
-    fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(BACKUP_DIR)) {
-    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(CACHE_DIR)) {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(BIN_DIR)) {
+      fs.mkdirSync(BIN_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(YT_DLP_PLUGINS_DIR)) {
+      fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
+    }
+    if (!fs.existsSync(BACKUP_DIR)) {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    }
+  } catch (err: unknown) {
+    console.error('Warning: Failed to create DATA_DIR with permissions, using fallback tempdir:', err);
   }
 }
 

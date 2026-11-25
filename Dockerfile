@@ -1,75 +1,52 @@
-# Grove Save - Dockerfile
-# Multi-stage build for Node.js app with yt-dlp support
-
-# Base stage - install system dependencies
-FROM node:22-alpine AS base
-
-# Install system dependencies including yt-dlp and ffmpeg
-RUN apk add --no-cache \
-    python3 \
-    py3-pip \
-    ffmpeg \
-    curl \
-    ca-certificates
-
-# Install yt-dlp via pip with EJS support for YouTube challenges
-RUN pip3 install --no-cache-dir --break-system-packages "yt-dlp[default]"
-
-# Install yt-dlp remote components (EJS for YouTube JS challenges) - run once to download
-RUN yt-dlp --remote-components ejs:github 2>/dev/null || true
-
-# Verify installations
-RUN node --version && npm --version && yt-dlp --version && ffmpeg -version && yt-dlp --version
-
-# Build stage
-FROM base AS builder
+# Grove Save - Dockerfile with PO Token Provider (bgutil-ytdlp-pot-provider)
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 
-# Copy package files
+# Install system dependencies including python3, git, ffmpeg, curl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    unzip \
+    ffmpeg \
+    python3 \
+    python3-pip \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install yt-dlp and bgutil-ytdlp-pot-provider plugin
+RUN pip3 install --no-cache-dir --break-system-packages --prefer-binary bgutil-ytdlp-pot-provider yt-dlp || true
+
+# Clone and install bgutil-ytdlp-pot-provider plugin server to /opt/bgutil
+RUN git clone https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil \
+    && if [ -d "/opt/bgutil/server" ]; then cd /opt/bgutil/server && npm install && (npx tsc || true); fi \
+    && mkdir -p /root/.yt-dlp/plugins /root/yt-dlp-plugins /root/.config/yt-dlp \
+    && echo '--extractor-args "youtubepot:provider=http://127.0.0.1:4416"' > /etc/yt-dlp.conf \
+    && cp /etc/yt-dlp.conf /root/.config/yt-dlp/config
+
+# Copy dependency definitions and install
 COPY package*.json ./
+RUN npm install --legacy-peer-deps --no-audit --no-fund
 
-# Install dependencies (use npm install since package-lock.json may not exist)
-RUN npm install --legacy-peer-deps
-
-# Copy source code
+# Copy source files
 COPY . .
 
-# Build the application
+# Build application
 RUN npm run build
 
-# Production stage
-FROM base AS production
+# Setup entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-WORKDIR /app
+# Create data and cache directories
+RUN mkdir -p /app/data/cache
 
-# Copy package files
-COPY package*.json ./
+ENV PORT=3000
+ENV NODE_ENV=production
+ENV PYTHONUNBUFFERED=1
 
-# Install production dependencies only
-RUN npm install --omit=dev --legacy-peer-deps
+EXPOSE 3000 4416
 
-# Copy built application from builder
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server.ts ./
-COPY --from=builder /app/public ./public
-
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S grovesave -u 1001 -G nodejs
-
-# Create data and cache directories with proper permissions
-RUN mkdir -p /app/data/cache && \
-    chown -R grovesave:nodejs /app
-
-USER grovesave
-
-# Expose port
-EXPOSE 3000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
-
-# Start the application
-CMD ["node", "server.ts"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["npm", "start"]
