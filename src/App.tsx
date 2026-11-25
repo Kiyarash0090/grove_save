@@ -150,6 +150,16 @@ export default function App() {
     }
   };
 
+  // Prevent duplicate history entries
+  const handleAddHistory = (item: SavedItem) => {
+    setHistory((prev) => {
+      // Check if URL already exists in history
+      const exists = prev.some((h) => h.url === item.url);
+      if (exists) return prev;
+      return [item, ...prev].slice(0, 25);
+    });
+  };
+
   const handleSignOut = () => {
     setAuthToken(null);
     setUser(null);
@@ -272,7 +282,7 @@ export default function App() {
                 apiBase={apiBase}
                 defaultQuality={defaultQuality}
                 history={history}
-                onAddHistory={(item) => setHistory((prev) => [item, ...prev].slice(0, 25))}
+                onAddHistory={handleAddHistory}
                 onYouTubeGlowChange={setIsRedGlow}
               />
             </motion.div>

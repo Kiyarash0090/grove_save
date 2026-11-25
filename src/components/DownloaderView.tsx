@@ -317,6 +317,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             setJobProgress(100);
             setJobStage('ready');
 
+            // Prevent duplicate history entries - only add if not already in history
             onAddHistory({
               id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
               jobId,

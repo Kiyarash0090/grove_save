@@ -721,11 +721,36 @@ async function startServer() {
               '--recode-video', 'mp4',  // Force recode to mp4 if needed
               '-o',
               job.filePath,
+              '--newline',  // Output progress on new lines for parsing
               '--',
               parsed.toString(),
             ];
-        await execFileAsync(ytdlp, buildYtDlpArgs(baseArgs), { timeout: 15 * 60 * 1000 });
-        await finalizeJobFile(job);
+        // Use spawn to capture progress output
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(ytdlp, buildYtDlpArgs(baseArgs), { shell: false });
+          let stderr = '';
+          child.stdout.on('data', (data) => {
+            const output = data.toString();
+            // Parse progress from yt-dlp output like "[download]  45.2% of 12.34MiB at 1.23MiB/s ETA 00:05"
+            const progressMatch = output.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+            if (progressMatch) {
+              const pct = Math.min(95, Math.max(5, Math.floor(parseFloat(progressMatch[1]))));
+              job.progress = pct;
+            }
+          });
+          child.stderr.on('data', (data) => {
+            stderr += data.toString();
+          });
+          child.on('close', async (code) => {
+            if (code === 0) {
+              await finalizeJobFile(job);
+              resolve();
+            } else {
+              reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+            }
+          });
+          child.on('error', reject);
+        });
         return;
       }
 
