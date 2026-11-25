@@ -1,0 +1,145 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-display: 'Anton', 'Vazirmatn', sans-serif;
+    --font-sans: 'Plus Jakarta Sans', 'Vazirmatn', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: contain;
+    overflow-x: clip;
+    color-scheme: light;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  }
+
+  html.dark {
+    color-scheme: dark;
+    scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    overflow-x: clip;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.2);
+    border-radius: 9999px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(0, 0, 0, 0.36);
+  }
+
+  .dark *::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.22);
+  }
+
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.4);
+  }
+}
+
+.grove-wordmark {
+  font-family: var(--font-display);
+  letter-spacing: 0.03em;
+  text-transform: lowercase;
+  line-height: 0.95;
+  text-shadow:
+    -2px -2px 0 #000000,
+     2px -2px 0 #000000,
+    -2px  2px 0 #000000,
+     2px  2px 0 #000000,
+     0px  4px 0 #000000,
+     0px  0px 18px rgba(255, 255, 255, 0.35);
+}
+
+html:not(.dark) .grove-wordmark {
+  color: #ffffff;
+  text-shadow:
+    -2px -2px 0 #000000,
+     2px -2px 0 #000000,
+    -2px  2px 0 #000000,
+     2px  2px 0 #000000,
+     0px  4px 0 #000000,
+     0px  6px 14px rgba(0, 0, 0, 0.22);
+}
+
+.neon-white-box {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.14),
+    0 12px 32px -8px rgba(0, 0, 0, 0.14),
+    0 0 28px rgba(255, 255, 255, 0.85);
+}
+
+.dark .neon-white-box {
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.28),
+    0 0 28px rgba(255, 255, 255, 0.18),
+    inset 0 0 16px rgba(255, 255, 255, 0.05);
+}
+
+.neon-red-box {
+  box-shadow:
+    0 0 0 1px rgba(239, 68, 68, 0.55),
+    0 0 36px rgba(239, 68, 68, 0.38),
+    0 12px 32px -10px rgba(220, 38, 38, 0.35);
+}
+
+.dark .neon-red-box {
+  box-shadow:
+    0 0 0 1px rgba(255, 45, 65, 0.72),
+    0 0 42px rgba(255, 30, 52, 0.45),
+    inset 0 0 18px rgba(255, 30, 52, 0.12);
+}
+
+.neon-dock {
+  box-shadow:
+    0 10px 30px -6px rgba(0, 0, 0, 0.22),
+    0 0 22px rgba(255, 255, 255, 0.9),
+    0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+.dark .neon-dock {
+  box-shadow:
+    0 14px 36px -6px rgba(0, 0, 0, 0.9),
+    0 0 26px rgba(255, 255, 255, 0.26),
+    0 0 0 1px rgba(255, 255, 255, 0.32);
+}
+
+@keyframes radiantFloat {
+  0%, 100% {
+    transform: translate3d(-50%, 0, 0) scale(1);
+    opacity: 0.72;
+  }
+  50% {
+    transform: translate3d(-50%, -18px, 0) scale(1.09);
+    opacity: 1;
+  }
+}
+
+.animate-radiant-float {
+  animation: radiantFloat 7s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-radiant-float {
+    animation: none;
+  }
+}

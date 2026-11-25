@@ -1,0 +1,6 @@
+{
+  "name": "Grove Save",
+  "description": "Fast, ad-free Android media downloader with pure black & white neon themes, selectable video quality, and multi-language support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
