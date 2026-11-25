@@ -14,6 +14,7 @@ import {
   Loader2,
   LogIn,
   LogOut,
+  Megaphone,
   Moon,
   Play,
   Plus,
@@ -24,10 +25,12 @@ import {
   Smartphone,
   Sun,
   Trash2,
+  Upload,
   User,
 } from 'lucide-react';
 import type { AppLanguage, AppTheme, TranslationDict } from '../i18n';
 import type { AuthUser } from './AuthModal';
+import type { AnnouncementItem } from './InfoView';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface SettingsViewProps {
@@ -45,6 +48,8 @@ interface SettingsViewProps {
   onOpenAuth: () => void;
   onSignOut: () => void;
   apiBase: string;
+  announcements: AnnouncementItem[];
+  onAnnouncementsChange: (items: AnnouncementItem[]) => void;
 }
 
 const LANGUAGES: { code: AppLanguage; label: string }[] = [
@@ -71,12 +76,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onOpenAuth,
   onSignOut,
   apiBase,
+  announcements,
+  onAnnouncementsChange,
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const [clearedFeedback, setClearedFeedback] = useState(false);
 
-  const [adminPage, setAdminPage] = useState<'main' | 'xray' | 'pot' | 'telegram'>('main');
+  const [adminPage, setAdminPage] = useState<'main' | 'xray' | 'pot' | 'telegram' | 'announcements'>('main');
+  const [announcementTitle, setAnnouncementTitle] = useState('');
+  const [announcementBody, setAnnouncementBody] = useState('');
+  const [announcementBusy, setAnnouncementBusy] = useState(false);
+  const [announcementMessage, setAnnouncementMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Admin-only YouTube Cookies state (PO Token is handled automatically by bgutil-ytdlp-pot-provider)
   const [youtubeCookies, setYoutubeCookies] = useState('');
@@ -839,6 +850,48 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const restoreDbBackup = async (file: File) => {
+    if (!isAdmin || dbBackupBusy) return;
+    if (!confirm('بازیابی دیتابیس تمام اطلاعات فعلی را جایگزین می‌کند. آیا مطمئن هستید؟')) return;
+    setDbBackupBusy(true);
+    setDbBackupMessage(null);
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const base64 = (reader.result as string).split(',')[1] || '';
+          const res = await fetch(`${apiBase}/api/admin/db/restore`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: getAuthHeaders(true),
+            body: JSON.stringify({ fileBase64: base64 }),
+          });
+          const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+          if (res.ok && data.success) {
+            setDbBackupMessage(t.dbBackupRestoredMsg);
+            setTimeout(() => {
+              window.location.reload();
+            }, 1500);
+          } else {
+            setDbBackupMessage(data.error || 'Restore failed');
+          }
+        } catch {
+          setDbBackupMessage('Restore failed');
+        } finally {
+          setDbBackupBusy(false);
+        }
+      };
+      reader.onerror = () => {
+        setDbBackupMessage('Could not read backup file');
+        setDbBackupBusy(false);
+      };
+      reader.readAsDataURL(file);
+    } catch {
+      setDbBackupMessage('Restore failed');
+      setDbBackupBusy(false);
+    }
+  };
+
   const saveTelegramSettings = async (overrides: Record<string, unknown> = {}) => {
     if (!isAdmin) return;
     setTgLoading(true);
@@ -1086,10 +1139,70 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const ChevronIcon = t.dir === 'rtl' ? ChevronLeft : ChevronRight;
   const BackArrowIcon = t.dir === 'rtl' ? ArrowRight : ArrowLeft;
 
-  const openAdminPage = (page: 'main' | 'xray' | 'pot' | 'telegram') => {
+  const openAdminPage = (page: 'main' | 'xray' | 'pot' | 'telegram' | 'announcements') => {
     setAdminPage(page);
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const handlePublishAnnouncement = async () => {
+    if (!isAdmin || announcementBusy) return;
+    const body = announcementBody.trim();
+    if (!body) return;
+    setAnnouncementBusy(true);
+    setAnnouncementMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/announcements`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({
+          title: announcementTitle.trim(),
+          body,
+        }),
+      });
+      const data = (await res.json().catch(() => null)) as { items?: AnnouncementItem[]; error?: string } | null;
+      if (!res.ok) {
+        setAnnouncementMessage({ type: 'error', text: data?.error || t.downloadFailed });
+      } else {
+        if (Array.isArray(data?.items)) {
+          onAnnouncementsChange(data.items);
+        }
+        setAnnouncementTitle('');
+        setAnnouncementBody('');
+        setAnnouncementMessage({ type: 'success', text: t.announcementPublishedMsg });
+      }
+    } catch {
+      setAnnouncementMessage({ type: 'error', text: t.downloadFailed });
+    } finally {
+      setAnnouncementBusy(false);
+    }
+  };
+
+  const handleDeleteAnnouncement = async (id: string) => {
+    if (!isAdmin || announcementBusy) return;
+    setAnnouncementBusy(true);
+    setAnnouncementMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/announcements/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json().catch(() => null)) as { items?: AnnouncementItem[]; error?: string } | null;
+      if (!res.ok) {
+        setAnnouncementMessage({ type: 'error', text: data?.error || t.downloadFailed });
+      } else {
+        if (Array.isArray(data?.items)) {
+          onAnnouncementsChange(data.items);
+        }
+        setAnnouncementMessage({ type: 'success', text: t.announcementDeletedMsg });
+      }
+    } catch {
+      setAnnouncementMessage({ type: 'error', text: t.downloadFailed });
+    } finally {
+      setAnnouncementBusy(false);
     }
   };
 
@@ -2090,7 +2203,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <a
                   href={`${apiBase}/api/admin/db/backup`}
                   download
@@ -2108,6 +2221,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <Database className="w-4 h-4 shrink-0" />
                   <span>{dbBackupBusy ? '...' : t.dbBackupCreateBtn}</span>
                 </button>
+                <label className="w-full min-h-[44px] px-4 rounded-xl bg-white dark:bg-black border border-black/15 dark:border-white/20 text-black dark:text-white text-sm font-semibold inline-flex items-center justify-center gap-2 cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors">
+                  <Upload className="w-4 h-4 shrink-0" />
+                  <span>{dbBackupBusy ? '...' : t.dbBackupRestoreBtn}</span>
+                  <input
+                    type="file"
+                    accept=".db"
+                    className="hidden"
+                    disabled={dbBackupBusy}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        void restoreDbBackup(file);
+                        e.target.value = '';
+                      }
+                    }}
+                  />
+                </label>
               </div>
 
               {dbBackupMessage && (
@@ -2142,6 +2272,138 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 )}
               </div>
             </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (isAdmin && adminPage === 'announcements') {
+    return (
+      <div className="max-w-3xl mx-auto pb-28 space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+          <button
+            type="button"
+            onClick={() => openAdminPage('main')}
+            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+          >
+            <BackArrowIcon className="w-4 h-4 shrink-0" />
+            <span>{t.backToSettings}</span>
+          </button>
+        </div>
+
+        <div className="px-1">
+          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">{t.sectionAdmin}</p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-black dark:text-white flex items-center gap-2.5">
+            <Megaphone className="w-6 h-6 shrink-0" />
+            <span>{t.adminAnnouncementsSection}</span>
+          </h1>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.adminAnnouncementsDesc}</p>
+        </div>
+
+        <section aria-label={t.adminAnnouncementsSection}>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 p-4 space-y-4">
+            <div className="space-y-1.5">
+              <label
+                htmlFor="admin-announcement-title"
+                className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300"
+              >
+                {t.announcementTitleLabel}
+              </label>
+              <input
+                id="admin-announcement-title"
+                type="text"
+                maxLength={160}
+                value={announcementTitle}
+                onChange={(e) => setAnnouncementTitle(e.target.value)}
+                placeholder={t.announcementTitlePlaceholder}
+                className="w-full min-h-[44px] px-3.5 rounded-xl bg-white dark:bg-black border border-black/15 dark:border-white/20 text-sm text-black dark:text-white placeholder:text-zinc-400 outline-none focus:border-black dark:focus:border-white"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                htmlFor="admin-announcement-body"
+                className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300"
+              >
+                {t.announcementBodyLabel}
+              </label>
+              <textarea
+                id="admin-announcement-body"
+                rows={4}
+                maxLength={2000}
+                value={announcementBody}
+                onChange={(e) => setAnnouncementBody(e.target.value)}
+                placeholder={t.announcementBodyPlaceholder}
+                className="w-full p-3.5 rounded-xl bg-white dark:bg-black border border-black/15 dark:border-white/20 text-sm text-black dark:text-white placeholder:text-zinc-400 outline-none focus:border-black dark:focus:border-white resize-y"
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void handlePublishAnnouncement()}
+              disabled={announcementBusy || !announcementBody.trim()}
+              className="w-full min-h-[46px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {announcementBusy ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Megaphone className="w-4 h-4" />
+              )}
+              <span>{t.announcementPublishBtn}</span>
+            </button>
+
+            {announcementMessage && (
+              <div
+                className={`rounded-xl px-3.5 py-2.5 text-xs flex items-center gap-2 ${
+                  announcementMessage.type === 'success'
+                    ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25'
+                    : 'bg-red-500/10 text-red-700 dark:text-red-300 border border-red-500/25'
+                }`}
+              >
+                {announcementMessage.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                )}
+                <span className="break-words min-w-0">{announcementMessage.text}</span>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section aria-label={t.announcementsTitle}>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            {announcements.length === 0 ? (
+              <div className="px-4 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
+                {t.announcementEmptyAdmin}
+              </div>
+            ) : (
+              <div className="divide-y divide-black/10 dark:divide-white/10">
+                {announcements.map((item) => (
+                  <div key={item.id} className="p-4 flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="text-sm font-semibold text-black dark:text-white truncate">
+                        {item.title || t.announcementsTitle}
+                      </div>
+                      <p className="text-xs text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap break-words leading-relaxed">
+                        {item.body}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteAnnouncement(item.id)}
+                      disabled={announcementBusy}
+                      aria-label={t.announcementDeleteBtn}
+                      className="min-h-[36px] px-3 rounded-lg border border-red-500/25 text-red-600 dark:text-red-400 text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-red-500/10 transition shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{t.announcementDeleteBtn}</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </section>
       </div>
@@ -2445,6 +2707,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     {tgStatus?.signedIn && tgEnabled
                       ? `${t.telegramConnected} · ${tgFileCount} ${t.telegramFilesCount}`
                       : t.telegramNavDesc}
+                  </span>
+                </span>
+              </span>
+              <ChevronIcon className="w-4 h-4 text-zinc-400 shrink-0" />
+            </button>
+
+            <div className="h-px bg-black/10 dark:bg-white/10 ms-16" />
+
+            <button
+              type="button"
+              onClick={() => openAdminPage('announcements')}
+              className="w-full min-h-[64px] px-4 py-3 flex items-center justify-between gap-3 text-start hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            >
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
+                  <Megaphone className="w-4 h-4 text-black dark:text-white" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-black dark:text-white truncate">
+                    {t.sectionAdmin} · {t.adminAnnouncementsSection}
+                  </span>
+                  <span className="block text-xs text-zinc-500 dark:text-zinc-400 truncate mt-0.5">
+                    {announcements.length > 0
+                      ? `${announcements.length} ${t.itemsCount}`
+                      : t.adminAnnouncementsDesc}
                   </span>
                 </span>
               </span>

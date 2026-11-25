@@ -78,6 +78,7 @@ resolveWorkingPaths();
 let CACHE_DIR = path.resolve(DATA_DIR, 'cache');
 let BIN_DIR = path.resolve(DATA_DIR, 'bin');
 let YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
+let PARTH_DL_DIR = path.resolve(DATA_DIR, 'parth-dl');
 let USERS_FILE = path.resolve(DATA_DIR, 'users.json');
 let ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
 let YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
@@ -90,6 +91,7 @@ function ensureDataDir(): void {
   CACHE_DIR = path.resolve(DATA_DIR, 'cache');
   BIN_DIR = path.resolve(DATA_DIR, 'bin');
   YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
+  PARTH_DL_DIR = path.resolve(DATA_DIR, 'parth-dl');
   USERS_FILE = path.resolve(DATA_DIR, 'users.json');
   ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
   YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
@@ -111,13 +113,32 @@ function ensureDataDir(): void {
   }
 }
 
+type DownloadFileExt = 'mp4' | 'mp3' | 'jpg' | 'png' | 'webp' | 'zip';
+
+function getMimeTypeForExt(ext: DownloadFileExt): string {
+  switch (ext) {
+    case 'mp3':
+      return 'audio/mpeg';
+    case 'jpg':
+      return 'image/jpeg';
+    case 'png':
+      return 'image/png';
+    case 'webp':
+      return 'image/webp';
+    case 'zip':
+      return 'application/zip';
+    default:
+      return 'video/mp4';
+  }
+}
+
 interface DownloadJob {
   id: string;
   url: string;
   title: string;
   quality: string;
   audioFormatId?: string;
-  ext: 'mp4' | 'mp3';
+  ext: DownloadFileExt;
   mimeType: string;
   status: 'downloading' | 'processing' | 'ready' | 'error';
   progress: number;
@@ -197,7 +218,7 @@ interface UserHistoryItem {
 }
 
 ensureDataDir();
-const db = new DatabaseSync(DB_FILE);
+let db = new DatabaseSync(DB_FILE);
 db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
@@ -239,7 +260,7 @@ db.exec(`
     thumbnail TEXT,
     saved_at TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    UNIQUE(user_id, url)
+    UNIQUE(user_id, url, quality)
   );
   CREATE INDEX IF NOT EXISTS idx_history_user_created ON download_history(user_id, created_at DESC);
 
@@ -264,7 +285,57 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tg_files_user_created ON telegram_files(user_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_tg_files_job ON telegram_files(job_id);
+
+  CREATE TABLE IF NOT EXISTS announcements (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    author_name TEXT NOT NULL DEFAULT 'Admin',
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at DESC);
 `);
+
+// Migrate existing download_history tables from UNIQUE(user_id, url) to UNIQUE(user_id, url, quality)
+try {
+  const histTableRow = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='download_history'")
+    .get() as { sql?: string } | undefined;
+  const histDdl = histTableRow?.sql || '';
+  if (histDdl && !/UNIQUE\s*\(\s*user_id\s*,\s*url\s*,\s*quality\s*\)/i.test(histDdl)) {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE download_history_v2 (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        job_id TEXT,
+        url TEXT NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT NOT NULL,
+        quality TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        thumbnail TEXT,
+        saved_at TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(user_id, url, quality)
+      );
+      INSERT OR IGNORE INTO download_history_v2 (
+        id, user_id, job_id, url, title, author, quality, size_bytes, thumbnail, saved_at, created_at
+      )
+      SELECT id, user_id, job_id, url, title, author, quality, size_bytes, thumbnail, saved_at, created_at
+      FROM download_history;
+      DROP TABLE download_history;
+      ALTER TABLE download_history_v2 RENAME TO download_history;
+      CREATE INDEX IF NOT EXISTS idx_history_user_created ON download_history(user_id, created_at DESC);
+      COMMIT;
+    `);
+  }
+} catch (migErr) {
+  try {
+    db.exec('ROLLBACK;');
+  } catch {}
+  console.warn('[db] download_history migration note:', migErr instanceof Error ? migErr.message : migErr);
+}
 
 function normalizeQualityValue(raw: unknown): string {
   if (typeof raw === 'string' && ['2160p', '1080p', '720p', '480p', '360p'].includes(raw)) {
@@ -504,12 +575,11 @@ function upsertUserHistoryItem(userId: string, item: UserHistoryItem): UserHisto
     INSERT INTO download_history (
       id, user_id, job_id, url, title, author, quality, size_bytes, thumbnail, saved_at, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(user_id, url) DO UPDATE SET
+    ON CONFLICT(user_id, url, quality) DO UPDATE SET
       id = excluded.id,
       job_id = excluded.job_id,
       title = excluded.title,
       author = excluded.author,
-      quality = excluded.quality,
       size_bytes = excluded.size_bytes,
       thumbnail = excluded.thumbnail,
       saved_at = excluded.saved_at,
@@ -539,6 +609,54 @@ function upsertUserHistoryItem(userId: string, item: UserHistoryItem): UserHisto
 
 function clearUserHistoryInDb(userId: string): void {
   db.prepare('DELETE FROM download_history WHERE user_id = ?').run(userId);
+}
+
+interface AnnouncementRecord {
+  id: string;
+  title: string;
+  body: string;
+  authorName: string;
+  createdAt: number;
+}
+
+function listAnnouncements(limit = 30): AnnouncementRecord[] {
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+  const rows = db
+    .prepare('SELECT id, title, body, author_name, created_at FROM announcements ORDER BY created_at DESC LIMIT ?')
+    .all(safeLimit) as Array<{
+      id: string;
+      title: string;
+      body: string;
+      author_name: string;
+      created_at: number;
+    }>;
+  return rows.map((r) => ({
+    id: String(r.id),
+    title: String(r.title || ''),
+    body: String(r.body || ''),
+    authorName: String(r.author_name || 'Admin'),
+    createdAt: Number(r.created_at || 0),
+  }));
+}
+
+function createAnnouncementInDb(input: { title: string; body: string; authorName: string }): AnnouncementRecord {
+  const id = crypto.randomUUID();
+  const createdAt = Date.now();
+  db.prepare(
+    'INSERT INTO announcements (id, title, body, author_name, created_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(id, input.title, input.body, input.authorName, createdAt);
+  return {
+    id,
+    title: input.title,
+    body: input.body,
+    authorName: input.authorName,
+    createdAt,
+  };
+}
+
+function deleteAnnouncementInDb(id: string): boolean {
+  const res = db.prepare('DELETE FROM announcements WHERE id = ?').run(id) as { changes?: number | bigint };
+  return Number(res?.changes || 0) > 0;
 }
 
 interface XrayProfileTestResult {
@@ -1120,7 +1238,12 @@ async function resolveTelegramFile(client: TelegramClient, row: TelegramFileRow)
  * Streams a byte range of a Telegram-stored file into an HTTP response.
  * Supports `Range` so browsers and download managers can seek/resume.
  */
-async function streamTelegramFile(row: TelegramFileRow, req: Request, res: Response): Promise<void> {
+async function streamTelegramFile(
+  row: TelegramFileRow,
+  req: Request,
+  res: Response,
+  inline = false
+): Promise<void> {
   // Never let this reject: Express 4 does not catch async handler rejections,
   // and a bad Telegram login would otherwise take the whole server down.
   let client: TelegramClient;
@@ -1186,7 +1309,8 @@ async function streamTelegramFile(row: TelegramFileRow, req: Request, res: Respo
   const fileName = row.file_name || 'grove-save-media';
   const disposition = (() => {
     const ascii = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '_');
-    return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+    const mode = inline ? 'inline' : 'attachment';
+    return `${mode}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
   })();
 
   res.status(partial ? 206 : 200);
@@ -1413,12 +1537,454 @@ function isKnownMediaHost(host: string): boolean {
     'music.youtube.com',
     'youtu.be',
     'youtube-nocookie.com',
+    'instagram.com',
+    'www.instagram.com',
+    'm.instagram.com',
+    'instagr.am',
+    'cdninstagram.com',
+    'fbcdn.net',
     'vimeo.com',
     'dailymotion.com',
     'twitch.tv',
     'soundcloud.com',
+    'tiktok.com',
+    'www.tiktok.com',
+    'm.tiktok.com',
+    'vm.tiktok.com',
+    'vt.tiktok.com',
+    'tiktokcdn.com',
+    'tiktokcdn-us.com',
+    'tiktokv.com',
+    'x.com',
+    'www.x.com',
+    'mobile.x.com',
+    'twitter.com',
+    'www.twitter.com',
+    'mobile.twitter.com',
+    't.co',
+    'fxtwitter.com',
+    'vxtwitter.com',
+    'fixupx.com',
+    'twimg.com',
+    'pbs.twimg.com',
+    'video.twimg.com',
   ];
   return allowed.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
+function isInstagramUrl(parsed: URL): boolean {
+  const host = parsed.hostname.toLowerCase();
+  return (
+    host === 'instagram.com' ||
+    host === 'www.instagram.com' ||
+    host === 'm.instagram.com' ||
+    host === 'instagr.am' ||
+    host.endsWith('.instagram.com')
+  );
+}
+
+function isTikTokUrl(parsed: URL): boolean {
+  const host = parsed.hostname.toLowerCase();
+  return host === 'tiktok.com' || host.endsWith('.tiktok.com');
+}
+
+function isXUrl(parsed: URL): boolean {
+  const host = parsed.hostname.toLowerCase();
+  return (
+    host === 'x.com' ||
+    host.endsWith('.x.com') ||
+    host === 'twitter.com' ||
+    host.endsWith('.twitter.com') ||
+    host === 'fxtwitter.com' ||
+    host === 'vxtwitter.com' ||
+    host === 'fixupx.com' ||
+    host === 't.co'
+  );
+}
+
+function normalizeXUrl(parsed: URL): string {
+  const copy = new URL(parsed.toString());
+  const host = copy.hostname.toLowerCase();
+  if (
+    host === 'twitter.com' ||
+    host === 'www.twitter.com' ||
+    host === 'mobile.twitter.com' ||
+    host === 'mobile.x.com' ||
+    host === 'www.x.com' ||
+    host === 'fxtwitter.com' ||
+    host === 'vxtwitter.com' ||
+    host === 'fixupx.com'
+  ) {
+    copy.hostname = 'x.com';
+  }
+  return copy.toString();
+}
+
+function maybeProxySocialThumbnail(rawUrl: string | undefined | null, parsedPageUrl: URL): string | null {
+  if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return null;
+  if (isInstagramUrl(parsedPageUrl) || isTikTokUrl(parsedPageUrl) || isXUrl(parsedPageUrl)) {
+    return `/api/media/thumbnail?url=${encodeURIComponent(rawUrl)}`;
+  }
+  return rawUrl;
+}
+
+function normalizeInstagramUrl(parsed: URL): string {
+  const copy = new URL(parsed.toString());
+  const host = copy.hostname.toLowerCase();
+  if (
+    host === 'instagram.com' ||
+    host === 'www.instagram.com' ||
+    host === 'm.instagram.com' ||
+    host === 'instagr.am' ||
+    host.endsWith('.instagram.com')
+  ) {
+    copy.hostname = 'www.instagram.com';
+  }
+  return copy.toString();
+}
+
+async function fetchJsonViaOptionalXray<T = unknown>(targetUrl: string, timeoutMs = 12000): Promise<T> {
+  if (adminConfig.xray.enabled && xrayState.running) {
+    const resp = await proxyHttpGet(targetUrl, adminConfig.xray.httpPort, timeoutMs);
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw new Error(`HTTP ${resp.statusCode}`);
+    }
+    return JSON.parse(resp.body) as T;
+  }
+  const res = await fetch(targetUrl, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
+interface ResolvedFallbackMedia {
+  title: string;
+  author: string;
+  durationSeconds: number | null;
+  thumbnail: string | null;
+  videos: Array<{ url: string; width: number; height: number }>;
+  photos: Array<{ url: string }>;
+  musicUrl?: string | null;
+  referer?: string;
+}
+
+async function resolveShortRedirectUrl(parsed: URL): Promise<URL> {
+  if (parsed.hostname.toLowerCase() !== 't.co') return parsed;
+  try {
+    const res = await fetch(parsed.toString(), {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(6000),
+    });
+    const loc = res.headers.get('location');
+    if (loc) {
+      const valid = await validatePublicUrl(new URL(loc, parsed).toString());
+      if (valid) return valid;
+    }
+  } catch {
+    // Keep original URL
+  }
+  return parsed;
+}
+
+async function resolveXMediaFallback(rawParsed: URL): Promise<ResolvedFallbackMedia> {
+  const resolvedParsed = await resolveShortRedirectUrl(rawParsed);
+  const pathMatch = resolvedParsed.pathname.match(/^\/(?:([A-Za-z0-9_]+)\/)?status(?:es)?\/(\d+)/i);
+  if (!pathMatch) {
+    throw new Error('Invalid X / Twitter post URL.');
+  }
+  const userPart = pathMatch[1] || 'i';
+  const statusId = pathMatch[2];
+  const apiUrl = `https://api.fxtwitter.com/${encodeURIComponent(userPart)}/status/${statusId}`;
+  const payload = await fetchJsonViaOptionalXray<{
+    code?: number;
+    message?: string;
+    tweet?: {
+      text?: string;
+      author?: { name?: string; screen_name?: string; avatar_url?: string };
+      media?: {
+        videos?: Array<{
+          url?: string;
+          thumbnail_url?: string;
+          duration?: number;
+          width?: number;
+          height?: number;
+          variants?: Array<{ url?: string; content_type?: string; bitrate?: number }>;
+        }>;
+        photos?: Array<{ url?: string; width?: number; height?: number }>;
+      };
+    };
+  }>(apiUrl, 15000);
+
+  const tweet = payload?.tweet;
+  if (!tweet) {
+    throw new Error(payload?.message || 'Could not load X post.');
+  }
+
+  const videos: Array<{ url: string; width: number; height: number }> = [];
+  let durationSeconds: number | null = null;
+  let thumb: string | null = null;
+
+  for (const v of tweet.media?.videos || []) {
+    if (typeof v.duration === 'number' && durationSeconds === null) {
+      durationSeconds = Math.round(v.duration);
+    }
+    if (!thumb && typeof v.thumbnail_url === 'string') {
+      thumb = v.thumbnail_url;
+    }
+    const mp4Variants = Array.isArray(v.variants)
+      ? v.variants
+          .filter((vr) => typeof vr.url === 'string' && (!vr.content_type || vr.content_type.includes('mp4')))
+          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))
+      : [];
+    const primaryUrl = mp4Variants[0]?.url || v.url;
+    if (typeof primaryUrl === 'string') {
+      const valid = await validatePublicUrl(primaryUrl);
+      if (valid) {
+        videos.push({
+          url: valid.toString(),
+          width: Number(v.width || 0),
+          height: Number(v.height || 0),
+        });
+      }
+    }
+  }
+
+  const photos: Array<{ url: string }> = [];
+  for (const p of tweet.media?.photos || []) {
+    if (typeof p.url === 'string') {
+      const valid = await validatePublicUrl(p.url);
+      if (valid) {
+        if (!thumb) thumb = valid.toString();
+        photos.push({ url: valid.toString() });
+      }
+    }
+  }
+
+  if (videos.length === 0 && photos.length === 0) {
+    throw new Error('This X post does not contain downloadable video or photo media.');
+  }
+
+  const rawText = (tweet.text || '').replace(/https?:\/\/t\.co\/\S+/gi, '').trim();
+  const screenName = (tweet.author?.screen_name || '').trim();
+  const title = rawText ? rawText.slice(0, 90) : screenName ? `X Post by @${screenName}` : 'X Media';
+
+  return {
+    title,
+    author: screenName ? `@${screenName}` : tweet.author?.name || 'X',
+    durationSeconds,
+    thumbnail: thumb || tweet.author?.avatar_url || null,
+    videos,
+    photos,
+    referer: 'https://x.com/',
+  };
+}
+
+async function resolveTikTokMediaFallback(parsed: URL): Promise<ResolvedFallbackMedia> {
+  const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(parsed.toString())}&hd=1`;
+  const payload = await fetchJsonViaOptionalXray<{
+    code?: number;
+    msg?: string;
+    data?: {
+      title?: string;
+      duration?: number;
+      cover?: string;
+      origin_cover?: string;
+      play?: string;
+      hdplay?: string;
+      music?: string;
+      images?: string[];
+      author?: { unique_id?: string; nickname?: string };
+    };
+  }>(apiUrl, 15000);
+
+  const data = payload?.data;
+  if (!data || (payload.code !== undefined && payload.code !== 0)) {
+    throw new Error(payload?.msg || 'Could not fetch TikTok media.');
+  }
+
+  const photos: Array<{ url: string }> = [];
+  if (Array.isArray(data.images)) {
+    for (const imgUrl of data.images) {
+      if (typeof imgUrl === 'string') {
+        const valid = await validatePublicUrl(imgUrl);
+        if (valid) photos.push({ url: valid.toString() });
+      }
+    }
+  }
+
+  const videos: Array<{ url: string; width: number; height: number }> = [];
+  if (photos.length === 0) {
+    for (const candidate of [data.hdplay, data.play]) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        const valid = await validatePublicUrl(candidate.trim());
+        if (valid) {
+          videos.push({ url: valid.toString(), width: 1080, height: 1920 });
+          break;
+        }
+      }
+    }
+  }
+
+  let musicUrl: string | null = null;
+  if (typeof data.music === 'string' && data.music.trim()) {
+    const validMusic = await validatePublicUrl(data.music.trim());
+    if (validMusic) musicUrl = validMusic.toString();
+  }
+
+  if (videos.length === 0 && photos.length === 0) {
+    throw new Error('No downloadable TikTok video or photo found.');
+  }
+
+  const cleanTitle = (data.title || '').trim().slice(0, 90) || 'TikTok Video';
+  const uid = (data.author?.unique_id || '').replace(/^@/, '').trim();
+  const author = uid ? `@${uid}` : data.author?.nickname || 'TikTok';
+
+  return {
+    title: cleanTitle,
+    author,
+    durationSeconds: typeof data.duration === 'number' && data.duration > 0 ? data.duration : null,
+    thumbnail: data.cover || data.origin_cover || photos[0]?.url || null,
+    videos,
+    photos,
+    musicUrl,
+    referer: 'https://www.tiktok.com/',
+  };
+}
+
+async function downloadRemoteUrlToFile(
+  remoteUrl: string,
+  destPath: string,
+  referer?: string,
+  onProgress?: (downloaded: number, total: number) => void,
+  redirectDepth = 0
+): Promise<string> {
+  const valid = await validatePublicUrl(remoteUrl);
+  if (!valid) {
+    throw new Error('Disallowed remote media URL.');
+  }
+  const targetPort = valid.port ? Number(valid.port) : valid.protocol === 'https:' ? 443 : 80;
+  const headers: Record<string, string> = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Accept: '*/*',
+  };
+  if (referer) headers.Referer = referer;
+
+  const consumeResponse = (
+    upstreamRes: http.IncomingMessage,
+    resolve: (ct: string) => void,
+    reject: (err: Error) => void
+  ) => {
+    const status = upstreamRes.statusCode || 200;
+    if (status >= 300 && status < 400 && upstreamRes.headers.location) {
+      const nextLoc = upstreamRes.headers.location;
+      upstreamRes.resume();
+      if (redirectDepth >= 5) {
+        reject(new Error('Too many redirects downloading media.'));
+        return;
+      }
+      let nextAbs = '';
+      try {
+        nextAbs = new URL(nextLoc, valid).toString();
+      } catch {
+        reject(new Error('Invalid redirect location.'));
+        return;
+      }
+      downloadRemoteUrlToFile(nextAbs, destPath, referer, onProgress, redirectDepth + 1)
+        .then(resolve)
+        .catch((e) => reject(e instanceof Error ? e : new Error(String(e))));
+      return;
+    }
+    if (status >= 400) {
+      upstreamRes.destroy();
+      reject(new Error(`Upstream returned HTTP ${status}.`));
+      return;
+    }
+    const ct = String(upstreamRes.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+    const total = Number(upstreamRes.headers['content-length'] || 0) || 0;
+    let downloaded = 0;
+    const out = fs.createWriteStream(destPath);
+    upstreamRes.on('data', (chunk: Buffer) => {
+      downloaded += chunk.byteLength;
+      if (onProgress) onProgress(downloaded, total);
+    });
+    upstreamRes.on('error', (err) => {
+      out.destroy();
+      reject(err);
+    });
+    out.on('error', reject);
+    out.on('finish', () => resolve(ct));
+    upstreamRes.pipe(out);
+  };
+
+  if (adminConfig.xray.enabled && xrayState.running) {
+    return new Promise((resolve, reject) => {
+      const connectReq = http.request({
+        host: '127.0.0.1',
+        port: adminConfig.xray.httpPort,
+        method: 'CONNECT',
+        path: `${valid.hostname}:${targetPort}`,
+        timeout: 12000,
+      });
+      connectReq.on('connect', (cRes, socket) => {
+        if (cRes.statusCode !== 200) {
+          socket.destroy();
+          reject(new Error(`Proxy CONNECT ${cRes.statusCode}`));
+          return;
+        }
+        const mod = valid.protocol === 'https:' ? https : http;
+        const createConnection = () =>
+          valid.protocol === 'https:'
+            ? tls.connect({ socket, servername: valid.hostname })
+            : socket;
+        const upstreamReq = mod.request(
+          {
+            hostname: valid.hostname,
+            port: targetPort,
+            path: valid.pathname + valid.search,
+            method: 'GET',
+            createConnection,
+            headers: { ...headers, Host: valid.host },
+            timeout: 120000,
+          },
+          (upstreamRes) => consumeResponse(upstreamRes, resolve, reject)
+        );
+        upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('Media download timed out.')));
+        upstreamReq.on('error', reject);
+        upstreamReq.end();
+      });
+      connectReq.on('timeout', () => connectReq.destroy(new Error('Proxy connect timed out.')));
+      connectReq.on('error', reject);
+      connectReq.end();
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const mod = valid.protocol === 'https:' ? https : http;
+    const upstreamReq = mod.request(
+      {
+        hostname: valid.hostname,
+        port: targetPort,
+        path: valid.pathname + valid.search,
+        method: 'GET',
+        headers,
+        timeout: 120000,
+      },
+      (upstreamRes) => consumeResponse(upstreamRes, resolve, reject)
+    );
+    upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('Media download timed out.')));
+    upstreamReq.on('error', reject);
+    upstreamReq.end();
+  });
 }
 
 async function validatePublicUrl(rawUrl: string): Promise<URL | null> {
@@ -1466,6 +2032,415 @@ function extractYouTubeId(parsed: URL): string | null {
     }
   }
   return null;
+}
+
+interface ParthDlFormat {
+  url: string;
+  width?: number | null;
+  height?: number | null;
+  format_id?: string;
+  has_audio?: boolean;
+}
+
+interface ParthDlEntry {
+  kind: 'video' | 'image';
+  formats: ParthDlFormat[];
+}
+
+interface ParthDlInfo {
+  id?: string;
+  title?: string;
+  uploader?: string;
+  type?: string;
+  duration?: number | null;
+  thumbnail?: string | null;
+  entries?: ParthDlEntry[];
+}
+
+const PARTH_DL_FALLBACK_WHEEL_URL =
+  'https://files.pythonhosted.org/packages/b8/c8/6a074c1cb6b786c5c097b7722d5ec69725ac0eae009b75609655e89752a3/parth_dl-1.2.1-py3-none-any.whl';
+
+const PARTH_DL_INFO_PY = `
+import json, sys
+from parth_dl import InstagramDownloader
+from parth_dl.utils import RateLimitError, ValidationError
+url = sys.argv[1]
+try:
+    dl = InstagramDownloader(quiet=True, rate_limit=False)
+    info = dl.get_info(url)
+    print(json.dumps({"ok": True, "info": info}, ensure_ascii=False))
+except RateLimitError as e:
+    print(json.dumps({"ok": False, "code": "RATE_LIMIT", "error": str(e)}, ensure_ascii=False))
+    sys.exit(2)
+except ValidationError as e:
+    print(json.dumps({"ok": False, "code": "VALIDATION", "error": str(e)}, ensure_ascii=False))
+    sys.exit(3)
+except Exception as e:
+    print(json.dumps({"ok": False, "code": "DOWNLOAD_ERROR", "error": str(e)}, ensure_ascii=False))
+    sys.exit(1)
+`.trim();
+
+const PARTH_DL_DOWNLOAD_PY = `
+import json, sys
+from parth_dl import InstagramDownloader
+from parth_dl.utils import RateLimitError, ValidationError
+url, out_dir, quality = sys.argv[1], sys.argv[2], sys.argv[3]
+info_arg = sys.argv[4] if len(sys.argv) > 4 else "-"
+cached_info = None
+if info_arg and info_arg != "-":
+    try:
+        with open(info_arg, "r", encoding="utf-8") as f:
+            cached_info = json.load(f)
+    except Exception:
+        cached_info = None
+def hook(downloaded, total):
+    sys.stderr.write(f"PROGRESS:{int(downloaded)}:{int(total or 0)}\\n")
+    sys.stderr.flush()
+try:
+    dl = InstagramDownloader(quiet=True, overwrite=True, rate_limit=False, progress_hook=hook)
+    result = dl.download(url, output_path=out_dir, quality=quality, output_mode="directory", info=cached_info)
+    files = result if isinstance(result, list) else ([result] if result else [])
+    info = dl.last_info or cached_info or {}
+    print(json.dumps({"ok": True, "files": [str(p) for p in files], "info": info}, ensure_ascii=False))
+except RateLimitError as e:
+    print(json.dumps({"ok": False, "code": "RATE_LIMIT", "error": str(e)}, ensure_ascii=False))
+    sys.exit(2)
+except ValidationError as e:
+    print(json.dumps({"ok": False, "code": "VALIDATION", "error": str(e)}, ensure_ascii=False))
+    sys.exit(3)
+except Exception as e:
+    print(json.dumps({"ok": False, "code": "DOWNLOAD_ERROR", "error": str(e)}, ensure_ascii=False))
+    sys.exit(1)
+`.trim();
+
+let parthDlReadyCache: boolean | undefined;
+let parthDlInstallPromise: Promise<boolean> | null = null;
+const instagramInfoCache = new Map<string, { info: ParthDlInfo; expiresAt: number }>();
+const instagramInfoInflight = new Map<string, Promise<ParthDlInfo>>();
+
+function buildParthDlEnv(includeLocalDir = true): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, PYTHONIOENCODING: 'utf-8' };
+  // Python urllib.request does not support SOCKS proxies without PySocks; route via Xray HTTP proxy only
+  delete env.ALL_PROXY;
+  delete env.all_proxy;
+  if (includeLocalDir) {
+    const existing = env.PYTHONPATH ? `${path.delimiter}${env.PYTHONPATH}` : '';
+    env.PYTHONPATH = `${PARTH_DL_DIR}${existing}`;
+  }
+  if (adminConfig.xray.enabled && xrayState.running) {
+    const hp = `http://127.0.0.1:${adminConfig.xray.httpPort}`;
+    env.HTTP_PROXY = hp;
+    env.HTTPS_PROXY = hp;
+    env.http_proxy = hp;
+    env.https_proxy = hp;
+    env.NO_PROXY = '127.0.0.1,localhost';
+    env.no_proxy = '127.0.0.1,localhost';
+  }
+  return env;
+}
+
+async function canImportParthDl(): Promise<boolean> {
+  try {
+    await execFileAsync(
+      'python3',
+      ['-c', "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('parth_dl') else 1)"],
+      { timeout: 6000, env: buildParthDlEnv(true) }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function installParthDlPackage(): Promise<boolean> {
+  if (parthDlInstallPromise) return parthDlInstallPromise;
+  parthDlInstallPromise = (async () => {
+    let whlPath = '';
+    let tmpDir = '';
+    try {
+      ensureDataDir();
+      let wheelUrl = PARTH_DL_FALLBACK_WHEEL_URL;
+      try {
+        const metaRes = await fetch('https://pypi.org/pypi/parth-dl/json', {
+          signal: AbortSignal.timeout(12000),
+        });
+        if (metaRes.ok) {
+          const meta = (await metaRes.json()) as {
+            urls?: Array<{ packagetype?: string; url?: string }>;
+          };
+          const whl = meta.urls?.find((u) => u.packagetype === 'bdist_wheel' && typeof u.url === 'string');
+          if (whl?.url) wheelUrl = whl.url;
+        }
+      } catch {
+        // Use fallback pinned PyPI wheel URL
+      }
+
+      const whlRes = await fetch(wheelUrl, { signal: AbortSignal.timeout(30000) });
+      if (!whlRes.ok) {
+        throw new Error(`Failed to fetch parth-dl wheel (HTTP ${whlRes.status})`);
+      }
+      const buf = Buffer.from(await whlRes.arrayBuffer());
+      whlPath = path.join(DATA_DIR, `parth_dl-${crypto.randomUUID()}.whl`);
+      tmpDir = path.join(DATA_DIR, `parth_dl_tmp_${crypto.randomUUID()}`);
+      await fs.promises.writeFile(whlPath, buf);
+      await fs.promises.mkdir(tmpDir, { recursive: true });
+      await execFileAsync('python3', ['-m', 'zipfile', '-e', whlPath, tmpDir], {
+        timeout: 15000,
+      });
+      await fs.promises.rm(PARTH_DL_DIR, { recursive: true, force: true }).catch(() => {});
+      await fs.promises.rename(tmpDir, PARTH_DL_DIR);
+      tmpDir = '';
+      const ok = await canImportParthDl();
+      parthDlReadyCache = ok;
+      return ok;
+    } catch (err) {
+      console.warn('[parth-dl] Auto-install failed:', err instanceof Error ? err.message : err);
+      return false;
+    } finally {
+      if (whlPath) await fs.promises.rm(whlPath, { force: true }).catch(() => {});
+      if (tmpDir) await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      parthDlInstallPromise = null;
+    }
+  })();
+  return parthDlInstallPromise;
+}
+
+async function getParthDlRunner(options?: { autoInstall?: boolean }): Promise<boolean> {
+  if (parthDlReadyCache === true && fs.existsSync(PARTH_DL_DIR)) {
+    return true;
+  }
+  if (await canImportParthDl()) {
+    parthDlReadyCache = true;
+    return true;
+  }
+  if (options?.autoInstall !== false) {
+    return installParthDlPackage();
+  }
+  return false;
+}
+
+class ParthDlInvocationError extends Error {
+  code: string;
+  constructor(message: string, code = 'DOWNLOAD_ERROR') {
+    super(message);
+    this.code = code;
+  }
+}
+
+async function runParthDlInfo(rawUrl: string, forceRefresh = false): Promise<ParthDlInfo> {
+  const ready = await getParthDlRunner({ autoInstall: true });
+  if (!ready) {
+    throw new ParthDlInvocationError('parth-dl is not available on the server.', 'UNAVAILABLE');
+  }
+  const xrayFingerprint = `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${xrayState.running}`;
+  const cacheKey = `${rawUrl}::${xrayFingerprint}`;
+  if (!forceRefresh) {
+    const cached = instagramInfoCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.info;
+    }
+    if (cached) instagramInfoCache.delete(cacheKey);
+  } else {
+    instagramInfoCache.delete(cacheKey);
+  }
+
+  let inflight = instagramInfoInflight.get(cacheKey);
+  if (!inflight) {
+    inflight = (async () => {
+      try {
+        const { stdout } = await execFileAsync('python3', ['-c', PARTH_DL_INFO_PY, rawUrl], {
+          timeout: 30000,
+          maxBuffer: 4 * 1024 * 1024,
+          env: buildParthDlEnv(true),
+        });
+        const parsedOut = JSON.parse(stdout.trim()) as {
+          ok?: boolean;
+          info?: ParthDlInfo;
+          error?: string;
+          code?: string;
+        };
+        if (!parsedOut.ok || !parsedOut.info) {
+          throw new ParthDlInvocationError(
+            parsedOut.error || 'Failed to extract Instagram media info.',
+            parsedOut.code || 'DOWNLOAD_ERROR'
+          );
+        }
+        instagramInfoCache.set(cacheKey, {
+          info: parsedOut.info,
+          expiresAt: Date.now() + 3 * 60 * 1000,
+        });
+        if (instagramInfoCache.size > 100) {
+          const oldest = instagramInfoCache.keys().next().value;
+          if (oldest) instagramInfoCache.delete(oldest);
+        }
+        return parsedOut.info;
+      } catch (err: unknown) {
+        if (err instanceof ParthDlInvocationError) throw err;
+        const execErr = err as { stdout?: string; stderr?: string; message?: string };
+        const rawOut = (execErr.stdout || '').trim();
+        if (rawOut.startsWith('{')) {
+          try {
+            const payload = JSON.parse(rawOut) as { error?: string; code?: string };
+            throw new ParthDlInvocationError(
+              payload.error || 'Failed to extract Instagram media info.',
+              payload.code || 'DOWNLOAD_ERROR'
+            );
+          } catch (inner) {
+            if (inner instanceof ParthDlInvocationError) throw inner;
+          }
+        }
+        const errMsg = (execErr.stderr || execErr.message || 'Instagram extraction failed.').trim();
+        throw new ParthDlInvocationError(errMsg, 'DOWNLOAD_ERROR');
+      } finally {
+        instagramInfoInflight.delete(cacheKey);
+      }
+    })();
+    instagramInfoInflight.set(cacheKey, inflight);
+  }
+
+  return inflight;
+}
+
+async function runParthDlDownload(
+  rawUrl: string,
+  outDir: string,
+  quality: 'best' | 'worst',
+  cachedInfo?: ParthDlInfo | null,
+  onProgress?: (downloaded: number, total: number) => void
+): Promise<{ files: string[]; info: ParthDlInfo }> {
+  const ready = await getParthDlRunner({ autoInstall: true });
+  if (!ready) {
+    throw new ParthDlInvocationError('parth-dl is not available on the server.', 'UNAVAILABLE');
+  }
+  let infoJsonPath = '-';
+  if (cachedInfo) {
+    infoJsonPath = path.join(outDir, 'cached-info.json');
+    await fs.promises.writeFile(infoJsonPath, JSON.stringify(cachedInfo), 'utf8');
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'python3',
+      ['-c', PARTH_DL_DOWNLOAD_PY, rawUrl, outDir, quality, infoJsonPath],
+      { shell: false, env: buildParthDlEnv(true) }
+    );
+    let stdout = '';
+    let stderrBuf = '';
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        try {
+          child.kill('SIGTERM');
+        } catch {}
+        settled = true;
+        reject(new ParthDlInvocationError('Instagram download timed out.', 'TIMEOUT'));
+      }
+    }, 120000);
+    timer.unref();
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+    });
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBuf += chunk.toString('utf8');
+      const lines = stderrBuf.split(/\r?\n/);
+      stderrBuf = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('PROGRESS:')) {
+          const parts = line.split(':');
+          const dl = Number(parts[1] || 0);
+          const total = Number(parts[2] || 0);
+          if (onProgress && Number.isFinite(dl)) {
+            onProgress(dl, Number.isFinite(total) ? total : 0);
+          }
+        }
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      const trimmed = stdout.trim();
+      const jsonLine = trimmed.split(/\r?\n/).reverse().find((l) => l.trim().startsWith('{'));
+      if (jsonLine) {
+        try {
+          const payload = JSON.parse(jsonLine) as {
+            ok?: boolean;
+            files?: string[];
+            info?: ParthDlInfo;
+            error?: string;
+            code?: string;
+          };
+          if (payload.ok && Array.isArray(payload.files) && payload.files.length > 0) {
+            resolve({ files: payload.files, info: payload.info || cachedInfo || {} });
+            return;
+          }
+          reject(
+            new ParthDlInvocationError(
+              payload.error || `Instagram download failed (code ${code}).`,
+              payload.code || 'DOWNLOAD_ERROR'
+            )
+          );
+          return;
+        } catch {
+          // Fall through
+        }
+      }
+      reject(
+        new ParthDlInvocationError(
+          stderrBuf.trim() || `Instagram download failed with exit code ${code}.`,
+          'DOWNLOAD_ERROR'
+        )
+      );
+    });
+  });
+}
+
+function cleanInstagramTitle(info: ParthDlInfo): string {
+  const rawTitle = (info.title || '').replace(/\s+/g, ' ').trim();
+  if (rawTitle) {
+    return rawTitle.slice(0, 120);
+  }
+  const uploader = (info.uploader || '').replace(/^@/, '').trim();
+  const kindLabel = info.type === 'profile_picture' ? 'Profile Picture' : info.type || 'Post';
+  return uploader ? `@${uploader} — Instagram ${kindLabel}` : `Instagram ${kindLabel}`;
+}
+
+function pickInstagramThumbnail(info: ParthDlInfo): string | null {
+  if (typeof info.thumbnail === 'string' && /^https?:\/\//i.test(info.thumbnail)) {
+    return info.thumbnail;
+  }
+  const entries = info.entries || [];
+  for (const entry of entries) {
+    if (entry.kind === 'image' && Array.isArray(entry.formats)) {
+      const best = entry.formats.find((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url));
+      if (best?.url) return best.url;
+    }
+  }
+  return null;
+}
+
+function selectInstagramVideoFormat(entry: ParthDlEntry, targetH: number): ParthDlFormat | null {
+  const valid = (entry.formats || []).filter((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url));
+  if (!valid.length) return null;
+  const withAudio = valid.filter((f) => f.has_audio);
+  const pool = withAudio.length > 0 ? withAudio : valid;
+  const sorted = [...pool].sort((a, b) => {
+    const areaA = (a.width || 0) * (a.height || 0);
+    const areaB = (b.width || 0) * (b.height || 0);
+    return areaB - areaA;
+  });
+  return targetH <= 480 ? sorted[sorted.length - 1] : sorted[0];
 }
 
 let cachedYtDlpRunner: { cmd: string; baseArgs: string[] } | null | undefined;
@@ -3331,7 +4306,7 @@ async function startServer() {
         : parsedUrl.hostname;
     const quality =
       typeof body.quality === 'string' &&
-      ['2160p', '1080p', '720p', '480p', '360p', 'audio'].includes(body.quality.trim())
+      ['2160p', '1080p', '720p', '480p', '360p', 'best', 'audio'].includes(body.quality.trim())
         ? body.quality.trim()
         : '1080p';
     const sizeBytes =
@@ -3339,7 +4314,10 @@ async function startServer() {
         ? Math.max(0, Math.floor(body.sizeBytes))
         : 0;
     const rawThumb = typeof body.thumbnail === 'string' ? body.thumbnail.trim() : '';
-    const thumbnail = /^https?:\/\//i.test(rawThumb) ? rawThumb.slice(0, 1000) : null;
+    const thumbnail =
+      /^https?:\/\//i.test(rawThumb) || rawThumb.startsWith('/api/media/thumbnail?')
+        ? rawThumb.slice(0, 1000)
+        : null;
     const savedAt =
       typeof body.savedAt === 'string' && body.savedAt.trim()
         ? body.savedAt.trim().slice(0, 32)
@@ -3371,6 +4349,68 @@ async function startServer() {
   app.delete('/api/user/history', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     clearUserHistoryInDb(req.authUser!.id);
     res.json({ success: true });
+  });
+
+  /* -------------------- Announcements (public read, admin write) -------------------- */
+
+  app.get('/api/announcements', (_req: Request, res: Response) => {
+    const items = listAnnouncements(30);
+    const latest = items[0] || null;
+    res.json({
+      items,
+      latestId: latest ? latest.id : null,
+      latestCreatedAt: latest ? latest.createdAt : null,
+    });
+  });
+
+  app.post('/api/admin/announcements', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const payload = (req.body || {}) as { title?: unknown; body?: unknown };
+    const title = typeof payload.title === 'string' ? payload.title.trim().slice(0, 160) : '';
+    const body = typeof payload.body === 'string' ? payload.body.trim().slice(0, 2000) : '';
+    if (!body) {
+      res.status(400).json({ error: 'Announcement text is required.' });
+      return;
+    }
+    const item = createAnnouncementInDb({
+      title,
+      body,
+      authorName: user.displayName || 'Admin',
+    });
+    const items = listAnnouncements(30);
+    const latest = items[0] || null;
+    res.status(201).json({
+      item,
+      items,
+      latestId: latest ? latest.id : null,
+      latestCreatedAt: latest ? latest.createdAt : null,
+    });
+  });
+
+  app.delete('/api/admin/announcements/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const id = String(req.params.id || '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      res.status(400).json({ error: 'Invalid announcement id.' });
+      return;
+    }
+    deleteAnnouncementInDb(id);
+    const items = listAnnouncements(30);
+    const latest = items[0] || null;
+    res.json({
+      success: true,
+      items,
+      latestId: latest ? latest.id : null,
+      latestCreatedAt: latest ? latest.createdAt : null,
+    });
   });
 
   // YouTube Authentication endpoints (admin only)
@@ -3956,6 +4996,65 @@ async function startServer() {
       return;
     }
     res.download(target, fileName);
+  });
+
+  app.post('/api/admin/db/restore', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    void (async () => {
+      try {
+        const body = req.body as { fileBase64?: string };
+        if (!body || typeof body.fileBase64 !== 'string') {
+          res.status(400).json({ success: false, error: 'Invalid file data.' });
+          return;
+        }
+
+        const buffer = Buffer.from(body.fileBase64, 'base64');
+        if (buffer.length < 100) {
+          res.status(400).json({ success: false, error: 'File is too small or invalid.' });
+          return;
+        }
+
+        const header = buffer.subarray(0, 16);
+        if (header.toString('utf8', 0, 15) !== 'SQLite format 3') {
+          res.status(400).json({ success: false, error: 'Invalid SQLite database file.' });
+          return;
+        }
+
+        try {
+          await writeDatabaseSnapshot();
+        } catch {}
+
+        const tempRestorePath = path.resolve(DATA_DIR, `restore-temp-${Date.now()}.db`);
+        fs.writeFileSync(tempRestorePath, buffer);
+
+        try {
+          db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+          db.close();
+        } catch {}
+
+        fs.copyFileSync(tempRestorePath, DB_FILE);
+        try {
+          fs.rmSync(tempRestorePath, { force: true });
+        } catch {}
+
+        db = new DatabaseSync(DB_FILE);
+        db.exec(`
+          PRAGMA journal_mode = WAL;
+          PRAGMA foreign_keys = ON;
+        `);
+
+        res.json({ success: true, message: 'Database restored successfully' });
+      } catch (err) {
+        res.status(500).json({
+          success: false,
+          error: err instanceof Error ? err.message : 'Could not restore database.',
+        });
+      }
+    })();
   });
 
   app.get('/api/admin/db/stats', requireAuth, (req: AuthenticatedRequest, res: Response) => {
@@ -4680,19 +5779,114 @@ async function startServer() {
     return /^[a-zA-Z0-9_+.-]{1,32}$/.test(cleaned) ? cleaned : undefined;
   }
 
-  async function proxyRemoteMediaWithRange(mediaUrl: string, req: Request, res: Response): Promise<void> {
-    const parsed = new URL(mediaUrl);
-    const targetPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
-    const reqHeaders: Record<string, string> = {
+  function sanitizeHttpHeaderValue(val: string): string {
+    return val.replace(/[\r\n\0]+/g, ' ').trim();
+  }
+
+  function extractCookieHeaderFromYtDlp(rawCookies: unknown): string {
+    if (typeof rawCookies !== 'string' || !rawCookies.trim()) return '';
+    const attrNames = new Set(['domain', 'path', 'expires', 'max-age', 'samesite', 'secure', 'httponly', 'priority']);
+    const pairs: string[] = [];
+    for (const part of rawCookies.split(';')) {
+      const trimmed = part.trim();
+      const eq = trimmed.indexOf('=');
+      if (eq <= 0) continue;
+      const name = trimmed.slice(0, eq).trim();
+      if (attrNames.has(name.toLowerCase())) continue;
+      pairs.push(sanitizeHttpHeaderValue(trimmed));
+    }
+    return pairs.join('; ');
+  }
+
+  function buildUpstreamHeaders(customHeaders?: Record<string, string>, cookieStr?: string): Record<string, string> {
+    const out: Record<string, string> = {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     };
+    if (customHeaders) {
+      for (const [k, v] of Object.entries(customHeaders)) {
+        if (!v || typeof v !== 'string') continue;
+        const keyLower = k.toLowerCase();
+        if (['host', 'connection', 'content-length', 'accept-encoding', 'range'].includes(keyLower)) continue;
+        const cleanKey = k.replace(/[^a-zA-Z0-9-]/g, '');
+        const cleanVal = sanitizeHttpHeaderValue(v);
+        if (cleanKey && cleanVal) {
+          out[cleanKey] = cleanVal;
+        }
+      }
+    }
+    if (cookieStr && !out.Cookie && !out.cookie) {
+      const cleanCookie = sanitizeHttpHeaderValue(cookieStr);
+      if (cleanCookie) out.Cookie = cleanCookie;
+    }
+    return out;
+  }
+
+  async function proxyRemoteMediaWithRange(
+    mediaUrl: string,
+    req: Request,
+    res: Response,
+    customHeaders?: Record<string, string>,
+    redirectDepth = 0
+  ): Promise<void> {
+    const parsed = new URL(mediaUrl);
+    const targetPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+    const reqHeaders = buildUpstreamHeaders(customHeaders);
     if (typeof req.headers.range === 'string' && req.headers.range) {
       reqHeaders.Range = req.headers.range;
     }
 
-    const forwardUpstream = (upstreamRes: http.IncomingMessage) => {
+    const handleUpstream = (
+      upstreamRes: http.IncomingMessage,
+      resolve: () => void,
+      reject: (err: Error) => void
+    ) => {
       const status = upstreamRes.statusCode || 200;
+      if (status >= 300 && status < 400 && upstreamRes.headers.location) {
+        const location = upstreamRes.headers.location;
+        upstreamRes.resume();
+        if (redirectDepth >= 5) {
+          reject(new Error('Too many redirects from media source.'));
+          return;
+        }
+        let nextRaw = '';
+        try {
+          nextRaw = new URL(location, parsed).toString();
+        } catch {
+          reject(new Error('Invalid redirect location from media source.'));
+          return;
+        }
+        void validatePublicUrl(nextRaw)
+          .then((validNext) => {
+            if (!validNext) {
+              throw new Error('Disallowed redirect URL from media source.');
+            }
+            return proxyRemoteMediaWithRange(validNext.toString(), req, res, customHeaders, redirectDepth + 1);
+          })
+          .then(resolve)
+          .catch((err) => reject(err instanceof Error ? err : new Error(String(err))));
+        return;
+      }
+
+      if (status >= 400) {
+        upstreamRes.destroy();
+        reject(new Error(`Upstream media returned HTTP ${status}.`));
+        return;
+      }
+
+      const upstreamCt = String(upstreamRes.headers['content-type'] || '').toLowerCase();
+      if (
+        upstreamCt.startsWith('text/html') ||
+        upstreamCt.startsWith('application/xhtml') ||
+        upstreamCt.startsWith('application/json') ||
+        upstreamCt.startsWith('text/plain') ||
+        upstreamCt.startsWith('application/xml')
+      ) {
+        upstreamRes.destroy();
+        reject(new Error('Source URL did not return a playable video or audio stream.'));
+        return;
+      }
+
       res.status(status);
       const copyHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
       for (const h of copyHeaders) {
@@ -4705,10 +5899,22 @@ async function startServer() {
       if (!upstreamRes.headers['content-type']) {
         res.setHeader('Content-Type', 'video/mp4');
       }
-      upstreamRes.pipe(res);
-      req.on('close', () => {
+      res.setHeader('Cache-Control', 'no-store');
+
+      const onReqClose = () => {
         upstreamRes.destroy();
+      };
+      req.once('close', onReqClose);
+      upstreamRes.on('error', (err) => {
+        req.off('close', onReqClose);
+        if (!res.writableEnded) res.destroy(err);
+        reject(err);
       });
+      upstreamRes.on('end', () => {
+        req.off('close', onReqClose);
+        resolve();
+      });
+      upstreamRes.pipe(res);
     };
 
     if (adminConfig.xray.enabled && xrayState.running) {
@@ -4739,13 +5945,10 @@ async function startServer() {
               createConnection,
               headers: { ...reqHeaders, Host: parsed.host },
             },
-            (upstreamRes) => {
-              forwardUpstream(upstreamRes);
-              upstreamRes.on('end', resolve);
-            }
+            (upstreamRes) => handleUpstream(upstreamRes, resolve, reject)
           );
           upstreamReq.on('error', reject);
-          req.on('close', () => upstreamReq.destroy());
+          req.once('close', () => upstreamReq.destroy());
           upstreamReq.end();
         });
         connectReq.on('error', reject);
@@ -4764,16 +5967,171 @@ async function startServer() {
           method: 'GET',
           headers: reqHeaders,
         },
-        (upstreamRes) => {
-          forwardUpstream(upstreamRes);
-          upstreamRes.on('end', resolve);
-        }
+        (upstreamRes) => handleUpstream(upstreamRes, resolve, reject)
       );
       upstreamReq.on('error', reject);
-      req.on('close', () => upstreamReq.destroy());
+      req.once('close', () => upstreamReq.destroy());
       upstreamReq.end();
     });
   }
+
+  async function fetchRemoteImageBuffer(
+    imageUrl: string,
+    redirectDepth = 0
+  ): Promise<{ status: number; contentType: string; data: Buffer }> {
+    const parsed = new URL(imageUrl);
+    const targetPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+    const headers: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+    };
+    if (/(?:instagram\.com|cdninstagram\.com|fbcdn\.net)$/i.test(parsed.hostname)) {
+      headers.Referer = 'https://www.instagram.com/';
+    } else if (/(?:tiktok\.com|tiktokcdn\.com|tiktokcdn-us\.com|tiktokv\.com)$/i.test(parsed.hostname)) {
+      headers.Referer = 'https://www.tiktok.com/';
+    } else if (/(?:x\.com|twitter\.com|twimg\.com)$/i.test(parsed.hostname)) {
+      headers.Referer = 'https://x.com/';
+    }
+
+    const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    const readUpstream = (
+      upstreamRes: http.IncomingMessage,
+      resolve: (v: { status: number; contentType: string; data: Buffer }) => void,
+      reject: (err: Error) => void
+    ) => {
+      const status = upstreamRes.statusCode || 200;
+      if (status >= 300 && status < 400 && upstreamRes.headers.location) {
+        const location = upstreamRes.headers.location;
+        upstreamRes.resume();
+        if (redirectDepth >= 4) {
+          reject(new Error('Too many redirects fetching thumbnail.'));
+          return;
+        }
+        let nextUrl = '';
+        try {
+          nextUrl = new URL(location, parsed).toString();
+        } catch {
+          reject(new Error('Invalid redirect URL for thumbnail.'));
+          return;
+        }
+        void validatePublicUrl(nextUrl)
+          .then((validNext) => {
+            if (!validNext) throw new Error('Disallowed thumbnail redirect target.');
+            return fetchRemoteImageBuffer(validNext.toString(), redirectDepth + 1);
+          })
+          .then(resolve)
+          .catch((e) => reject(e instanceof Error ? e : new Error(String(e))));
+        return;
+      }
+
+      if (status >= 400) {
+        upstreamRes.destroy();
+        reject(new Error(`Thumbnail upstream returned HTTP ${status}.`));
+        return;
+      }
+
+      const ct = String(upstreamRes.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+      if (!ct.startsWith('image/')) {
+        upstreamRes.destroy();
+        reject(new Error('Upstream did not return an image.'));
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      let total = 0;
+      upstreamRes.on('data', (chunk: Buffer) => {
+        total += chunk.byteLength;
+        if (total > MAX_IMAGE_BYTES) {
+          upstreamRes.destroy();
+          reject(new Error('Thumbnail too large.'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      upstreamRes.on('error', reject);
+      upstreamRes.on('end', () => {
+        resolve({ status, contentType: ct, data: Buffer.concat(chunks) });
+      });
+    };
+
+    if (adminConfig.xray.enabled && xrayState.running) {
+      return new Promise((resolve, reject) => {
+        const connectReq = http.request({
+          host: '127.0.0.1',
+          port: adminConfig.xray.httpPort,
+          method: 'CONNECT',
+          path: `${parsed.hostname}:${targetPort}`,
+          timeout: 10000,
+        });
+        connectReq.on('connect', (cRes, socket) => {
+          if (cRes.statusCode !== 200) {
+            socket.destroy();
+            reject(new Error(`Proxy CONNECT ${cRes.statusCode}`));
+            return;
+          }
+          const mod = parsed.protocol === 'https:' ? https : http;
+          const createConnection = () =>
+            parsed.protocol === 'https:'
+              ? tls.connect({ socket, servername: parsed.hostname })
+              : socket;
+          const upstreamReq = mod.request(
+            {
+              hostname: parsed.hostname,
+              port: targetPort,
+              path: parsed.pathname + parsed.search,
+              method: 'GET',
+              createConnection,
+              headers: { ...headers, Host: parsed.host },
+              timeout: 12000,
+            },
+            (upstreamRes) => readUpstream(upstreamRes, resolve, reject)
+          );
+          upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('Thumbnail fetch timed out.')));
+          upstreamReq.on('error', reject);
+          upstreamReq.end();
+        });
+        connectReq.on('timeout', () => connectReq.destroy(new Error('Proxy connect timed out.')));
+        connectReq.on('error', reject);
+        connectReq.end();
+      });
+    }
+
+    return new Promise((resolve, reject) => {
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const upstreamReq = mod.request(
+        {
+          hostname: parsed.hostname,
+          port: targetPort,
+          path: parsed.pathname + parsed.search,
+          method: 'GET',
+          headers,
+          timeout: 12000,
+        },
+        (upstreamRes) => readUpstream(upstreamRes, resolve, reject)
+      );
+      upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('Thumbnail fetch timed out.')));
+      upstreamReq.on('error', reject);
+      upstreamReq.end();
+    });
+  }
+
+  app.get('/api/media/thumbnail', async (req: Request, res: Response) => {
+    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    const parsed = await validatePublicUrl(rawUrl);
+    if (!parsed) {
+      res.status(400).json({ error: 'Invalid thumbnail URL.' });
+      return;
+    }
+    try {
+      const img = await fetchRemoteImageBuffer(parsed.toString());
+      res.setHeader('Content-Type', img.contentType);
+      res.setHeader('Cache-Control', 'public, max-age=300');
+      res.send(img.data);
+    } catch {
+      res.status(404).end();
+    }
+  });
 
   app.post('/api/media/inspect', async (req: Request, res: Response) => {
     const body = req.body as { url?: unknown };
@@ -4784,18 +6142,97 @@ async function startServer() {
       return;
     }
 
+    if (isInstagramUrl(parsed)) {
+      const normalizedIgUrl = normalizeInstagramUrl(parsed);
+      try {
+        const info = await runParthDlInfo(normalizedIgUrl);
+        const entries = Array.isArray(info.entries) ? info.entries : [];
+        const hasVideo = entries.some(
+          (e) => e.kind === 'video' && Array.isArray(e.formats) && e.formats.length > 0
+        );
+        const rawThumb = pickInstagramThumbnail(info);
+        const proxiedThumb = rawThumb ? `/api/media/thumbnail?url=${encodeURIComponent(rawThumb)}` : null;
+        const uploaderClean = (info.uploader || '').replace(/^@/, '').trim();
+        res.json({
+          title: cleanInstagramTitle(info),
+          author: uploaderClean ? `@${uploaderClean}` : 'Instagram',
+          durationSeconds: typeof info.duration === 'number' ? info.duration : null,
+          thumbnail: proxiedThumb,
+          providerGlow: 'instagram',
+          mediaKind: info.type || (hasVideo ? 'video' : 'image'),
+          hasVideo,
+          itemCount: entries.length,
+          qualities: ['best'],
+          engineMode: 'live',
+          audioTracks: [],
+          manualSubtitles: [],
+          autoSubtitles: [],
+        });
+        return;
+      } catch (igErr) {
+        // Fallback to yt-dlp only for URL shapes parth-dl intentionally omits (e.g. stories)
+        const runnerFallback = await getYtDlpRunner();
+        const isStoriesPath = /\/stories\//i.test(parsed.pathname);
+        if (runnerFallback && isStoriesPath) {
+          try {
+            const { extraArgs, env } = await getYtDlpAuthAndProxy();
+            const args = insertBeforeDoubleDash(
+              buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', normalizedIgUrl]),
+              extraArgs
+            );
+            const { stdout } = await execFileAsync(runnerFallback.cmd, [...runnerFallback.baseArgs, ...args], {
+              timeout: 20000,
+              maxBuffer: 4 * 1024 * 1024,
+              env,
+            });
+            const info = JSON.parse(stdout) as Record<string, unknown> & {
+              title?: string;
+              uploader?: string;
+              duration?: number;
+              thumbnail?: string;
+            };
+            res.json({
+              title: info.title || 'Instagram Story',
+              author: info.uploader || 'Instagram',
+              durationSeconds: typeof info.duration === 'number' ? info.duration : null,
+              thumbnail: info.thumbnail ? `/api/media/thumbnail?url=${encodeURIComponent(info.thumbnail)}` : null,
+              providerGlow: 'instagram',
+              mediaKind: 'video',
+              hasVideo: true,
+              itemCount: 1,
+              qualities: ['best'],
+              engineMode: 'live',
+              audioTracks: [],
+              manualSubtitles: [],
+              autoSubtitles: [],
+            });
+            return;
+          } catch {
+            // Fall through to structured error below
+          }
+        }
+        const statusCode = igErr instanceof ParthDlInvocationError && igErr.code === 'RATE_LIMIT' ? 429 : 422;
+        res.status(statusCode).json({
+          error: igErr instanceof Error ? igErr.message : 'Could not fetch Instagram media details.',
+          providerGlow: 'instagram',
+        });
+        return;
+      }
+    }
+
     const ytId = extractYouTubeId(parsed);
+    const targetUrlForInspect = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
     const runner = await getYtDlpRunner();
 
     if (runner) {
       try {
         const { extraArgs, env } = await getYtDlpAuthAndProxy();
         const args = insertBeforeDoubleDash(
-          buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', parsed.toString()]),
+          buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', targetUrlForInspect]),
           extraArgs
         );
         const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
-          timeout: 20000,
+          timeout: 22000,
           maxBuffer: 4 * 1024 * 1024,
           env,
         });
@@ -4803,15 +6240,22 @@ async function startServer() {
           title?: string;
           uploader?: string;
           channel?: string;
+          creator?: string;
           duration?: number;
           thumbnail?: string;
         };
         const tracks = extractYtDlpTracks(info);
+        const rawThumb =
+          typeof info.thumbnail === 'string' && info.thumbnail
+            ? info.thumbnail
+            : ytId
+              ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`
+              : null;
         res.json({
           title: info.title || 'Media Stream',
-          author: info.uploader || info.channel || parsed.hostname,
+          author: info.uploader || info.channel || info.creator || parsed.hostname,
           durationSeconds: typeof info.duration === 'number' ? info.duration : null,
-          thumbnail: info.thumbnail || (ytId ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg` : null),
+          thumbnail: maybeProxySocialThumbnail(rawThumb, parsed),
           providerGlow: ytId ? 'red' : 'default',
           qualities: ['2160p', '1080p', '720p', '480p', '360p'],
           engineMode: 'live',
@@ -4821,7 +6265,63 @@ async function startServer() {
         });
         return;
       } catch {
-        // Fall through to @distube/ytdl-core / oEmbed
+        // Fall through to X/TikTok fallbacks or @distube/ytdl-core
+      }
+    }
+
+    if (isXUrl(parsed)) {
+      try {
+        const xInfo = await resolveXMediaFallback(parsed);
+        const hasVideo = xInfo.videos.length > 0;
+        res.json({
+          title: xInfo.title,
+          author: xInfo.author,
+          durationSeconds: xInfo.durationSeconds,
+          thumbnail: maybeProxySocialThumbnail(xInfo.thumbnail, parsed),
+          providerGlow: 'x',
+          mediaKind: hasVideo ? 'video' : xInfo.photos.length > 1 ? 'carousel' : 'image',
+          hasVideo,
+          itemCount: hasVideo ? xInfo.videos.length : xInfo.photos.length,
+          qualities: ['best'],
+          engineMode: 'live',
+          audioTracks: [],
+          manualSubtitles: [],
+          autoSubtitles: [],
+        });
+        return;
+      } catch (xErr) {
+        res.status(422).json({
+          error: xErr instanceof Error ? xErr.message : 'Could not fetch X / Twitter media.',
+        });
+        return;
+      }
+    }
+
+    if (isTikTokUrl(parsed)) {
+      try {
+        const ttInfo = await resolveTikTokMediaFallback(parsed);
+        const hasVideo = ttInfo.videos.length > 0;
+        res.json({
+          title: ttInfo.title,
+          author: ttInfo.author,
+          durationSeconds: ttInfo.durationSeconds,
+          thumbnail: maybeProxySocialThumbnail(ttInfo.thumbnail, parsed),
+          providerGlow: 'tiktok',
+          mediaKind: hasVideo ? 'video' : ttInfo.photos.length > 1 ? 'carousel' : 'image',
+          hasVideo,
+          itemCount: hasVideo ? ttInfo.videos.length : ttInfo.photos.length,
+          qualities: ['best'],
+          engineMode: 'live',
+          audioTracks: [],
+          manualSubtitles: [],
+          autoSubtitles: [],
+        });
+        return;
+      } catch (ttErr) {
+        res.status(422).json({
+          error: ttErr instanceof Error ? ttErr.message : 'Could not fetch TikTok media.',
+        });
+        return;
       }
     }
 
@@ -4955,67 +6455,335 @@ async function startServer() {
     const ytId = extractYouTubeId(parsed);
 
     try {
+      if (isInstagramUrl(parsed)) {
+        const normalizedIgUrl = normalizeInstagramUrl(parsed);
+        const targetH = selectTargetHeight(job.quality);
+        const parthQuality: 'best' | 'worst' = !isAudio && targetH <= 480 ? 'worst' : 'best';
+        const xrayFingerprint = `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${xrayState.running}`;
+        const cachedInfo = instagramInfoCache.get(`${normalizedIgUrl}::${xrayFingerprint}`)?.info || null;
+
+        let workDir = '';
+        try {
+          workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-ig-'));
+          const { files } = await runParthDlDownload(
+            normalizedIgUrl,
+            workDir,
+            parthQuality,
+            cachedInfo,
+            (downloaded, total) => {
+              job.downloadedBytes = downloaded;
+              if (total > 0) {
+                job.totalBytes = total;
+                job.progress = Math.min(92, Math.max(5, Math.floor((downloaded / total) * 90)));
+              } else {
+                job.progress = Math.min(88, job.progress + 2);
+              }
+            }
+          );
+
+          const resolvedFiles = files
+            .map((f) => path.resolve(f))
+            .filter((f) => f.startsWith(workDir + path.sep) && fs.existsSync(f));
+          if (resolvedFiles.length === 0) {
+            throw new Error('No downloadable files returned for this Instagram link.');
+          }
+
+          if (isAudio) {
+            const videoFile = resolvedFiles.find((f) => /\.(mp4|mov|webm|mkv|m4v)$/i.test(f));
+            if (!videoFile) {
+              throw new Error('This Instagram post does not contain a video track for MP3 extraction.');
+            }
+            job.status = 'processing';
+            job.progress = 90;
+            await new Promise<void>((resolve, reject) => {
+              const ff = spawn(
+                'ffmpeg',
+                [
+                  '-y',
+                  '-i', videoFile,
+                  '-vn',
+                  '-c:a', 'libmp3lame',
+                  '-b:a', '192k',
+                  '-metadata', `title=${sanitizeFilename(job.title)}`,
+                  '-f', 'mp3',
+                  job.filePath,
+                ],
+                { shell: false }
+              );
+              ff.on('error', reject);
+              ff.on('close', (code) => {
+                if (code === 0) resolve();
+                else reject(new Error('Audio extraction failed'));
+              });
+            });
+            await finalizeJobFile(job);
+            return;
+          }
+
+          if (resolvedFiles.length > 1) {
+            job.status = 'processing';
+            job.progress = 92;
+            const archiveExt: DownloadFileExt = 'zip';
+            const archivePath = path.resolve(CACHE_DIR, `${job.id}.${archiveExt}`);
+            if (!archivePath.startsWith(CACHE_DIR + path.sep)) {
+              throw new Error('Invalid cache path.');
+            }
+            const fileNames = resolvedFiles.map((f) => path.basename(f));
+            await execFileAsync('python3', ['-m', 'zipfile', '-c', archivePath, ...fileNames], {
+              cwd: workDir,
+              timeout: 30000,
+            });
+            job.ext = archiveExt;
+            job.mimeType = getMimeTypeForExt(archiveExt);
+            job.filePath = archivePath;
+            job.contentDisposition = buildContentDisposition(job.title, job.quality, archiveExt);
+            job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${archiveExt}`;
+            await finalizeJobFile(job);
+            return;
+          }
+
+          const singleFile = resolvedFiles[0];
+          const rawExt = path.extname(singleFile).toLowerCase().replace('.', '');
+          const mappedExt: DownloadFileExt =
+            rawExt === 'jpeg' || rawExt === 'jpg'
+              ? 'jpg'
+              : rawExt === 'png'
+                ? 'png'
+                : rawExt === 'webp'
+                  ? 'webp'
+                  : 'mp4';
+
+          const finalPath = path.resolve(CACHE_DIR, `${job.id}.${mappedExt}`);
+          if (!finalPath.startsWith(CACHE_DIR + path.sep)) {
+            throw new Error('Invalid cache path.');
+          }
+          await fs.promises.copyFile(singleFile, finalPath);
+          job.ext = mappedExt;
+          job.mimeType = getMimeTypeForExt(mappedExt);
+          job.filePath = finalPath;
+          job.contentDisposition = buildContentDisposition(job.title, job.quality, mappedExt);
+          job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${mappedExt}`;
+          await finalizeJobFile(job);
+          return;
+        } finally {
+          if (workDir) {
+            await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
+          }
+        }
+      }
+
+      const targetUrlForDl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
       const runner = await getYtDlpRunner();
       if (runner) {
-        const targetH = String(selectTargetHeight(job.quality));
-        const audioFid = job.audioFormatId;
-        const videoFmtSelector = audioFid
-          ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFid}/bestvideo[height<=${targetH}]+${audioFid}/best[height<=${targetH}]/best`
-          : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`;
-        const audioFmtSelector = audioFid ? `${audioFid}/bestaudio/best` : undefined;
-        const baseArgs = isAudio
-          ? [
-              ...(audioFmtSelector ? ['-f', audioFmtSelector] : []),
-              '-x',
-              '--audio-format',
-              'mp3',
-              '-o',
-              job.filePath,
-              '--newline',
-              '--',
-              parsed.toString(),
-            ]
-          : [
-              '-f',
-              videoFmtSelector,
-              '--merge-output-format',
-              'mp4',
-              '--recode-video',
-              'mp4',
-              '-o',
-              job.filePath,
-              '--newline',
-              '--',
-              parsed.toString(),
-            ];
-        const { extraArgs, env } = await getYtDlpAuthAndProxy();
-        const finalArgs = insertBeforeDoubleDash(buildYtDlpArgs(baseArgs), extraArgs);
+        try {
+          const targetH = String(selectTargetHeight(job.quality));
+          const audioFid = job.audioFormatId;
+          const isTikTok = isTikTokUrl(parsed);
+          const videoFmtSelector = audioFid
+            ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFid}/bestvideo[height<=${targetH}]+${audioFid}/best[height<=${targetH}]/best`
+            : isTikTok
+              ? `best[height<=${targetH}][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}]/best`
+              : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`;
+          const audioFmtSelector = audioFid ? `${audioFid}/bestaudio/best` : undefined;
+          const baseArgs = isAudio
+            ? [
+                ...(audioFmtSelector ? ['-f', audioFmtSelector] : []),
+                '-x',
+                '--audio-format',
+                'mp3',
+                '-o',
+                job.filePath,
+                '--newline',
+                '--',
+                targetUrlForDl,
+              ]
+            : [
+                '-f',
+                videoFmtSelector,
+                '--merge-output-format',
+                'mp4',
+                '--recode-video',
+                'mp4',
+                '-o',
+                job.filePath,
+                '--newline',
+                '--',
+                targetUrlForDl,
+              ];
+          const { extraArgs, env } = await getYtDlpAuthAndProxy();
+          const finalArgs = insertBeforeDoubleDash(buildYtDlpArgs(baseArgs), extraArgs);
 
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn(runner.cmd, [...runner.baseArgs, ...finalArgs], { shell: false, env });
-          let stderr = '';
-          child.stdout.on('data', (data) => {
-            const output = data.toString();
-            const progressMatch = output.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
-            if (progressMatch) {
-              const pct = Math.min(95, Math.max(5, Math.floor(parseFloat(progressMatch[1]))));
-              job.progress = pct;
+          await new Promise<void>((resolve, reject) => {
+            const child = spawn(runner.cmd, [...runner.baseArgs, ...finalArgs], { shell: false, env });
+            let stderr = '';
+            child.stdout.on('data', (data) => {
+              const output = data.toString();
+              const progressMatch = output.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+              if (progressMatch) {
+                const pct = Math.min(95, Math.max(5, Math.floor(parseFloat(progressMatch[1]))));
+                job.progress = pct;
+              }
+            });
+            child.stderr.on('data', (data) => {
+              stderr += data.toString();
+            });
+            child.on('close', async (code) => {
+              if (code === 0) {
+                await finalizeJobFile(job);
+                resolve();
+              } else {
+                reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+              }
+            });
+            child.on('error', reject);
+          });
+          return;
+        } catch (ytdlpErr) {
+          if (!isXUrl(parsed) && !isTikTokUrl(parsed)) {
+            throw ytdlpErr;
+          }
+          // Fall through to X / TikTok native fallback resolver below
+        }
+      }
+
+      if (isXUrl(parsed) || isTikTokUrl(parsed)) {
+        const resolved = isXUrl(parsed)
+          ? await resolveXMediaFallback(parsed)
+          : await resolveTikTokMediaFallback(parsed);
+        let workDir = '';
+        try {
+          workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-social-'));
+          if (isAudio) {
+            const sourceUrl = resolved.musicUrl || resolved.videos[0]?.url;
+            if (!sourceUrl) {
+              throw new Error('This post does not contain an audio or video stream for MP3 extraction.');
             }
-          });
-          child.stderr.on('data', (data) => {
-            stderr += data.toString();
-          });
-          child.on('close', async (code) => {
-            if (code === 0) {
-              await finalizeJobFile(job);
-              resolve();
-            } else {
-              reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+            const rawMediaPath = path.join(workDir, 'source.bin');
+            await downloadRemoteUrlToFile(
+              sourceUrl,
+              rawMediaPath,
+              resolved.referer,
+              (dl, tot) => {
+                job.downloadedBytes = dl;
+                if (tot > 0) {
+                  job.totalBytes = tot;
+                  job.progress = Math.min(84, Math.max(8, Math.floor((dl / tot) * 82)));
+                }
+              }
+            );
+            job.status = 'processing';
+            job.progress = 90;
+            await new Promise<void>((resolve, reject) => {
+              const ff = spawn(
+                'ffmpeg',
+                [
+                  '-y',
+                  '-i', rawMediaPath,
+                  '-vn',
+                  '-c:a', 'libmp3lame',
+                  '-b:a', '192k',
+                  '-metadata', `title=${sanitizeFilename(job.title)}`,
+                  '-f', 'mp3',
+                  job.filePath,
+                ],
+                { shell: false }
+              );
+              ff.on('error', reject);
+              ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error('Audio conversion failed'))));
+            });
+            await finalizeJobFile(job);
+            return;
+          }
+
+          if (resolved.videos.length > 0) {
+            const videoUrl = resolved.videos[0].url;
+            await downloadRemoteUrlToFile(
+              videoUrl,
+              job.filePath,
+              resolved.referer,
+              (dl, tot) => {
+                job.downloadedBytes = dl;
+                if (tot > 0) {
+                  job.totalBytes = tot;
+                  job.progress = Math.min(95, Math.max(8, Math.floor((dl / tot) * 95)));
+                }
+              }
+            );
+            await finalizeJobFile(job);
+            return;
+          }
+
+          if (resolved.photos.length > 1) {
+            const downloadedNames: string[] = [];
+            for (let i = 0; i < resolved.photos.length; i += 1) {
+              const photoPath = path.join(workDir, `photo_${i + 1}.jpg`);
+              const ct = await downloadRemoteUrlToFile(resolved.photos[i].url, photoPath, resolved.referer);
+              let finalPhotoName = `photo_${i + 1}.jpg`;
+              if (ct.includes('png')) finalPhotoName = `photo_${i + 1}.png`;
+              else if (ct.includes('webp')) finalPhotoName = `photo_${i + 1}.webp`;
+              if (finalPhotoName !== `photo_${i + 1}.jpg`) {
+                await fs.promises.rename(photoPath, path.join(workDir, finalPhotoName));
+              }
+              downloadedNames.push(finalPhotoName);
+              job.progress = Math.min(88, Math.round(((i + 1) / resolved.photos.length) * 85));
             }
-          });
-          child.on('error', reject);
-        });
-        return;
+            job.status = 'processing';
+            job.progress = 92;
+            const archiveExt: DownloadFileExt = 'zip';
+            const archivePath = path.resolve(CACHE_DIR, `${job.id}.${archiveExt}`);
+            if (!archivePath.startsWith(CACHE_DIR + path.sep)) {
+              throw new Error('Invalid cache path.');
+            }
+            await execFileAsync('python3', ['-m', 'zipfile', '-c', archivePath, ...downloadedNames], {
+              cwd: workDir,
+              timeout: 30000,
+            });
+            job.ext = archiveExt;
+            job.mimeType = getMimeTypeForExt(archiveExt);
+            job.filePath = archivePath;
+            job.contentDisposition = buildContentDisposition(job.title, job.quality, archiveExt);
+            job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${archiveExt}`;
+            await finalizeJobFile(job);
+            return;
+          }
+
+          if (resolved.photos.length === 1) {
+            const tmpPhoto = path.join(workDir, 'single.img');
+            const ct = await downloadRemoteUrlToFile(
+              resolved.photos[0].url,
+              tmpPhoto,
+              resolved.referer,
+              (dl, tot) => {
+                job.downloadedBytes = dl;
+                if (tot > 0) {
+                  job.totalBytes = tot;
+                  job.progress = Math.min(92, Math.max(8, Math.floor((dl / tot) * 90)));
+                }
+              }
+            );
+            const mappedExt: DownloadFileExt = ct.includes('png')
+              ? 'png'
+              : ct.includes('webp')
+                ? 'webp'
+                : 'jpg';
+            const finalPath = path.resolve(CACHE_DIR, `${job.id}.${mappedExt}`);
+            if (!finalPath.startsWith(CACHE_DIR + path.sep)) {
+              throw new Error('Invalid cache path.');
+            }
+            await fs.promises.copyFile(tmpPhoto, finalPath);
+            job.ext = mappedExt;
+            job.mimeType = getMimeTypeForExt(mappedExt);
+            job.filePath = finalPath;
+            job.contentDisposition = buildContentDisposition(job.title, job.quality, mappedExt);
+            job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${mappedExt}`;
+            await finalizeJobFile(job);
+            return;
+          }
+        } finally {
+          if (workDir) {
+            await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
+          }
+        }
       }
 
       if (ytId) {
@@ -5283,9 +7051,9 @@ async function startServer() {
       audioFormatId?: unknown;
     };
     const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
-    const quality =
+    const rawQuality =
       typeof body.quality === 'string' &&
-      ['2160p', '1080p', '720p', '480p', '360p', 'audio'].includes(body.quality.trim())
+      ['2160p', '1080p', '720p', '480p', '360p', 'best', 'audio'].includes(body.quality.trim())
         ? body.quality.trim()
         : '1080p';
     const rawTitle = typeof body.title === 'string' ? body.title : 'grove-save-media';
@@ -5298,6 +7066,10 @@ async function startServer() {
       return;
     }
 
+    const quality =
+      (isInstagramUrl(parsed) || isTikTokUrl(parsed) || isXUrl(parsed)) && rawQuality !== 'audio'
+        ? 'best'
+        : rawQuality;
     const id = crypto.randomUUID();
     const isAudio = quality === 'audio';
     const ext = isAudio ? 'mp3' : 'mp4';
@@ -5348,6 +7120,18 @@ async function startServer() {
       const storedId = telegramFileIdForJob(jobId);
       const stored = storedId ? lookupTelegramFile(storedId) : null;
       if (stored) {
+        const storedName = (stored.file_name || '').toLowerCase();
+        const inferredExt: DownloadFileExt = storedName.endsWith('.mp3')
+          ? 'mp3'
+          : storedName.endsWith('.zip')
+            ? 'zip'
+            : storedName.endsWith('.png')
+              ? 'png'
+              : storedName.endsWith('.webp')
+                ? 'webp'
+                : storedName.endsWith('.jpg') || storedName.endsWith('.jpeg')
+                  ? 'jpg'
+                  : 'mp4';
         res.json({
           id: jobId,
           status: 'ready',
@@ -5355,7 +7139,7 @@ async function startServer() {
           downloadedBytes: stored.size_bytes,
           totalBytes: stored.size_bytes,
           quality: stored.quality || '',
-          ext: (stored.file_name || '').toLowerCase().endsWith('.mp3') ? 'mp3' : 'mp4',
+          ext: inferredExt,
           title: stored.title,
           error: null,
           storage: 'telegram',
@@ -5473,11 +7257,201 @@ async function startServer() {
     });
   });
 
+  interface StreamInputSpec {
+    url: string;
+    headers: Record<string, string>;
+    protocol?: string;
+    vcodec?: string;
+    acodec?: string;
+    ext?: string;
+  }
+
+  interface ResolvedStreamEntry {
+    mode: 'proxy' | 'ffmpeg';
+    inputs: StreamInputSpec[];
+    expiresAt: number;
+  }
+
+  const streamResolveCache = new Map<string, ResolvedStreamEntry>();
+  const streamInflightMap = new Map<string, Promise<ResolvedStreamEntry>>();
+
+  function isManifestOrIncompatibleFormat(input: StreamInputSpec): boolean {
+    const proto = (input.protocol || '').toLowerCase();
+    const ext = (input.ext || '').toLowerCase();
+    const lowerUrl = input.url.toLowerCase();
+    if (
+      proto.includes('m3u8') ||
+      proto.includes('dash') ||
+      /\.m3u8(\?|$)/i.test(lowerUrl) ||
+      /\.mpd(\?|$)/i.test(lowerUrl)
+    ) {
+      return true;
+    }
+    if (ext && !['mp4', 'webm', 'm4v', 'mov', 'mp3', 'm4a', 'ogg', 'wav'].includes(ext)) {
+      return true;
+    }
+    return false;
+  }
+
+  async function spawnFfmpegStream(
+    inputs: StreamInputSpec[],
+    baseEnv: NodeJS.ProcessEnv,
+    req: Request,
+    res: Response
+  ): Promise<void> {
+    const ffArgs: string[] = [];
+    for (const inp of inputs) {
+      const proto = (inp.protocol || '').toLowerCase();
+      const lowerUrl = inp.url.toLowerCase();
+      const isManifest =
+        proto.includes('m3u8') ||
+        proto.includes('dash') ||
+        /\.m3u8(\?|$)/i.test(lowerUrl) ||
+        /\.mpd(\?|$)/i.test(lowerUrl);
+      if (!isManifest) {
+        ffArgs.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+      }
+      const ua = inp.headers['User-Agent'] || inp.headers['user-agent'];
+      if (ua) {
+        ffArgs.push('-user_agent', sanitizeHttpHeaderValue(ua));
+      }
+      const headerLines: string[] = [];
+      for (const [k, v] of Object.entries(inp.headers)) {
+        const kl = k.toLowerCase();
+        if (['user-agent', 'host', 'connection', 'content-length', 'accept-encoding', 'range'].includes(kl)) continue;
+        const cleanK = k.replace(/[^a-zA-Z0-9-]/g, '');
+        const cleanV = sanitizeHttpHeaderValue(v);
+        if (cleanK && cleanV) headerLines.push(`${cleanK}: ${cleanV}\r\n`);
+      }
+      if (headerLines.length > 0) {
+        ffArgs.push('-headers', headerLines.join(''));
+      }
+      ffArgs.push('-i', inp.url);
+    }
+
+    const primaryVcodec = (inputs[0]?.vcodec || '').toLowerCase();
+    const primaryExt = (inputs[0]?.ext || '').toLowerCase();
+    const needsVideoTranscode =
+      ['mpeg4', 'msmpeg4', 'divx', 'xvid', 'wmv', 'flv', 'vp6', 'h263'].some((c) => primaryVcodec.includes(c)) ||
+      ['avi', 'wmv', 'flv'].includes(primaryExt);
+
+    if (needsVideoTranscode) {
+      ffArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p');
+    } else {
+      ffArgs.push('-c:v', 'copy');
+    }
+
+    ffArgs.push(
+      '-c:a',
+      'aac',
+      '-b:a',
+      '160k',
+      '-movflags',
+      'frag_keyframe+empty_moov+default_base_moof',
+      '-f',
+      'mp4',
+      'pipe:1'
+    );
+
+    const ffEnv: NodeJS.ProcessEnv = { ...baseEnv };
+    delete ffEnv.ALL_PROXY;
+    delete ffEnv.all_proxy;
+    if (adminConfig.xray.enabled && xrayState.running) {
+      const hp = `http://127.0.0.1:${adminConfig.xray.httpPort}`;
+      ffEnv.http_proxy = hp;
+      ffEnv.https_proxy = hp;
+      ffEnv.HTTP_PROXY = hp;
+      ffEnv.HTTPS_PROXY = hp;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const ff = spawn('ffmpeg', ffArgs, { shell: false, env: ffEnv });
+      let committed = false;
+      let finished = false;
+      let stderrBuf = '';
+
+      const cleanupProcess = () => {
+        if (!ff.killed && ff.exitCode === null) {
+          try {
+            ff.kill('SIGTERM');
+          } catch {}
+          setTimeout(() => {
+            if (ff.exitCode === null) {
+              try {
+                ff.kill('SIGKILL');
+              } catch {}
+            }
+          }, 400).unref();
+        }
+      };
+
+      const onReqClose = () => {
+        finished = true;
+        cleanupProcess();
+        resolve();
+      };
+      req.once('close', onReqClose);
+
+      ff.stderr.on('data', (chunk: Buffer) => {
+        if (stderrBuf.length < 4096) {
+          stderrBuf += chunk.toString('utf8');
+        }
+      });
+
+      ff.stdout.on('data', (chunk: Buffer) => {
+        if (finished || res.writableEnded) return;
+        if (!committed) {
+          committed = true;
+          res.status(200);
+          res.setHeader('Content-Type', 'video/mp4');
+          res.setHeader('Accept-Ranges', 'none');
+          res.setHeader('Cache-Control', 'no-store');
+        }
+        if (!res.write(chunk)) {
+          ff.stdout.pause();
+          res.once('drain', () => {
+            if (!finished && !ff.killed) ff.stdout.resume();
+          });
+        }
+      });
+
+      ff.on('error', (err) => {
+        req.off('close', onReqClose);
+        if (finished) return;
+        finished = true;
+        if (!committed && !res.headersSent) {
+          reject(err);
+        } else {
+          if (!res.writableEnded) res.end();
+          resolve();
+        }
+      });
+
+      ff.on('close', (code) => {
+        req.off('close', onReqClose);
+        if (finished) return;
+        finished = true;
+        if (!committed && !res.headersSent) {
+          const lines = stderrBuf
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter(Boolean);
+          reject(new Error(lines[lines.length - 1] || `ffmpeg exited with code ${code}`));
+        } else {
+          if (!res.writableEnded) res.end();
+          resolve();
+        }
+      });
+    });
+  }
+
   // Online inline player streaming endpoint (supports Range requests, audio track switching, and Xray VPN proxy)
   app.get('/api/media/stream', async (req: Request, res: Response) => {
     const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
-    const quality = typeof req.query.quality === 'string' ? req.query.quality.trim() : '720p';
+    const rawQuality = typeof req.query.quality === 'string' ? req.query.quality.trim() : '720p';
+    const quality = rawQuality === 'audio' ? '360p' : rawQuality;
     const audioFormatId = validateAudioFormatId(req.query.audioFormatId);
+    const requestedJobId = typeof req.query.jobId === 'string' ? req.query.jobId.trim() : '';
 
     const parsed = await validatePublicUrl(rawUrl);
     if (!parsed) {
@@ -5485,102 +7459,249 @@ async function startServer() {
       return;
     }
 
-    const targetH = selectTargetHeight(quality === 'audio' ? '360p' : quality);
+    // 0. If a matching prepared/ready file already exists in cache or Telegram, stream it directly with full Range seeking
+    const matchingJob =
+      (requestedJobId && /^[0-9a-f-]{36}$/i.test(requestedJobId) ? downloadJobs.get(requestedJobId) : undefined) ||
+      Array.from(downloadJobs.values()).find(
+        (j) =>
+          j.status === 'ready' &&
+          j.ext === 'mp4' &&
+          j.url === parsed.toString() &&
+          j.quality === quality &&
+          (j.audioFormatId || '') === (audioFormatId || '')
+      );
+    if (matchingJob && matchingJob.status === 'ready' && matchingJob.ext === 'mp4') {
+      if (matchingJob.telegramFileId) {
+        const stored = lookupTelegramFile(matchingJob.telegramFileId);
+        if (stored) {
+          await streamTelegramFile(stored, req, res, true);
+          return;
+        }
+      }
+      const resolvedFile = path.resolve(matchingJob.filePath);
+      if (resolvedFile.startsWith(CACHE_DIR + path.sep) && fs.existsSync(resolvedFile)) {
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Content-Disposition', 'inline');
+        res.sendFile(resolvedFile);
+        return;
+      }
+    }
+
+    const targetH = selectTargetHeight(quality);
+
+    if (isInstagramUrl(parsed)) {
+      const normalizedIgUrl = normalizeInstagramUrl(parsed);
+      try {
+        let info = await runParthDlInfo(normalizedIgUrl);
+        let entries = Array.isArray(info.entries) ? info.entries : [];
+        let videoEntry = entries.find((e) => e.kind === 'video' && Array.isArray(e.formats) && e.formats.length > 0);
+        if (!videoEntry) {
+          res.status(422).json({
+            error: 'This Instagram post contains images only.',
+            code: 'INSTAGRAM_IMAGE_ONLY',
+          });
+          return;
+        }
+        let fmt = selectInstagramVideoFormat(videoEntry, targetH);
+        let validFmtUrl = fmt?.url ? await validatePublicUrl(fmt.url) : null;
+        if (!validFmtUrl) {
+          res.status(502).json({ error: 'No playable Instagram video URL found.' });
+          return;
+        }
+        try {
+          await proxyRemoteMediaWithRange(validFmtUrl.toString(), req, res, {
+            Referer: 'https://www.instagram.com/',
+          });
+          return;
+        } catch (proxyErr) {
+          const msg = proxyErr instanceof Error ? proxyErr.message : '';
+          if (!res.headersSent && /HTTP 403|HTTP 410|HTTP 404/i.test(msg)) {
+            info = await runParthDlInfo(normalizedIgUrl, true);
+            entries = Array.isArray(info.entries) ? info.entries : [];
+            videoEntry = entries.find((e) => e.kind === 'video' && Array.isArray(e.formats) && e.formats.length > 0);
+            fmt = videoEntry ? selectInstagramVideoFormat(videoEntry, targetH) : null;
+            validFmtUrl = fmt?.url ? await validatePublicUrl(fmt.url) : null;
+            if (validFmtUrl) {
+              await proxyRemoteMediaWithRange(validFmtUrl.toString(), req, res, {
+                Referer: 'https://www.instagram.com/',
+              });
+              return;
+            }
+          }
+          throw proxyErr;
+        }
+      } catch (igErr) {
+        if (!res.headersSent) {
+          const status = igErr instanceof ParthDlInvocationError && igErr.code === 'RATE_LIMIT' ? 429 : 502;
+          res.status(status).json({
+            error: igErr instanceof Error ? igErr.message : 'Unable to stream Instagram video.',
+            code: igErr instanceof ParthDlInvocationError ? igErr.code : 'STREAM_UNAVAILABLE',
+          });
+        }
+        return;
+      }
+    }
+
     const ytId = extractYouTubeId(parsed);
+    const streamTargetUrl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
+    const isTikTok = isTikTokUrl(parsed);
     const runner = await getYtDlpRunner();
+    let lastStreamError = '';
 
     if (runner) {
       try {
         const { extraArgs, env } = await getYtDlpAuthAndProxy();
+        const cfgFingerprint = `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${adminConfig.potProvider.enabled}:${Boolean(adminConfig.youtubeCookies)}`;
+        const cacheKey = `${streamTargetUrl}::${targetH}::${audioFormatId || ''}::${cfgFingerprint}`;
 
-        // 1. If no custom audio track is selected, prefer a single progressive MP4 for instant Range seeking
-        if (!audioFormatId) {
-          const singleArgs = insertBeforeDoubleDash(
-            buildYtDlpArgs([
-              '-g',
-              '-f',
-              `best[height<=${targetH}][ext=mp4][vcodec!=none][acodec!=none]/best[height<=${targetH}][vcodec!=none][acodec!=none]`,
-              '--no-playlist',
-              '--no-warnings',
-              '--',
-              parsed.toString(),
-            ]),
-            extraArgs
-          );
+        let resolvedEntry = streamResolveCache.get(cacheKey);
+        if (resolvedEntry && resolvedEntry.expiresAt < Date.now()) {
+          streamResolveCache.delete(cacheKey);
+          resolvedEntry = undefined;
+        }
+
+        if (!resolvedEntry) {
+          let inflight = streamInflightMap.get(cacheKey);
+          if (!inflight) {
+            inflight = (async () => {
+              const formatSelector = audioFormatId
+                ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFormatId}/bestvideo[height<=${targetH}]+${audioFormatId}/best[height<=${targetH}]`
+                : isTikTok
+                  ? `best[height<=${targetH}][format_id!*=-watermarked][ext=mp4][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][ext=mp4][vcodec!=none][acodec!=none]/best[height<=${targetH}]/best`
+                  : targetH <= 360
+                    ? `best[height<=360][ext=mp4][vcodec^=avc][acodec^=mp4a]/best[height<=360][ext=mp4][vcodec!=none][acodec!=none]/bestvideo[height<=360][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=360]+bestaudio/best[height<=360]/best`
+                    : `best[height<=${targetH}][height>=480][ext=mp4][vcodec!=none][acodec!=none]/bestvideo[height<=${targetH}][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=${targetH}]+bestaudio/best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`;
+
+              const args = insertBeforeDoubleDash(
+                buildYtDlpArgs([
+                  '--dump-single-json',
+                  '-f',
+                  formatSelector,
+                  '--no-playlist',
+                  '--playlist-items',
+                  '1',
+                  '--no-warnings',
+                  '--',
+                  streamTargetUrl,
+                ]),
+                extraArgs
+              );
+              const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
+                timeout: 25000,
+                maxBuffer: 8 * 1024 * 1024,
+                env,
+              });
+              const rawJson = JSON.parse(stdout) as Record<string, unknown> & {
+                entries?: Array<Record<string, unknown>>;
+              };
+              const entry =
+                Array.isArray(rawJson.entries) && rawJson.entries.length > 0 ? rawJson.entries[0] : rawJson;
+
+              const toSpec = (fmt: Record<string, unknown>): StreamInputSpec | null => {
+                const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
+                if (!/^https?:\/\//i.test(u)) return null;
+                const hdrs = buildUpstreamHeaders(
+                  fmt.http_headers && typeof fmt.http_headers === 'object'
+                    ? (fmt.http_headers as Record<string, string>)
+                    : undefined,
+                  extractCookieHeaderFromYtDlp(fmt.cookies)
+                );
+                return {
+                  url: u,
+                  headers: hdrs,
+                  protocol: typeof fmt.protocol === 'string' ? fmt.protocol : undefined,
+                  vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
+                  acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
+                  ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
+                };
+              };
+
+              const reqFmts = Array.isArray(entry.requested_formats)
+                ? (entry.requested_formats as Array<Record<string, unknown>>)
+                : null;
+              let inputs: StreamInputSpec[] = [];
+              if (reqFmts && reqFmts.length >= 2) {
+                inputs = reqFmts.map(toSpec).filter((x): x is StreamInputSpec => x !== null);
+              } else if (reqFmts && reqFmts.length === 1) {
+                const one = toSpec(reqFmts[0]);
+                if (one) inputs = [one];
+              } else {
+                const one = toSpec(entry);
+                if (one) inputs = [one];
+              }
+
+              if (inputs.length === 0) {
+                throw new Error('No playable stream URL found for this media.');
+              }
+
+              const mode: 'proxy' | 'ffmpeg' =
+                inputs.length >= 2 || isManifestOrIncompatibleFormat(inputs[0]) ? 'ffmpeg' : 'proxy';
+
+              const resolved: ResolvedStreamEntry = {
+                mode,
+                inputs,
+                expiresAt: Date.now() + 3 * 60 * 1000,
+              };
+              streamResolveCache.set(cacheKey, resolved);
+              // Keep cache bounded
+              if (streamResolveCache.size > 100) {
+                const oldestKey = streamResolveCache.keys().next().value;
+                if (oldestKey) streamResolveCache.delete(oldestKey);
+              }
+              return resolved;
+            })();
+            streamInflightMap.set(cacheKey, inflight);
+          }
+
           try {
-            const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...singleArgs], {
-              timeout: 15000,
-              env,
-            });
-            const directStreamUrl = stdout
-              .split(/\r?\n/)
-              .map((l) => l.trim())
-              .find((l) => /^https?:\/\//i.test(l));
-            if (directStreamUrl) {
-              await proxyRemoteMediaWithRange(directStreamUrl, req, res);
-              return;
-            }
-          } catch {
-            // Fall through to split video+audio ffmpeg muxing
+            resolvedEntry = await inflight;
+          } finally {
+            streamInflightMap.delete(cacheKey);
           }
         }
 
-        // 2. Custom audio track OR HD separate video+audio: resolve URLs and mux fragmented MP4 live
-        const pairSelector = audioFormatId
-          ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFormatId}/bestvideo[height<=${targetH}]+${audioFormatId}/best[height<=${targetH}]`
-          : `bestvideo[height<=${targetH}][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=${targetH}]+bestaudio/best[height<=${targetH}]`;
-        const pairArgs = insertBeforeDoubleDash(
-          buildYtDlpArgs(['-g', '-f', pairSelector, '--no-playlist', '--no-warnings', '--', parsed.toString()]),
-          extraArgs
-        );
-        const { stdout: pairOut } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...pairArgs], {
-          timeout: 18000,
-          env,
-        });
-        const urls = pairOut
+        if (resolvedEntry.mode === 'proxy' && resolvedEntry.inputs[0]) {
+          await proxyRemoteMediaWithRange(resolvedEntry.inputs[0].url, req, res, resolvedEntry.inputs[0].headers);
+          return;
+        }
+        if (resolvedEntry.mode === 'ffmpeg' && resolvedEntry.inputs.length > 0) {
+          await spawnFfmpegStream(resolvedEntry.inputs, env, req, res);
+          return;
+        }
+      } catch (err: unknown) {
+        const errObj = err as { stderr?: string; message?: string };
+        const stderrLines = (errObj.stderr || '')
           .split(/\r?\n/)
           .map((l) => l.trim())
-          .filter((l) => /^https?:\/\//i.test(l));
+          .filter((l) => l && !l.startsWith('WARNING:'));
+        lastStreamError = stderrLines[stderrLines.length - 1] || errObj.message || '';
+        if (res.headersSent) return;
+      }
+    }
 
-        if (urls.length === 1) {
-          await proxyRemoteMediaWithRange(urls[0], req, res);
-          return;
-        }
-        if (urls.length >= 2) {
-          res.setHeader('Content-Type', 'video/mp4');
-          const ffArgs = [
-            '-i',
-            urls[0],
-            '-i',
-            urls[1],
-            '-c:v',
-            'copy',
-            '-c:a',
-            'aac',
-            '-b:a',
-            '160k',
-            '-movflags',
-            'frag_keyframe+empty_moov',
-            '-f',
-            'mp4',
-            'pipe:1',
-          ];
-          const ffEnv: NodeJS.ProcessEnv = { ...env };
-          if (adminConfig.xray.enabled && xrayState.running) {
-            ffEnv.http_proxy = `http://127.0.0.1:${adminConfig.xray.httpPort}`;
-          }
-          const ff = spawn('ffmpeg', ffArgs, { shell: false, env: ffEnv });
-          ff.stdout.pipe(res);
-          req.on('close', () => {
-            if (!ff.killed) ff.kill('SIGTERM');
-          });
-          ff.on('error', () => {
-            if (!res.headersSent) res.status(502).json({ error: 'Online playback stream failed.' });
+    if (isXUrl(parsed) || isTikTokUrl(parsed)) {
+      try {
+        const resolved = isXUrl(parsed)
+          ? await resolveXMediaFallback(parsed)
+          : await resolveTikTokMediaFallback(parsed);
+        if (resolved.videos.length > 0) {
+          await proxyRemoteMediaWithRange(resolved.videos[0].url, req, res, {
+            ...(resolved.referer ? { Referer: resolved.referer } : {}),
           });
           return;
         }
-      } catch {
-        // Fall through to @distube/ytdl-core or direct stream
+        if (resolved.photos.length > 0) {
+          res.status(422).json({
+            error: 'This post contains images only.',
+            code: isXUrl(parsed) ? 'X_IMAGE_ONLY' : 'TIKTOK_IMAGE_ONLY',
+          });
+          return;
+        }
+      } catch (fallbackErr) {
+        if (!lastStreamError && fallbackErr instanceof Error) {
+          lastStreamError = fallbackErr.message;
+        }
+        if (res.headersSent) return;
       }
     }
 
@@ -5596,7 +7717,7 @@ async function startServer() {
           .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
           .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0))[0];
 
-        if (!customAudio && muxed?.url) {
+        if (!customAudio && muxed?.url && (targetH <= 360 || (muxed.height || 0) >= Math.min(targetH, 720))) {
           await proxyRemoteMediaWithRange(muxed.url, req, res);
           return;
         }
@@ -5613,46 +7734,68 @@ async function startServer() {
           });
 
         if (videoFmt?.url && audioFmt?.url) {
-          res.setHeader('Content-Type', 'video/mp4');
-          const ff = spawn(
-            'ffmpeg',
+          await spawnFfmpegStream(
             [
-              '-i',
-              videoFmt.url,
-              '-i',
-              audioFmt.url,
-              '-c:v',
-              'copy',
-              '-c:a',
-              'aac',
-              '-b:a',
-              '160k',
-              '-movflags',
-              'frag_keyframe+empty_moov',
-              '-f',
-              'mp4',
-              'pipe:1',
+              { url: videoFmt.url, headers: buildUpstreamHeaders(), ext: videoFmt.container || 'mp4' },
+              { url: audioFmt.url, headers: buildUpstreamHeaders(), ext: audioFmt.container || 'm4a' },
             ],
-            { shell: false }
+            process.env,
+            req,
+            res
           );
-          ff.stdout.pipe(res);
-          req.on('close', () => {
-            if (!ff.killed) ff.kill('SIGTERM');
-          });
-          ff.on('error', () => {
-            if (!res.headersSent) res.status(502).json({ error: 'Stream failed.' });
-          });
           return;
         }
-      } catch {
-        // Fall through
+        if (muxed?.url) {
+          await proxyRemoteMediaWithRange(muxed.url, req, res);
+          return;
+        }
+      } catch (err) {
+        if (!lastStreamError && err instanceof Error) {
+          lastStreamError = err.message;
+        }
+        if (res.headersSent) return;
       }
     }
 
+    // Only proxy directly if the target URL itself serves a video/* or audio/* stream
     try {
-      await proxyRemoteMediaWithRange(parsed.toString(), req, res);
+      let probeRes = await fetch(parsed.toString(), {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(5000),
+      });
+      if (probeRes.status === 405 || probeRes.status === 403) {
+        probeRes = await fetch(parsed.toString(), {
+          method: 'GET',
+          headers: { Range: 'bytes=0-0' },
+          signal: AbortSignal.timeout(5000),
+        });
+        void probeRes.body?.cancel().catch(() => {});
+      }
+      const ct = (probeRes.headers.get('content-type') || '').toLowerCase();
+      const looksLikeDirectMedia =
+        ct.startsWith('video/') ||
+        ct.startsWith('audio/') ||
+        (ct.startsWith('application/octet-stream') &&
+          /\.(mp4|webm|m4v|mov|mp3|m4a|ogg|wav)(\?|$)/i.test(parsed.pathname));
+      if (probeRes.ok && looksLikeDirectMedia) {
+        await proxyRemoteMediaWithRange(parsed.toString(), req, res);
+        return;
+      }
     } catch {
-      if (!res.headersSent) res.status(502).json({ error: 'Unable to stream media online.' });
+      // Fall through to structured JSON error
+    }
+
+    if (!res.headersSent) {
+      const cleanErr = lastStreamError
+        .replace(/^ERROR:\s*/i, '')
+        .replace(/\[youtube\]\s*[a-zA-Z0-9_-]+:\s*/i, '')
+        .slice(0, 260);
+      const isBotOrAuth = /sign in|bot|cookies|login_required/i.test(cleanErr);
+      res.status(502).json({
+        error: cleanErr || 'Unable to stream media online.',
+        code: ytId && isBotOrAuth ? 'YOUTUBE_AUTH_REQUIRED' : 'STREAM_UNAVAILABLE',
+        ...(ytId ? { youtubeId: ytId } : {}),
+      });
     }
   });
 
@@ -5792,20 +7935,108 @@ async function startServer() {
     const contentDisposition = buildContentDisposition(rawTitle, quality, ext);
     const ytId = extractYouTubeId(parsed);
 
+    if (isInstagramUrl(parsed)) {
+      const normalizedIgUrl = normalizeInstagramUrl(parsed);
+      const targetH = selectTargetHeight(quality);
+      const parthQuality: 'best' | 'worst' = !isAudio && targetH <= 480 ? 'worst' : 'best';
+      let workDir = '';
+      try {
+        workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-ig-dl-'));
+        const { files } = await runParthDlDownload(normalizedIgUrl, workDir, parthQuality);
+        const resolvedFiles = files
+          .map((f) => path.resolve(f))
+          .filter((f) => f.startsWith(workDir + path.sep) && fs.existsSync(f));
+        if (!resolvedFiles.length) {
+          res.status(502).json({ error: 'No downloadable content found for this Instagram link.' });
+          return;
+        }
+
+        let sendPath = '';
+        let outExt: DownloadFileExt = 'mp4';
+        if (isAudio) {
+          const videoFile = resolvedFiles.find((f) => /\.(mp4|mov|webm|mkv|m4v)$/i.test(f));
+          if (!videoFile) {
+            res.status(422).json({ error: 'This Instagram post contains no video for MP3 extraction.' });
+            return;
+          }
+          sendPath = path.join(workDir, 'audio.mp3');
+          await new Promise<void>((resolve, reject) => {
+            const ff = spawn(
+              'ffmpeg',
+              ['-y', '-i', videoFile, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-f', 'mp3', sendPath],
+              { shell: false }
+            );
+            ff.on('error', reject);
+            ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error('Audio extraction failed'))));
+          });
+          outExt = 'mp3';
+        } else if (resolvedFiles.length > 1) {
+          sendPath = path.join(workDir, 'carousel.zip');
+          await execFileAsync(
+            'python3',
+            ['-m', 'zipfile', '-c', sendPath, ...resolvedFiles.map((f) => path.basename(f))],
+            { cwd: workDir, timeout: 30000 }
+          );
+          outExt = 'zip';
+        } else {
+          sendPath = resolvedFiles[0];
+          const rawExt = path.extname(sendPath).toLowerCase().replace('.', '');
+          outExt =
+            rawExt === 'jpeg' || rawExt === 'jpg'
+              ? 'jpg'
+              : rawExt === 'png'
+                ? 'png'
+                : rawExt === 'webp'
+                  ? 'webp'
+                  : 'mp4';
+        }
+
+        const stat = await fs.promises.stat(sendPath);
+        res.setHeader('Content-Type', getMimeTypeForExt(outExt));
+        res.setHeader('Content-Length', String(stat.size));
+        res.setHeader('Content-Disposition', buildContentDisposition(rawTitle, quality, outExt));
+        res.setHeader('X-Grove-Stream-Mode', 'parth-dl');
+        await new Promise<void>((resolve, reject) => {
+          const rs = fs.createReadStream(sendPath);
+          rs.on('error', reject);
+          res.on('close', () => {
+            rs.destroy();
+            resolve();
+          });
+          rs.on('end', resolve);
+          rs.pipe(res);
+        });
+        return;
+      } catch (err) {
+        if (!res.headersSent) {
+          res.status(502).json({ error: err instanceof Error ? err.message : 'Instagram download failed.' });
+        }
+        return;
+      } finally {
+        if (workDir) {
+          await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    }
+
+    const dlTargetUrl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
     const runner = await getYtDlpRunner();
     if (runner) {
       const targetH = String(selectTargetHeight(quality));
+      const isTikTokDl = isTikTokUrl(parsed);
       const baseArgs = isAudio
-        ? ['-x', '--audio-format', 'mp3', '-o', '-', '--', parsed.toString()]
+        ? ['-x', '--audio-format', 'mp3', '-o', '-', '--', dlTargetUrl]
         : [
             '-f',
-            `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`,
+            isTikTokDl
+              ? `best[height<=${targetH}][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}]/best`
+              : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`,
             '--recode-video',
             'mp4',
             '-o',
             '-',
             '--',
-            parsed.toString(),
+            dlTargetUrl,
           ];
       const { extraArgs, env } = await getYtDlpAuthAndProxy();
       const finalArgs = insertBeforeDoubleDash(buildYtDlpArgs(baseArgs), extraArgs);
@@ -6126,6 +8357,7 @@ export class ErrorOverlay {}
         await startXrayProcess();
       }
       await getYtDlpRunner({ autoInstall: true }).catch(() => null);
+      await getParthDlRunner({ autoInstall: true }).catch(() => false);
       syncBgutilPluginFromRepo();
       if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed') {
         await startBgutilPotServer();

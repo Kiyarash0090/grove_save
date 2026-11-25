@@ -27,6 +27,10 @@ export interface TranslationDict {
   readyToSave: string;
   watchOnline: string;
   hidePlayer: string;
+  viewImage: string;
+  hideImage: string;
+  carouselZipLabel: string;
+  imagePostLabel: string;
   audioTracksSection: string;
   audioOnlyLabel: string;
   audioOnlyDesc: string;
@@ -45,6 +49,9 @@ export interface TranslationDict {
   invalidUrlError: string;
   inspectFailed: string;
   downloadFailed: string;
+  streamFailed: string;
+  retryPlayback: string;
+  youtubeEmbedFallback: string;
   clipboardBlocked: string;
   swipeHint: string;
   tabDownloadLabel: string;
@@ -221,8 +228,37 @@ export interface TranslationDict {
   dbBackupSize: string;
   dbBackupCreateBtn: string;
   dbBackupCreatedMsg: string;
+  dbBackupRestoreBtn: string;
+  dbBackupRestoredMsg: string;
   dbBackupServerTitle: string;
   dbBackupEmpty: string;
+  // Info tab & Announcements
+  tabInfoLabel: string;
+  infoTitle: string;
+  announcementsTitle: string;
+  announcementsEmpty: string;
+  infoAboutTitle: string;
+  infoAboutBody: string;
+  infoChannelTitle: string;
+  infoChannelDesc: string;
+  infoOpenTelegram: string;
+  infoBotsTitle: string;
+  infoBotsDesc: string;
+  infoBotMediaDesc: string;
+  infoBotMusicDesc: string;
+  infoBotYoutubeDesc: string;
+  infoBotPhDesc: string;
+  adminAnnouncementsSection: string;
+  adminAnnouncementsDesc: string;
+  announcementTitleLabel: string;
+  announcementTitlePlaceholder: string;
+  announcementBodyLabel: string;
+  announcementBodyPlaceholder: string;
+  announcementPublishBtn: string;
+  announcementPublishedMsg: string;
+  announcementDeleteBtn: string;
+  announcementDeletedMsg: string;
+  announcementEmptyAdmin: string;
 }
 
 export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
@@ -243,6 +279,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
       '720p': { label: '720p', sub: 'HD' },
       '480p': { label: '480p', sub: 'Standard' },
       '360p': { label: '360p', sub: 'Compact' },
+      best: { label: 'Original', sub: 'Best' },
       audio: { label: 'Audio', sub: 'MP3 320k' },
     },
     downloadNow: 'Save to Device',
@@ -259,6 +296,10 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     readyToSave: 'Ready to save',
     watchOnline: 'Watch Online',
     hidePlayer: 'Hide Player',
+    viewImage: 'Preview Photo',
+    hideImage: 'Hide Photo',
+    carouselZipLabel: 'items · ZIP',
+    imagePostLabel: 'Photo',
     audioTracksSection: 'Audio Tracks',
     audioOnlyLabel: 'Audio Only (MP3)',
     audioOnlyDesc: 'Save MP3 audio from selected track',
@@ -278,6 +319,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     invalidUrlError: 'Please enter a valid http or https media link.',
     inspectFailed: 'Could not read link details. Check the link and try again.',
     downloadFailed: 'Download failed. Please check the link or backend connection.',
+    streamFailed: 'Online playback failed. Check the link or server proxy/cookies.',
+    retryPlayback: 'Retry',
+    youtubeEmbedFallback: 'Watch via YouTube Player',
     clipboardBlocked: 'Clipboard access blocked. Paste directly into the box.',
     swipeHint: 'Swipe horizontally to switch between Download and Settings',
     tabDownloadLabel: 'Download',
@@ -450,8 +494,37 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     dbBackupSize: 'size',
     dbBackupCreateBtn: 'Save backup on server',
     dbBackupCreatedMsg: 'Backup saved on the server.',
+    dbBackupRestoreBtn: 'Restore backup',
+    dbBackupRestoredMsg: 'Database restored successfully. Page will reload.',
     dbBackupServerTitle: 'Backups on the server',
     dbBackupEmpty: 'No server backups yet.',
+    tabInfoLabel: 'Info',
+    infoTitle: 'Information',
+    announcementsTitle: 'Announcements',
+    announcementsEmpty: 'No announcements have been posted yet.',
+    infoAboutTitle: 'About Grove Save',
+    infoAboutBody:
+      'Grove Save is an ad-free, high-speed media downloader for saving videos, reels, carousels, photos, and MP3 audio from YouTube, Instagram, TikTok, X, and popular platforms directly to your device, with inline streaming, subtitle selection, and audio track support.',
+    infoChannelTitle: 'Creator Team Telegram Channel',
+    infoChannelDesc: 'Follow official updates, announcements, and releases from the Grove team.',
+    infoOpenTelegram: 'Open',
+    infoBotsTitle: 'Our Telegram Bots',
+    infoBotsDesc: 'Official Grove downloader bots on Telegram.',
+    infoBotMediaDesc: 'All-in-One Media Downloader',
+    infoBotMusicDesc: 'Music & Spotify Downloader',
+    infoBotYoutubeDesc: 'YouTube Video Downloader',
+    infoBotPhDesc: 'Adult Video Downloader',
+    adminAnnouncementsSection: 'Announcements',
+    adminAnnouncementsDesc: 'Publish notices displayed in the Info tab for all users',
+    announcementTitleLabel: 'Title (optional)',
+    announcementTitlePlaceholder: 'e.g. Server update or new feature',
+    announcementBodyLabel: 'Announcement text',
+    announcementBodyPlaceholder: 'Write an announcement for all users...',
+    announcementPublishBtn: 'Publish Announcement',
+    announcementPublishedMsg: 'Announcement published for all users.',
+    announcementDeleteBtn: 'Delete',
+    announcementDeletedMsg: 'Announcement removed.',
+    announcementEmptyAdmin: 'No announcements published yet.',
   },
   fa: {
     dir: 'rtl',
@@ -470,6 +543,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
       '720p': { label: '720p', sub: 'اچ‌دی' },
       '480p': { label: '480p', sub: 'معمولی' },
       '360p': { label: '360p', sub: 'کم‌حجم' },
+      best: { label: 'اصلی', sub: 'بهترین کیفیت' },
       audio: { label: 'صوت', sub: 'MP3 320k' },
     },
     downloadNow: 'ذخیره در حافظه گوشی',
@@ -486,6 +560,10 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     readyToSave: 'آماده برای ذخیره',
     watchOnline: 'پخش آنلاین',
     hidePlayer: 'بستن پخش‌کننده',
+    viewImage: 'نمایش تصویر',
+    hideImage: 'بستن تصویر',
+    carouselZipLabel: 'مورد · ZIP',
+    imagePostLabel: 'تصویر',
     audioTracksSection: 'زبان‌های صدا',
     audioOnlyLabel: 'فقط صوت (MP3)',
     audioOnlyDesc: 'دانلود فایل صوتی MP3 از صدای انتخاب‌شده',
@@ -505,6 +583,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     invalidUrlError: 'لطفاً یک لینک معتبر با http یا https وارد کنید.',
     inspectFailed: 'دریافت اطلاعات لینک انجام نشد. لینک را بررسی کنید.',
     downloadFailed: 'دانلود ناموفق بود. اتصال سرور یا لینک را بررسی کنید.',
+    streamFailed: 'پخش آنلاین ناموفق بود. لینک یا تنظیمات پروکسی و کوکی سرور را بررسی کنید.',
+    retryPlayback: 'تلاش مجدد',
+    youtubeEmbedFallback: 'پخش با پلیر یوتیوب',
     clipboardBlocked: 'دسترسی به کلیپ‌بورد مسدود است. لینک را دستی جایگذاری کنید.',
     swipeHint: 'برای جابه‌جایی بین صفحات انگشت خود را به چپ یا راست بکشید',
     tabDownloadLabel: 'دانلود',
@@ -678,8 +759,37 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     dbBackupSize: 'حجم',
     dbBackupCreateBtn: 'ذخیره بکاپ روی سرور',
     dbBackupCreatedMsg: 'بکاپ روی سرور ذخیره شد.',
+    dbBackupRestoreBtn: 'وارد کردن بکاپ',
+    dbBackupRestoredMsg: 'دیتابیس با موفقیت بازیابی شد. صفحه مجدداً بارگذاری می‌شود.',
     dbBackupServerTitle: 'بکاپ‌های روی سرور',
     dbBackupEmpty: 'هنوز بکاپی روی سرور ذخیره نشده است.',
+    tabInfoLabel: 'اطلاعات',
+    infoTitle: 'اطلاعات برنامه',
+    announcementsTitle: 'اطلاعیه',
+    announcementsEmpty: 'در حال حاضر اطلاعیه‌ای ثبت نشده است.',
+    infoAboutTitle: 'درباره Grove Save',
+    infoAboutBody:
+      'Grove Save یک دانلودر سریع و بدون تبلیغات برای ذخیره مستقیم ویدیوها، ریلز، پست‌های چنداسلایدی، تصاویر و فایل صوتی MP3 از یوتیوب، اینستاگرام، تیک‌تاک، ایکس (X) و پلتفرم‌های محبوب است که امکانات پخش آنلاین، انتخاب زبان صدا و دانلود زیرنویس را هم ارائه می‌دهد.',
+    infoChannelTitle: 'کانال تلگرامی تیم سازنده',
+    infoChannelDesc: 'برای دریافت آخرین اخبار، آپدیت‌ها و اطلاعیه‌های تیم سازنده به کانال ما بپیوندید.',
+    infoOpenTelegram: 'ورود به تلگرام',
+    infoBotsTitle: 'ربات‌های تلگرامی ما',
+    infoBotsDesc: 'ربات‌های رسمی دانلودر تیم Grove در تلگرام.',
+    infoBotMediaDesc: 'دانلودر جامع رسانه',
+    infoBotMusicDesc: 'دانلودر موزیک و اسپاتیفای',
+    infoBotYoutubeDesc: 'دانلودر ویدیو یوتیوب',
+    infoBotPhDesc: 'دانلودر ویدیو پورن',
+    adminAnnouncementsSection: 'مدیریت اطلاعیه‌ها',
+    adminAnnouncementsDesc: 'انتشار اطلاعیه در بخش اطلاعات برای نمایش به همه کاربران',
+    announcementTitleLabel: 'عنوان اطلاعیه (اختیاری)',
+    announcementTitlePlaceholder: 'مثلاً: آپدیت جدید برنامه یا اطلاعیه سرور',
+    announcementBodyLabel: 'متن اطلاعیه',
+    announcementBodyPlaceholder: 'متن اطلاعیه خود را برای همه کاربران بنویسید...',
+    announcementPublishBtn: 'انتشار اطلاعیه',
+    announcementPublishedMsg: 'اطلاعیه با موفقیت منتشر شد.',
+    announcementDeleteBtn: 'حذف',
+    announcementDeletedMsg: 'اطلاعیه حذف شد.',
+    announcementEmptyAdmin: 'هنوز اطلاعیه‌ای منتشر نشده است.',
   },
   ru: {
     dir: 'ltr',
@@ -698,6 +808,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
       '720p': { label: '720p', sub: 'HD' },
       '480p': { label: '480p', sub: 'Стандарт' },
       '360p': { label: '360p', sub: 'Компакт' },
+      best: { label: 'Оригинал', sub: 'Лучшее' },
       audio: { label: 'Аудио', sub: 'MP3 320k' },
     },
     downloadNow: 'Сохранить на устройство',
@@ -714,6 +825,10 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     readyToSave: 'Готово к сохранению',
     watchOnline: 'Смотреть онлайн',
     hidePlayer: 'Скрыть плеер',
+    viewImage: 'Показать фото',
+    hideImage: 'Скрыть фото',
+    carouselZipLabel: 'шт. · ZIP',
+    imagePostLabel: 'Фото',
     audioTracksSection: 'Аудиодорожки',
     audioOnlyLabel: 'Только аудио (MP3)',
     audioOnlyDesc: 'Сохранить MP3 с выбранной дорожкой',
@@ -733,6 +848,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     invalidUrlError: 'Введите корректную ссылку http или https.',
     inspectFailed: 'Не удалось получить данные по ссылке.',
     downloadFailed: 'Ошибка загрузки. Проверьте ссылку или сервер.',
+    streamFailed: 'Не удалось воспроизвести онлайн. Проверьте ссылку или прокси/cookies сервера.',
+    retryPlayback: 'Повторить',
+    youtubeEmbedFallback: 'Смотреть через плеер YouTube',
     clipboardBlocked: 'Доступ к буферу ограничен. Вставьте ссылку вручную.',
     swipeHint: 'Смахните влево или вправо для перехода между экранами',
     tabDownloadLabel: 'Загрузка',
@@ -906,8 +1024,37 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     dbBackupSize: 'размер',
     dbBackupCreateBtn: 'Сохранить копию на сервере',
     dbBackupCreatedMsg: 'Копия сохранена на сервере.',
+    dbBackupRestoreBtn: 'Восстановить резервную копию',
+    dbBackupRestoredMsg: 'База данных успешно восстановлена. Страница перезагрузится.',
     dbBackupServerTitle: 'Копии на сервере',
     dbBackupEmpty: 'На сервере пока нет резервных копий.',
+    tabInfoLabel: 'Инфо',
+    infoTitle: 'Информация',
+    announcementsTitle: 'Объявления',
+    announcementsEmpty: 'Объявлений пока нет.',
+    infoAboutTitle: 'О приложении Grove Save',
+    infoAboutBody:
+      'Grove Save — быстрый загрузчик медиа без рекламы для сохранения видео, Reels, каруселей, фото и MP3 с YouTube, Instagram, TikTok, X и других платформ прямо на устройство с онлайн-просмотром, выбором аудиодорожек и субтитрами.',
+    infoChannelTitle: 'Telegram-канал команды разработчиков',
+    infoChannelDesc: 'Новости, обновления и релизы от команды Grove.',
+    infoOpenTelegram: 'Открыть',
+    infoBotsTitle: 'Наши боты в Telegram',
+    infoBotsDesc: 'Официальные боты-загрузчики команды Grove в Telegram.',
+    infoBotMediaDesc: 'Универсальный загрузчик медиа',
+    infoBotMusicDesc: 'Загрузчик музыки и Spotify',
+    infoBotYoutubeDesc: 'Загрузчик видео YouTube',
+    infoBotPhDesc: 'Загрузчик видео 18+',
+    adminAnnouncementsSection: 'Объявления',
+    adminAnnouncementsDesc: 'Публикация уведомлений во вкладке «Инфо» для всех пользователей',
+    announcementTitleLabel: 'Заголовок (необязательно)',
+    announcementTitlePlaceholder: 'Например: Обновление сервера',
+    announcementBodyLabel: 'Текст объявления',
+    announcementBodyPlaceholder: 'Напишите объявление для всех пользователей...',
+    announcementPublishBtn: 'Опубликовать',
+    announcementPublishedMsg: 'Объявление опубликовано для всех пользователей.',
+    announcementDeleteBtn: 'Удалить',
+    announcementDeletedMsg: 'Объявление удалено.',
+    announcementEmptyAdmin: 'Опубликованных объявлений пока нет.',
   },
   zh: {
     dir: 'ltr',
@@ -926,6 +1073,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
       '720p': { label: '720p', sub: '高清' },
       '480p': { label: '480p', sub: '标清' },
       '360p': { label: '360p', sub: '流畅' },
+      best: { label: '原画', sub: '最佳' },
       audio: { label: '音频', sub: 'MP3 320k' },
     },
     downloadNow: '保存到设备',
@@ -942,6 +1090,10 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     readyToSave: '准备就绪',
     watchOnline: '在线观看',
     hidePlayer: '收起播放器',
+    viewImage: '预览图片',
+    hideImage: '收起图片',
+    carouselZipLabel: '项 · ZIP',
+    imagePostLabel: '图片',
     audioTracksSection: '音轨语言',
     audioOnlyLabel: '仅音频 (MP3)',
     audioOnlyDesc: '保存所选音轨的 MP3 音频文件',
@@ -960,6 +1112,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     invalidUrlError: '请输入有效的 http 或 https 链接。',
     inspectFailed: '无法读取链接信息，请检查后重试。',
     downloadFailed: '下载失败，请检查链接或服务器连接。',
+    streamFailed: '在线播放失败，请检查链接或服务器代理/Cookies设置。',
+    retryPlayback: '重试',
+    youtubeEmbedFallback: '使用 YouTube 播放器观看',
     clipboardBlocked: '剪贴板权限受限，请手动粘贴链接。',
     swipeHint: '左右滑动可切换下载与设置页面',
     tabDownloadLabel: '下载',
@@ -1132,7 +1287,36 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     dbBackupSize: '大小',
     dbBackupCreateBtn: '在服务器上保存备份',
     dbBackupCreatedMsg: '备份已保存到服务器。',
+    dbBackupRestoreBtn: '恢复备份',
+    dbBackupRestoredMsg: '数据库已成功恢复。页面将重新加载。',
     dbBackupServerTitle: '服务器上的备份',
     dbBackupEmpty: '服务器上还没有备份。',
+    tabInfoLabel: '信息',
+    infoTitle: '应用信息',
+    announcementsTitle: '公告',
+    announcementsEmpty: '暂无公告。',
+    infoAboutTitle: '关于 Grove Save',
+    infoAboutBody:
+      'Grove Save 是一款无广告的高速媒体下载器，支持从 YouTube、Instagram、TikTok、X 及主流平台保存高清视频、Reels、图集、图片与 MP3 音频，并提供在线播放、多音轨及字幕选择。',
+    infoChannelTitle: '开发团队 Telegram 频道',
+    infoChannelDesc: '获取 Grove 团队的官方动态、更新与通知。',
+    infoOpenTelegram: '打开',
+    infoBotsTitle: '我们的 Telegram 机器人',
+    infoBotsDesc: 'Grove 团队官方 Telegram 下载机器人。',
+    infoBotMediaDesc: '全能媒体下载器',
+    infoBotMusicDesc: '音乐与 Spotify 下载器',
+    infoBotYoutubeDesc: 'YouTube 视频下载器',
+    infoBotPhDesc: '成人视频下载器',
+    adminAnnouncementsSection: '系统公告',
+    adminAnnouncementsDesc: '发布展示在“信息”页顶部的全员公告',
+    announcementTitleLabel: '标题（可选）',
+    announcementTitlePlaceholder: '例如：服务更新或新功能通知',
+    announcementBodyLabel: '公告内容',
+    announcementBodyPlaceholder: '输入要面向所有用户展示的公告内容...',
+    announcementPublishBtn: '发布公告',
+    announcementPublishedMsg: '公告已向所有用户发布。',
+    announcementDeleteBtn: '删除',
+    announcementDeletedMsg: '公告已删除。',
+    announcementEmptyAdmin: '尚未发布任何公告。',
   },
 };

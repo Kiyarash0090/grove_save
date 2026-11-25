@@ -8,6 +8,7 @@ import {
   ClipboardPaste,
   CloudDownload,
   Film,
+  Image as ImageIcon,
   Link2,
   Loader2,
   Music,
@@ -34,13 +35,18 @@ export interface MediaSubtitleTrack {
   isAuto: boolean;
 }
 
+export type ProviderGlow = 'default' | 'red' | 'instagram' | 'tiktok' | 'x';
+
 export interface MediaMetadata {
   url: string;
   title: string;
   author: string;
   durationSeconds: number | null;
   thumbnail: string | null;
-  providerGlow: 'red' | 'default';
+  providerGlow: ProviderGlow;
+  mediaKind?: string;
+  hasVideo?: boolean;
+  itemCount?: number;
   qualities: string[];
   engineMode?: 'live' | 'preview';
   audioTracks?: MediaAudioTrack[];
@@ -78,8 +84,30 @@ interface DownloaderViewProps {
   defaultQuality: string;
   history: SavedItem[];
   onAddHistory: (item: SavedItem) => void;
-  onYouTubeGlowChange: (isRed: boolean) => void;
+  onProviderGlowChange: (glow: ProviderGlow) => void;
   isGuest?: boolean;
+}
+
+export function extractClientYouTubeId(raw: string): string | null {
+  try {
+    const parsed = new URL(raw.trim().startsWith('http') ? raw.trim() : `https://${raw.trim()}`);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'youtu.be' || host.endsWith('.youtu.be')) {
+      const id = parsed.pathname.split('/').filter(Boolean)[0];
+      return id && /^[a-zA-Z0-9_-]{6,15}$/.test(id) ? id : null;
+    }
+    if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+      const v = parsed.searchParams.get('v');
+      if (v && /^[a-zA-Z0-9_-]{6,15}$/.test(v)) return v;
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live') && parts[1]) {
+        return /^[a-zA-Z0-9_-]{6,15}$/.test(parts[1]) ? parts[1] : null;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export function isYouTubeUrlString(raw: string): boolean {
@@ -97,6 +125,57 @@ export function isYouTubeUrlString(raw: string): boolean {
     );
   } catch {
     return /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/.test(lower);
+  }
+}
+
+export function isInstagramUrlString(raw: string): boolean {
+  const lower = raw.trim().toLowerCase();
+  if (!lower) return false;
+  try {
+    const parsed = new URL(lower.startsWith('http') ? lower : `https://${lower}`);
+    const h = parsed.hostname;
+    return (
+      h === 'instagram.com' ||
+      h === 'www.instagram.com' ||
+      h === 'm.instagram.com' ||
+      h === 'instagr.am' ||
+      h.endsWith('.instagram.com')
+    );
+  } catch {
+    return /(?:instagram\.com|instagr\.am)/.test(lower);
+  }
+}
+
+export function isTikTokUrlString(raw: string): boolean {
+  const lower = raw.trim().toLowerCase();
+  if (!lower) return false;
+  try {
+    const parsed = new URL(lower.startsWith('http') ? lower : `https://${lower}`);
+    const h = parsed.hostname;
+    return h === 'tiktok.com' || h.endsWith('.tiktok.com');
+  } catch {
+    return /tiktok\.com/.test(lower);
+  }
+}
+
+export function isXUrlString(raw: string): boolean {
+  const lower = raw.trim().toLowerCase();
+  if (!lower) return false;
+  try {
+    const parsed = new URL(lower.startsWith('http') ? lower : `https://${lower}`);
+    const h = parsed.hostname;
+    return (
+      h === 'x.com' ||
+      h.endsWith('.x.com') ||
+      h === 'twitter.com' ||
+      h.endsWith('.twitter.com') ||
+      h === 'fxtwitter.com' ||
+      h === 'vxtwitter.com' ||
+      h === 'fixupx.com' ||
+      h === 't.co'
+    );
+  } catch {
+    return /(?:x\.com|twitter\.com|fxtwitter\.com|vxtwitter\.com|fixupx\.com|t\.co)/.test(lower);
   }
 }
 
@@ -124,7 +203,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   defaultQuality,
   history,
   onAddHistory,
-  onYouTubeGlowChange,
+  onProviderGlowChange,
   isGuest = false,
 }) => {
   const [urlInput, setUrlInput] = useState('');
@@ -148,17 +227,29 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   const [subFilter, setSubFilter] = useState('');
   const [showAutoSubs, setShowAutoSubs] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const [playerRetryNonce, setPlayerRetryNonce] = useState(0);
+  const [useYoutubeEmbed, setUseYoutubeEmbed] = useState(false);
+  const [embedYoutubeId, setEmbedYoutubeId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const resumeTimeRef = useRef<number>(0);
 
   const lastInspectedRef = useRef<string>('');
   const pollTimerRef = useRef<number | null>(null);
 
-  const isRedGlow = isYouTubeUrlString(urlInput) || media?.providerGlow === 'red';
+  const providerGlow: ProviderGlow =
+    isYouTubeUrlString(urlInput) || media?.providerGlow === 'red'
+      ? 'red'
+      : isInstagramUrlString(urlInput) || media?.providerGlow === 'instagram'
+        ? 'instagram'
+        : isTikTokUrlString(urlInput) || media?.providerGlow === 'tiktok'
+          ? 'tiktok'
+          : isXUrlString(urlInput) || media?.providerGlow === 'x'
+            ? 'x'
+            : 'default';
 
   useEffect(() => {
-    onYouTubeGlowChange(isRedGlow);
-  }, [isRedGlow, onYouTubeGlowChange]);
+    onProviderGlowChange(providerGlow);
+  }, [providerGlow, onProviderGlowChange]);
 
   useEffect(() => {
     setSelectedQuality(defaultQuality === 'audio' ? '1080p' : defaultQuality);
@@ -210,6 +301,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     setShowPlayer(false);
     setAudioOnlyMode(false);
     setPlayerError(null);
+    setUseYoutubeEmbed(false);
+    setEmbedYoutubeId(null);
     setSelectedAudioFormatId('');
     setSelectedSubtitle(null);
     setSubFilter('');
@@ -238,14 +331,27 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
         const filteredQualities = Array.isArray(data.qualities)
           ? (data.qualities as string[]).filter((q) => q !== 'audio')
           : ['2160p', '1080p', '720p', '480p', '360p'];
+        const normalizedQualities = filteredQualities.length
+          ? filteredQualities
+          : ['1080p', '720p', '480p', '360p'];
+        const nextGlow: ProviderGlow =
+          data.providerGlow === 'red'
+            ? 'red'
+            : data.providerGlow === 'instagram'
+              ? 'instagram'
+              : 'default';
+        setSelectedQuality((prev) => (normalizedQualities.includes(prev) ? prev : normalizedQualities[0]));
         setMedia({
           url: normalized,
           title: data.title,
           author: data.author,
           durationSeconds: data.durationSeconds,
           thumbnail: data.thumbnail,
-          providerGlow: data.providerGlow === 'red' ? 'red' : 'default',
-          qualities: filteredQualities.length ? filteredQualities : ['1080p', '720p', '480p', '360p'],
+          providerGlow: nextGlow,
+          mediaKind: typeof data.mediaKind === 'string' ? data.mediaKind : undefined,
+          hasVideo: typeof data.hasVideo === 'boolean' ? data.hasVideo : true,
+          itemCount: typeof data.itemCount === 'number' ? data.itemCount : undefined,
+          qualities: normalizedQualities,
           engineMode: data.engineMode,
           audioTracks,
           manualSubtitles,
@@ -308,6 +414,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       resumeTimeRef.current = videoRef.current.currentTime || 0;
     }
     setPlayerError(null);
+    setUseYoutubeEmbed(false);
     setAudioOnlyMode(false);
     setSelectedQuality(q);
     if (readyJob && readyJob.quality !== q) {
@@ -322,6 +429,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       resumeTimeRef.current = videoRef.current.currentTime || 0;
     }
     setPlayerError(null);
+    setUseYoutubeEmbed(false);
     setSelectedAudioFormatId(formatId);
     if (readyJob) {
       setJobStage('idle');
@@ -512,7 +620,12 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
         // Re-prepare below if expired
       }
     }
-    const nextQuality = item.quality === 'audio' ? '1080p' : item.quality;
+    const nextQuality =
+      item.quality === 'audio' || item.quality === 'best'
+        ? defaultQuality === 'audio'
+          ? '1080p'
+          : defaultQuality
+        : item.quality;
     setUrlInput(item.url);
     setSelectedQuality(nextQuality);
     setAudioOnlyMode(item.quality === 'audio');
@@ -524,10 +637,25 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     inspectUrl(urlInput);
   };
 
+  const isSocialMedia = Boolean(
+    media &&
+      (['instagram', 'tiktok', 'x'].includes(media.providerGlow) ||
+        isInstagramUrlString(media.url) ||
+        isTikTokUrlString(media.url) ||
+        isXUrlString(media.url))
+  ) ||
+    isInstagramUrlString(urlInput) ||
+    isTikTokUrlString(urlInput) ||
+    isXUrlString(urlInput);
+
   const availableQualities = (media?.qualities || ['2160p', '1080p', '720p', '480p', '360p']).filter(
-    (q) => q !== 'audio'
+    (q) => q !== 'audio' && q !== 'best'
   );
-  const effectiveDownloadQuality = audioOnlyMode ? 'audio' : selectedQuality;
+  const effectiveDownloadQuality = audioOnlyMode
+    ? 'audio'
+    : isSocialMedia || availableQualities.length === 0
+      ? 'best'
+      : selectedQuality;
   const isBusy = jobStage === 'downloading' || jobStage === 'processing';
 
   return (
@@ -543,20 +671,34 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
           </p>
         </div>
 
-        {/* Link Input Card with Dynamic White / Red Neon Aura */}
+        {/* Link Input Card with Dynamic White / Red / Instagram Neon Aura */}
         <form onSubmit={handleSubmitInspect} className="relative">
           <div
             aria-hidden="true"
             className={`absolute -inset-2 rounded-3xl blur-2xl transition-all duration-500 pointer-events-none ${
-              isRedGlow
+              providerGlow === 'red'
                 ? 'bg-red-600/35 dark:bg-red-600/45 opacity-100 scale-[1.01]'
-                : 'bg-black/5 dark:bg-white/20 opacity-85'
+                : providerGlow === 'instagram'
+                  ? 'bg-gradient-to-r from-[#f58529]/45 via-[#dd2a7b]/50 to-[#8134af]/45 dark:from-[#f58529]/50 dark:via-[#dd2a7b]/55 dark:to-[#8134af]/50 opacity-100 scale-[1.01]'
+                  : providerGlow === 'tiktok'
+                    ? 'bg-gradient-to-r from-[#25f4ee]/45 via-[#fe2c55]/50 to-[#25f4ee]/45 dark:from-[#25f4ee]/50 dark:via-[#fe2c55]/55 dark:to-[#25f4ee]/50 opacity-100 scale-[1.01]'
+                    : providerGlow === 'x'
+                      ? 'bg-gradient-to-r from-[#1da1f2]/45 via-[#00b4d8]/50 to-[#1da1f2]/45 dark:from-[#1da1f2]/50 dark:via-[#00b4d8]/55 dark:to-[#1da1f2]/50 opacity-100 scale-[1.01]'
+                      : 'bg-black/5 dark:bg-white/20 opacity-85'
             }`}
           />
 
           <div
-            className={`relative rounded-2xl p-3 bg-white dark:bg-[#080808] transition-all duration-300 ${
-              isRedGlow ? 'neon-red-box' : 'neon-white-box'
+            className={`relative rounded-2xl p-3 backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.06] border border-white/75 dark:border-white/15 ring-1 ring-inset ring-black/[0.04] dark:ring-white/[0.08] transition-all duration-300 ${
+              providerGlow === 'red'
+                ? 'neon-red-box'
+                : providerGlow === 'instagram'
+                  ? 'neon-instagram-box'
+                  : providerGlow === 'tiktok'
+                    ? 'neon-tiktok-box'
+                    : providerGlow === 'x'
+                      ? 'neon-x-box'
+                      : 'neon-white-box'
             }`}
           >
             <div className="flex items-center gap-2">
@@ -606,6 +748,90 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             </div>
           </div>
         </form>
+
+        {/* Subtle theme-matched monochrome supported platform icons */}
+        <div
+          aria-label="YouTube, Instagram, TikTok, X"
+          className="flex items-center justify-center gap-3 pt-0.5 text-black/35 dark:text-white/35 select-none"
+        >
+          <span
+            title="YouTube"
+            className={`inline-flex items-center transition-colors duration-200 cursor-pointer ${
+              isYouTubeUrlString(urlInput) || media?.providerGlow === 'red'
+                ? 'text-red-500 scale-110'
+                : 'hover:text-red-500 dark:hover:text-red-400'
+            }`}
+          >
+            <svg
+              className="w-4 h-4 transition-transform duration-200"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+            </svg>
+          </span>
+          <span className="w-1 h-1 rounded-full bg-current opacity-50" aria-hidden="true" />
+          <span
+            title="Instagram"
+            className={`inline-flex items-center transition-colors duration-200 cursor-pointer ${
+              isInstagramUrlString(urlInput) || media?.providerGlow === 'instagram'
+                ? 'text-[#dd2a7b] scale-110'
+                : 'hover:text-[#dd2a7b] dark:hover:text-[#f43f5e]'
+            }`}
+          >
+            <svg
+              className="w-3.5 h-3.5 transition-transform duration-200"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect width="20" height="20" x="2" y="2" rx="5" ry="5" />
+              <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+              <line x1="17.5" x2="17.51" y1="6.5" y2="6.5" />
+            </svg>
+          </span>
+          <span className="w-1 h-1 rounded-full bg-current opacity-50" aria-hidden="true" />
+          <span
+            title="TikTok"
+            className={`inline-flex items-center transition-colors duration-200 cursor-pointer ${
+              isTikTokUrlString(urlInput)
+                ? 'text-cyan-400 scale-110'
+                : 'hover:text-cyan-400 dark:hover:text-cyan-300'
+            }`}
+          >
+            <svg
+              className="w-3.5 h-3.5 transition-transform duration-200"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M19.59 6.69a4.83 4.83 0 0 1-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 0 1-2.88 2.5 2.89 2.89 0 0 1-2.89-2.89 2.89 2.89 0 0 1 2.89-2.89c.28 0 .54.04.79.1v-3.5a6.37 6.37 0 0 0-.79-.05A6.34 6.34 0 0 0 3.15 15a6.34 6.34 0 0 0 6.34 6.34 6.34 6.34 0 0 0 6.34-6.34V8.87a8.16 8.16 0 0 0 4.76 1.52v-3.4a4.85 4.85 0 0 1-1-.3z" />
+            </svg>
+          </span>
+          <span className="w-1 h-1 rounded-full bg-current opacity-50" aria-hidden="true" />
+          <span
+            title="X"
+            className={`inline-flex items-center transition-colors duration-200 cursor-pointer ${
+              isXUrlString(urlInput)
+                ? 'text-sky-400 scale-110'
+                : 'hover:text-sky-400 dark:hover:text-sky-300'
+            }`}
+          >
+            <svg
+              className="w-3.5 h-3.5 transition-transform duration-200"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+            </svg>
+          </span>
+        </div>
 
         {errorMsg && (
           <motion.div
@@ -659,7 +885,15 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     setPlayerError(null);
                     setShowPlayer((v) => !v);
                   }}
-                  aria-label={showPlayer ? t.hidePlayer : t.watchOnline}
+                  aria-label={
+                    media.hasVideo === false
+                      ? showPlayer
+                        ? t.hideImage
+                        : t.viewImage
+                      : showPlayer
+                        ? t.hidePlayer
+                        : t.watchOnline
+                  }
                   className="group relative w-28 sm:w-32 aspect-video rounded-xl overflow-hidden bg-zinc-200 dark:bg-zinc-900 border border-black/10 dark:border-white/10 shrink-0 flex items-center justify-center"
                 >
                   {media.thumbnail && !imgFailed ? (
@@ -672,12 +906,16 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-zinc-800 to-black text-white/70">
-                      <Film className="w-6 h-6" />
+                      {media.hasVideo === false ? <ImageIcon className="w-6 h-6" /> : <Film className="w-6 h-6" />}
                     </div>
                   )}
                   <span className="absolute inset-0 bg-black/35 group-hover:bg-black/50 transition flex items-center justify-center">
                     <span className="w-9 h-9 rounded-full bg-white/90 text-black flex items-center justify-center shadow">
-                      <Play className="w-4 h-4 fill-current ms-0.5" />
+                      {media.hasVideo === false ? (
+                        <ImageIcon className="w-4 h-4" />
+                      ) : (
+                        <Play className="w-4 h-4 fill-current ms-0.5" />
+                      )}
                     </span>
                   </span>
                 </button>
@@ -697,81 +935,206 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                           </span>
                         </>
                       )}
+                      {media.hasVideo === false && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>{t.imagePostLabel}</span>
+                        </>
+                      )}
+                      {media.itemCount && media.itemCount > 1 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono tabular-nums">
+                            {media.itemCount} {t.carouselZipLabel}
+                          </span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span>{jobStage === 'ready' ? t.readyInApp : t.readyToSave}</span>
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPlayerError(null);
-                      setShowPlayer((v) => !v);
-                    }}
-                    className={`min-h-[40px] px-3.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-2 transition active:scale-[0.98] ${
-                      showPlayer
-                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
-                        : 'bg-white dark:bg-black text-black dark:text-white border-black/15 dark:border-white/20 hover:border-black/40 dark:hover:border-white/40'
-                    }`}
-                  >
-                    <Play className="w-3.5 h-3.5" />
-                    <span>{showPlayer ? t.hidePlayer : t.watchOnline}</span>
-                  </button>
+                  {(media.hasVideo !== false || Boolean(media.thumbnail)) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlayerError(null);
+                        setUseYoutubeEmbed(false);
+                        setShowPlayer((v) => !v);
+                      }}
+                      className={`min-h-[40px] px-3.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-2 transition active:scale-[0.98] ${
+                        showPlayer
+                          ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                          : 'bg-white dark:bg-black text-black dark:text-white border-black/15 dark:border-white/20 hover:border-black/40 dark:hover:border-white/40'
+                      }`}
+                    >
+                      {media.hasVideo === false ? (
+                        <ImageIcon className="w-3.5 h-3.5" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {media.hasVideo === false
+                          ? showPlayer
+                            ? t.hideImage
+                            : t.viewImage
+                          : showPlayer
+                            ? t.hidePlayer
+                            : t.watchOnline}
+                      </span>
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Inline Online Video Player */}
-              {showPlayer && (
-                <div className="rounded-xl overflow-hidden bg-black border border-black/15 dark:border-white/20">
-                  <video
-                    ref={videoRef}
-                    key={`${media.url}|${selectedQuality}|${selectedAudioFormatId}`}
-                    src={`${apiBase}/api/media/stream?url=${encodeURIComponent(media.url)}&quality=${encodeURIComponent(
-                      selectedQuality === 'audio' ? '360p' : selectedQuality
-                    )}${selectedAudioFormatId ? `&audioFormatId=${encodeURIComponent(selectedAudioFormatId)}` : ''}`}
-                    poster={media.thumbnail || undefined}
-                    controls
-                    playsInline
-                    autoPlay
-                    crossOrigin="anonymous"
-                    onLoadedMetadata={() => {
-                      if (videoRef.current && resumeTimeRef.current > 0) {
-                        try {
-                          videoRef.current.currentTime = resumeTimeRef.current;
-                        } catch {}
-                        resumeTimeRef.current = 0;
-                      }
-                      if (videoRef.current && selectedSubtitle && videoRef.current.textTracks[0]) {
-                        videoRef.current.textTracks[0].mode = 'showing';
-                      }
-                    }}
-                    onError={() => setPlayerError(t.downloadFailed)}
-                    className="w-full aspect-video bg-black"
-                  >
-                    {selectedSubtitle && (
-                      <track
-                        key={`${selectedSubtitle.lang}-${selectedSubtitle.isAuto ? 'a' : 'm'}`}
-                        kind="subtitles"
-                        srcLang={selectedSubtitle.lang}
-                        label={selectedSubtitle.label}
-                        src={`${apiBase}/api/media/subtitle?url=${encodeURIComponent(
-                          media.url
-                        )}&lang=${encodeURIComponent(selectedSubtitle.lang)}&auto=${
-                          selectedSubtitle.isAuto ? '1' : '0'
-                        }`}
-                        default
-                      />
-                    )}
-                  </video>
-                  {playerError && (
-                    <div className="px-3 py-2 text-xs text-red-400 bg-red-950/50 border-t border-red-900/50">
-                      {playerError}
-                    </div>
-                  )}
+              {/* Inline Online Video Player or Image Preview */}
+              {showPlayer && media.hasVideo === false && media.thumbnail && (
+                <div className="rounded-xl overflow-hidden bg-black/95 border border-black/15 dark:border-white/20 flex items-center justify-center max-h-[420px]">
+                  <img
+                    src={media.thumbnail}
+                    alt={media.title}
+                    referrerPolicy="no-referrer"
+                    className="w-full max-h-[420px] object-contain"
+                  />
                 </div>
               )}
 
-              {/* Quality Selection (Video Resolutions Only) */}
+              {showPlayer && media.hasVideo !== false && (() => {
+                const effectiveStreamQuality = isInstagramUrlString(media.url)
+                  ? 'best'
+                  : selectedQuality === 'audio'
+                    ? '360p'
+                    : selectedQuality;
+                const matchingReadyJobId =
+                  readyJob &&
+                  readyJob.url === media.url &&
+                  readyJob.quality === effectiveStreamQuality
+                    ? readyJob.jobId
+                    : '';
+                const streamSrc = `${apiBase}/api/media/stream?url=${encodeURIComponent(
+                  media.url
+                )}&quality=${encodeURIComponent(effectiveStreamQuality)}${
+                  selectedAudioFormatId ? `&audioFormatId=${encodeURIComponent(selectedAudioFormatId)}` : ''
+                }${matchingReadyJobId ? `&jobId=${encodeURIComponent(matchingReadyJobId)}` : ''}${
+                  playerRetryNonce > 0 ? `&_r=${playerRetryNonce}` : ''
+                }`;
+                const ytFallbackId = embedYoutubeId || extractClientYouTubeId(media.url);
+
+                const handleVideoError = async () => {
+                  let detail = '';
+                  let ytIdFromServer: string | null = null;
+                  try {
+                    const probe = await fetch(streamSrc, {
+                      headers: { Range: 'bytes=0-0' },
+                    });
+                    const ct = (probe.headers.get('content-type') || '').toLowerCase();
+                    if (!probe.ok || ct.includes('application/json')) {
+                      const body = (await probe.json()) as { error?: string; youtubeId?: string };
+                      if (typeof body?.error === 'string' && body.error.trim()) {
+                        detail = body.error.trim();
+                      }
+                      if (typeof body?.youtubeId === 'string' && /^[a-zA-Z0-9_-]{6,15}$/.test(body.youtubeId)) {
+                        ytIdFromServer = body.youtubeId;
+                      }
+                    } else {
+                      void probe.body?.cancel().catch(() => {});
+                    }
+                  } catch {
+                    // Fall back to generic streamFailed message
+                  }
+                  if (ytIdFromServer) setEmbedYoutubeId(ytIdFromServer);
+                  setPlayerError(detail ? `${t.streamFailed} (${detail})` : t.streamFailed);
+                };
+
+                return (
+                  <div className="rounded-xl overflow-hidden bg-black border border-black/15 dark:border-white/20">
+                    {useYoutubeEmbed && ytFallbackId ? (
+                      <iframe
+                        key={`yt-embed-${ytFallbackId}`}
+                        src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(ytFallbackId)}?autoplay=1&rel=0`}
+                        title={media.title}
+                        allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+                        allowFullScreen
+                        className="w-full aspect-video bg-black border-0"
+                      />
+                    ) : (
+                      <video
+                        ref={videoRef}
+                        key={`${media.url}|${effectiveStreamQuality}|${selectedAudioFormatId}|${playerRetryNonce}`}
+                        src={streamSrc}
+                        poster={media.thumbnail || undefined}
+                        controls
+                        playsInline
+                        autoPlay
+                        crossOrigin={selectedSubtitle ? 'anonymous' : undefined}
+                        onLoadedData={() => setPlayerError(null)}
+                        onCanPlay={() => setPlayerError(null)}
+                        onLoadedMetadata={() => {
+                          setPlayerError(null);
+                          if (videoRef.current && resumeTimeRef.current > 0) {
+                            try {
+                              videoRef.current.currentTime = resumeTimeRef.current;
+                            } catch {}
+                            resumeTimeRef.current = 0;
+                          }
+                          if (videoRef.current && selectedSubtitle && videoRef.current.textTracks[0]) {
+                            videoRef.current.textTracks[0].mode = 'showing';
+                          }
+                        }}
+                        onError={() => void handleVideoError()}
+                        className="w-full aspect-video bg-black"
+                      >
+                        {selectedSubtitle && (
+                          <track
+                            key={`${selectedSubtitle.lang}-${selectedSubtitle.isAuto ? 'a' : 'm'}`}
+                            kind="subtitles"
+                            srcLang={selectedSubtitle.lang}
+                            label={selectedSubtitle.label}
+                            src={`${apiBase}/api/media/subtitle?url=${encodeURIComponent(
+                              media.url
+                            )}&lang=${encodeURIComponent(selectedSubtitle.lang)}&auto=${
+                              selectedSubtitle.isAuto ? '1' : '0'
+                            }`}
+                            default
+                          />
+                        )}
+                      </video>
+                    )}
+                    {playerError && !useYoutubeEmbed && (
+                      <div className="px-3 py-2.5 text-xs text-red-300 bg-red-950/60 border-t border-red-900/50 flex flex-wrap items-center justify-between gap-2">
+                        <span className="min-w-0 flex-1 leading-relaxed">{playerError}</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPlayerError(null);
+                              setPlayerRetryNonce((n) => n + 1);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white font-semibold transition"
+                          >
+                            {t.retryPlayback}
+                          </button>
+                          {ytFallbackId && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPlayerError(null);
+                                setUseYoutubeEmbed(true);
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-semibold transition"
+                            >
+                              {t.youtubeEmbedFallback}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Quality Selection (Video Resolutions Only - hidden for Social media direct downloads) */}
+              {!isSocialMedia && availableQualities.length > 0 && (
               <div className="space-y-2.5">
                 <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
                   {t.selectQuality}
@@ -807,8 +1170,10 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                   })}
                 </div>
               </div>
+              )}
 
               {/* Sectioned Audio Tracks & Audio-Only (MP3) Mode */}
+              {(media.hasVideo !== false || (media.audioTracks && media.audioTracks.length > 0)) && (
               <div className="space-y-2.5 pt-1 border-t border-black/10 dark:border-white/10">
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
                   <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
@@ -880,6 +1245,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                   </div>
                 )}
               </div>
+              )}
 
               {/* Sectioned Subtitles (Manual Subtitles & Auto-Generated Captions) */}
               {((media.manualSubtitles && media.manualSubtitles.length > 0) ||
@@ -1081,9 +1447,15 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     type="button"
                     onClick={() => triggerFileSaveFromSite(readyJob.jobId, readyJob.fileId)}
                     className={`w-full min-h-[54px] px-6 rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2.5 transition active:scale-[0.98] ${
-                      isRedGlow
+                      providerGlow === 'red'
                         ? 'bg-red-600 text-white shadow-[0_0_28px_rgba(220,38,38,0.45)] hover:bg-red-500'
-                        : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.35)] hover:opacity-90'
+                        : providerGlow === 'instagram'
+                          ? 'bg-gradient-to-r from-[#f58529] via-[#dd2a7b] to-[#8134af] text-white shadow-[0_0_28px_rgba(221,42,123,0.45)] hover:brightness-110'
+                          : providerGlow === 'tiktok'
+                            ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee] text-black dark:text-white shadow-[0_0_28px_rgba(37,244,238,0.45)] hover:brightness-110'
+                            : providerGlow === 'x'
+                              ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2] text-white shadow-[0_0_28px_rgba(29,161,242,0.45)] hover:brightness-110'
+                              : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.35)] hover:opacity-90'
                     }`}
                   >
                     {savedConfirmed ? (
@@ -1111,9 +1483,15 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       )
                     }
                     className={`w-full min-h-[54px] px-6 rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2.5 transition active:scale-[0.98] disabled:opacity-80 ${
-                      isRedGlow
+                      providerGlow === 'red'
                         ? 'bg-red-600 text-white shadow-[0_0_28px_rgba(220,38,38,0.45)] hover:bg-red-500'
-                        : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.3)] hover:opacity-90'
+                        : providerGlow === 'instagram'
+                          ? 'bg-gradient-to-r from-[#f58529] via-[#dd2a7b] to-[#8134af] text-white shadow-[0_0_28px_rgba(221,42,123,0.45)] hover:brightness-110'
+                          : providerGlow === 'tiktok'
+                            ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee] text-black dark:text-white shadow-[0_0_28px_rgba(37,244,238,0.45)] hover:brightness-110'
+                            : providerGlow === 'x'
+                              ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2] text-white shadow-[0_0_28px_rgba(29,161,242,0.45)] hover:brightness-110'
+                              : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.3)] hover:opacity-90'
                     }`}
                   >
                     {isBusy ? (
@@ -1159,7 +1537,15 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       animate={{ width: `${jobProgress}%` }}
                       transition={{ duration: 0.2 }}
                       className={`h-full rounded-full ${
-                        isRedGlow ? 'bg-red-500' : 'bg-black dark:bg-white'
+                        providerGlow === 'red'
+                          ? 'bg-red-500'
+                          : providerGlow === 'instagram'
+                            ? 'bg-gradient-to-r from-[#f58529] via-[#dd2a7b] to-[#8134af]'
+                            : providerGlow === 'tiktok'
+                              ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee]'
+                              : providerGlow === 'x'
+                                ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2]'
+                                : 'bg-black dark:bg-white'
                       }`}
                     />
                   </div>
@@ -1172,7 +1558,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
 
       {/* Saved History Column */}
       <div className="lg:col-span-5">
-        <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 p-4 sm:p-5 space-y-4">
+        <div className="rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] p-4 sm:p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-black dark:text-white">
               {t.recentSaves}
@@ -1215,7 +1601,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       {item.title}
                     </div>
                     <div className="text-[11px] text-zinc-500 dark:text-zinc-400 font-mono tabular-nums mt-0.5 flex items-center gap-1.5">
-                      <span>{item.quality}</span>
+                      <span>{t.qualityLabels[item.quality]?.label || item.quality}</span>
                       <span aria-hidden="true">·</span>
                       <span>{formatBytes(item.sizeBytes)}</span>
                       <span aria-hidden="true">·</span>

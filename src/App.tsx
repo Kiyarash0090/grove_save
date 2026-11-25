@@ -1,16 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { ArrowDownToLine, Moon, Settings, Sun, User, WifiOff } from 'lucide-react';
+import { ArrowDownToLine, Info, Moon, Settings, Sun, User, WifiOff } from 'lucide-react';
 import { TRANSLATIONS, type AppLanguage, type AppTheme } from './i18n';
-import { DownloaderView, type SavedItem } from './components/DownloaderView';
+import { DownloaderView, type ProviderGlow, type SavedItem } from './components/DownloaderView';
+import { InfoView, type AnnouncementItem } from './components/InfoView';
 import { SettingsView } from './components/SettingsView';
 import { AuthModal, type AuthUser } from './components/AuthModal';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 
-type TabIndex = 0 | 1;
+type TabIndex = 0 | 1 | 2;
 
 const GUEST_HISTORY_KEY = 'grove_guest_history';
 const LEGACY_HISTORY_KEY = 'grove_history';
+const SEEN_ANNOUNCEMENT_KEY = 'grove_seen_announcement';
 
 // Guests do not keep a history: signed-out visitors always start with an empty
 // list, and any entries left behind by an older build are dropped once.
@@ -55,7 +57,15 @@ export default function App() {
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [isRedGlow, setIsRedGlow] = useState(false);
+  const [providerGlow, setProviderGlow] = useState<ProviderGlow>('default');
+  const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
+  const [seenAnnouncementKey, setSeenAnnouncementKey] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(SEEN_ANNOUNCEMENT_KEY);
+    } catch {
+      return null;
+    }
+  });
   const authEpochRef = useRef(0);
 
   const isOnline = useOnlineStatus();
@@ -194,6 +204,54 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const loadAnnouncements = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/announcements`, {
+        headers: { 'X-Requested-With': 'GroveSave' },
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { items?: AnnouncementItem[] };
+      if (Array.isArray(data.items)) {
+        setAnnouncements(data.items);
+      }
+    } catch {
+      // Ignore offline/transient announcement fetch errors
+    }
+  }, [apiBase]);
+
+  useEffect(() => {
+    void loadAnnouncements();
+    const onFocus = () => {
+      void loadAnnouncements();
+    };
+    window.addEventListener('focus', onFocus);
+    const intervalId = window.setInterval(() => {
+      void loadAnnouncements();
+    }, 60_000);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(intervalId);
+    };
+  }, [loadAnnouncements]);
+
+  const latestAnnouncementKey =
+    announcements.length > 0 ? `${announcements[0].id}:${announcements[0].createdAt}` : null;
+
+  const hasUnreadAnnouncement = Boolean(
+    latestAnnouncementKey && seenAnnouncementKey !== latestAnnouncementKey
+  );
+
+  useEffect(() => {
+    if (activeTab === 1 && latestAnnouncementKey && seenAnnouncementKey !== latestAnnouncementKey) {
+      setSeenAnnouncementKey(latestAnnouncementKey);
+      try {
+        localStorage.setItem(SEEN_ANNOUNCEMENT_KEY, latestAnnouncementKey);
+      } catch {
+        // Ignore private storage errors
+      }
+    }
+  }, [activeTab, latestAnnouncementKey, seenAnnouncementKey]);
+
   const syncPreferencesToServer = async (
     nextTheme: AppTheme,
     nextLang: AppLanguage,
@@ -246,7 +304,7 @@ export default function App() {
     if (!user) return;
 
     setHistory((prev) => {
-      const filtered = prev.filter((h) => h.url !== item.url);
+      const filtered = prev.filter((h) => !(h.url === item.url && h.quality === item.quality));
       return [item, ...filtered].slice(0, 50);
     });
 
@@ -321,12 +379,13 @@ export default function App() {
     if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.25) return;
 
     const isRtl = t.dir === 'rtl';
-    if (isRtl) {
-      if (dx > 0 && activeTab === 0) switchTab(1);
-      else if (dx < 0 && activeTab === 1) switchTab(0);
+    const goForward = isRtl ? dx > 0 : dx < 0;
+    if (goForward) {
+      if (activeTab === 0) switchTab(1);
+      else if (activeTab === 1) switchTab(2);
     } else {
-      if (dx < 0 && activeTab === 0) switchTab(1);
-      else if (dx > 0 && activeTab === 1) switchTab(0);
+      if (activeTab === 2) switchTab(1);
+      else if (activeTab === 1) switchTab(0);
     }
   };
 
@@ -339,24 +398,28 @@ export default function App() {
       {/* Animated Radiant Background Glow */}
       <div aria-hidden="true" className="fixed inset-0 pointer-events-none overflow-hidden z-0">
         <div
-          className={`animate-radiant-float absolute top-[-140px] left-1/2 w-[560px] sm:w-[760px] h-[360px] rounded-full blur-[110px] transition-colors duration-700 ${
-            isRedGlow
+          className={`animate-radiant-float absolute top-[-140px] left-1/2 w-[560px] sm:w-[760px] h-[360px] rounded-full blur-[110px] transition-all duration-700 ${
+            providerGlow === 'red'
               ? 'bg-red-500/25 dark:bg-red-600/30'
-              : 'bg-zinc-400/25 dark:bg-white/15'
+              : providerGlow === 'instagram'
+                ? 'bg-gradient-to-r from-[#f58529]/30 via-[#dd2a7b]/35 to-[#8134af]/30 dark:from-[#f58529]/30 dark:via-[#dd2a7b]/35 dark:to-[#8134af]/32'
+                : 'bg-zinc-400/25 dark:bg-white/15'
           }`}
         />
         <div
-          className={`absolute bottom-[-160px] left-1/2 -translate-x-1/2 w-[480px] h-[280px] rounded-full blur-[120px] transition-colors duration-700 ${
-            isRedGlow
+          className={`absolute bottom-[-160px] left-1/2 -translate-x-1/2 w-[480px] h-[280px] rounded-full blur-[120px] transition-all duration-700 ${
+            providerGlow === 'red'
               ? 'bg-red-500/15 dark:bg-red-600/15'
-              : 'bg-zinc-300/20 dark:bg-white/10'
+              : providerGlow === 'instagram'
+                ? 'bg-gradient-to-r from-[#8134af]/20 via-[#dd2a7b]/22 to-[#f58529]/18 dark:from-[#8134af]/22 dark:via-[#dd2a7b]/24 dark:to-[#f58529]/18'
+                : 'bg-zinc-300/20 dark:bg-white/10'
           }`}
         />
       </div>
 
       {/* Modern Minimalist Frosted Glass Header */}
-      <header className="sticky top-0 z-30 backdrop-blur-2xl bg-white/80 dark:bg-black/75 border-b border-black/[0.06] dark:border-white/[0.08] transition-colors duration-300">
-        <div className="max-w-6xl mx-auto h-14 sm:h-16 px-4 sm:px-6 flex items-center justify-between gap-6">
+      <header className="sticky top-0 z-30 backdrop-blur-2xl backdrop-saturate-150 bg-white/50 dark:bg-black/45 border-b border-black/[0.07] dark:border-white/[0.12] shadow-[0_4px_24px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.7)] dark:shadow-[0_8px_28px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.1)] transition-colors duration-300">
+        <div className="max-w-6xl mx-auto h-14 sm:h-16 px-4 sm:px-6 flex items-center justify-between gap-6 backdrop-blur-xl bg-white/20 dark:bg-white/[0.02]">
           <button
             type="button"
             onClick={() => switchTab(0)}
@@ -395,7 +458,7 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => (user ? switchTab(1) : setAuthModalOpen(true))}
+              onClick={() => (user ? switchTab(2) : setAuthModalOpen(true))}
               aria-label={t.sectionAccount}
               className={`min-h-[44px] flex items-center justify-center gap-2 rounded-xl transition active:scale-95 whitespace-nowrap shrink-0 ${
                 user
@@ -440,8 +503,22 @@ export default function App() {
                 defaultQuality={defaultQuality}
                 history={history}
                 onAddHistory={handleAddHistory}
-                onYouTubeGlowChange={setIsRedGlow}
+                onProviderGlowChange={setProviderGlow}
                 isGuest={!user}
+              />
+            </motion.div>
+          ) : activeTab === 1 ? (
+            <motion.div
+              key="tab-info"
+              initial={{ opacity: 0, x: swipeDir * 24 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: swipeDir * -24 }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <InfoView
+                t={t}
+                language={language}
+                announcements={announcements}
               />
             </motion.div>
           ) : (
@@ -467,6 +544,8 @@ export default function App() {
                 onOpenAuth={() => setAuthModalOpen(true)}
                 onSignOut={handleSignOut}
                 apiBase={apiBase}
+                announcements={announcements}
+                onAnnouncementsChange={setAnnouncements}
               />
             </motion.div>
           )}
@@ -481,10 +560,10 @@ export default function App() {
         </div>
       )}
 
-      {/* Floating White-Neon Footer Dock (Icon-Only Download Tab + Settings Tab) */}
+      {/* Floating White-Neon Footer Dock (Download Tab + Info Tab + Settings Tab) */}
       <nav
         aria-label="Primary Navigation"
-        className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 h-14 px-2.5 rounded-full bg-white/90 dark:bg-black/90 backdrop-blur-xl neon-dock flex items-center gap-2"
+        className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 h-14 px-2.5 rounded-full bg-white/55 dark:bg-white/[0.08] backdrop-blur-2xl backdrop-saturate-150 border border-white/75 dark:border-white/20 ring-1 ring-inset ring-black/[0.04] dark:ring-white/[0.1] neon-dock flex items-center gap-2"
       >
         <button
           type="button"
@@ -503,10 +582,30 @@ export default function App() {
         <button
           type="button"
           onClick={() => switchTab(1)}
-          aria-label={t.tabSettingsLabel}
+          aria-label={t.tabInfoLabel}
           aria-current={activeTab === 1 ? 'page' : undefined}
           className={`relative min-h-[44px] min-w-[56px] rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${
             activeTab === 1
+              ? 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_20px_rgba(255,255,255,0.45)]'
+              : 'text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+          }`}
+        >
+          <Info className="w-5 h-5" />
+          {hasUnreadAnnouncement && (
+            <span
+              aria-hidden="true"
+              className="absolute top-2 end-3 w-2 h-2 rounded-full bg-black dark:bg-white shadow-[0_0_6px_rgba(0,0,0,0.45)] dark:shadow-[0_0_8px_rgba(255,255,255,0.9)]"
+            />
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => switchTab(2)}
+          aria-label={t.tabSettingsLabel}
+          aria-current={activeTab === 2 ? 'page' : undefined}
+          className={`relative min-h-[44px] min-w-[56px] rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${
+            activeTab === 2
               ? 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_20px_rgba(255,255,255,0.45)]'
               : 'text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white'
           }`}
