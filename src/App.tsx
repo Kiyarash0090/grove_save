@@ -378,8 +378,8 @@ export default function App() {
                 <path d="M5 19h14" />
               </svg>
             </span>
-            <span className="grove-wordmark text-lg sm:text-xl font-bold text-black dark:text-white tracking-tight lowercase">
-              grove save
+            <span className="grove-wordmark text-lg sm:text-xl font-bold text-black dark:text-white tracking-tight">
+              Grove Save
             </span>
           </button>
 
