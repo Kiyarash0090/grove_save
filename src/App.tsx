@@ -10,13 +10,16 @@ import { useOnlineStatus } from './hooks/usePWAInstall';
 type TabIndex = 0 | 1;
 
 const GUEST_HISTORY_KEY = 'grove_guest_history';
+const LEGACY_HISTORY_KEY = 'grove_history';
 
-function readGuestHistory(): SavedItem[] {
+// Guests do not keep a history: signed-out visitors always start with an empty
+// list, and any entries left behind by an older build are dropped once.
+function clearGuestHistory(): void {
   try {
-    const raw = localStorage.getItem(GUEST_HISTORY_KEY) || localStorage.getItem('grove_history');
-    return raw ? (JSON.parse(raw) as SavedItem[]) : [];
+    localStorage.removeItem(GUEST_HISTORY_KEY);
+    localStorage.removeItem(LEGACY_HISTORY_KEY);
   } catch {
-    return [];
+    // Storage can be unavailable (private mode); nothing to clean up then.
   }
 }
 
@@ -44,7 +47,9 @@ export default function App() {
   const [defaultQuality, setDefaultQuality] = useState<string>(() => {
     return normalizeDefaultQuality(localStorage.getItem('grove_quality') || undefined);
   });
-  const [history, setHistory] = useState<SavedItem[]>(() => readGuestHistory());
+  // Signed-in users get their history from the database on mount; guests never
+  // get one, so the list always starts empty.
+  const [history, setHistory] = useState<SavedItem[]>([]);
 
   // Auth token stays in React memory only; persistent reload sessions use HttpOnly cookie + DB
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -139,11 +144,10 @@ export default function App() {
     localStorage.setItem('grove_quality', defaultQuality);
   }, [defaultQuality]);
 
+  // Drop any history an older build left in localStorage for signed-out visitors.
   useEffect(() => {
-    if (!user) {
-      localStorage.setItem(GUEST_HISTORY_KEY, JSON.stringify(history));
-    }
-  }, [history, user]);
+    if (!user) clearGuestHistory();
+  }, [user]);
 
   // Hydrate persistent HttpOnly cookie session from database once on initial page load / reload
   useEffect(() => {
@@ -169,7 +173,8 @@ export default function App() {
         if ('unauthenticated' in data) {
           setUser(null);
           setAuthToken(null);
-          setHistory(readGuestHistory());
+          setHistory([]);
+          clearGuestHistory();
           return;
         }
         if (data.user) {
@@ -235,28 +240,29 @@ export default function App() {
     void loadUserHistoryFromDb(token);
   };
 
-  // Prevent duplicate history entries and persist per-user in database when signed in
+  // History belongs to signed-in accounts only: guests save nothing at all, and
+  // signed-in users stay de-duplicated and capped at 50 entries.
   const handleAddHistory = (item: SavedItem) => {
+    if (!user) return;
+
     setHistory((prev) => {
       const filtered = prev.filter((h) => h.url !== item.url);
       return [item, ...filtered].slice(0, 50);
     });
 
-    if (user) {
-      fetch(`${apiBase}/api/user/history`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: buildAuthHeaders(true),
-        body: JSON.stringify(item),
+    fetch(`${apiBase}/api/user/history`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: buildAuthHeaders(true),
+      body: JSON.stringify(item),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { items?: SavedItem[] } | null) => {
+        if (data?.items) {
+          setHistory(data.items);
+        }
       })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data: { items?: SavedItem[] } | null) => {
-          if (data?.items) {
-            setHistory(data.items);
-          }
-        })
-        .catch(() => {});
-    }
+      .catch(() => {});
   };
 
   const handleClearHistory = () => {
@@ -268,8 +274,7 @@ export default function App() {
         headers: buildAuthHeaders(),
       }).catch(() => {});
     } else {
-      localStorage.removeItem(GUEST_HISTORY_KEY);
-      localStorage.removeItem('grove_history');
+      clearGuestHistory();
     }
   };
 
@@ -284,7 +289,9 @@ export default function App() {
     } catch {}
     setAuthToken(null);
     setUser(null);
-    setHistory(readGuestHistory());
+    // Signing out drops the stored history too: guests never see one.
+    setHistory([]);
+    clearGuestHistory();
   };
 
   const switchTab = (next: TabIndex) => {
@@ -434,6 +441,7 @@ export default function App() {
                 history={history}
                 onAddHistory={handleAddHistory}
                 onYouTubeGlowChange={setIsRedGlow}
+                isGuest={!user}
               />
             </motion.div>
           ) : (

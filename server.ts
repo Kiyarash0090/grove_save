@@ -3689,6 +3689,75 @@ async function startServer() {
     res.json({ items: rows, count: total.n, totalBytes: total.bytes });
   });
 
+  // Deletes every byte the app parked on local disk and drops the in-memory job
+  // table, so the server volume holds nothing but the database and the Telegram
+  // session. Telegram is the only storage for published media.
+  app.post('/api/admin/storage/purge', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    void (async () => {
+      let removedEntries = 0;
+      let freedBytes = 0;
+      const failures: string[] = [];
+
+      const sizeOf = async (target: string): Promise<number> => {
+        try {
+          const stat = await fs.promises.stat(target);
+          if (!stat.isDirectory()) return stat.size;
+          const entries = await fs.promises.readdir(target, { withFileTypes: true });
+          let total = 0;
+          for (const entry of entries) {
+            total += await sizeOf(path.join(target, entry.name));
+          }
+          return total;
+        } catch {
+          return 0;
+        }
+      };
+
+      // The cache is where staged downloads land before they reach Telegram. The
+      // directory itself is kept so the next download does not have to recreate it.
+      try {
+        const entries = await fs.promises.readdir(CACHE_DIR);
+        for (const entry of entries) {
+          const target = path.resolve(CACHE_DIR, entry);
+          if (!target.startsWith(CACHE_DIR + path.sep)) continue;
+          try {
+            freedBytes += await sizeOf(target);
+            await fs.promises.rm(target, { recursive: true, force: true });
+            removedEntries += 1;
+          } catch (err) {
+            failures.push(err instanceof Error ? err.message : String(err));
+          }
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          failures.push(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      // Nothing in the job table can still be served once its file is gone, and a
+      // half-finished download would have already lost its output path.
+      const droppedJobs = downloadJobs.size;
+      downloadJobs.clear();
+
+      res.json({
+        success: failures.length === 0,
+        removedEntries,
+        freedBytes,
+        droppedJobs,
+        failures,
+      });
+    })().catch((err) => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: err instanceof Error ? err.message : 'Cache purge failed.' });
+      }
+    });
+  });
+
   /* -------------------- Database backup (admin only) -------------------- */
 
   function backupStamp(): string {

@@ -40,6 +40,7 @@ export interface TranslationDict {
   recentSaves: string;
   emptySavesTitle: string;
   emptySavesDesc: string;
+  emptySavesDescGuest: string;
   reDownload: string;
   invalidUrlError: string;
   inspectFailed: string;
@@ -203,6 +204,12 @@ export interface TranslationDict {
   telegramNoFiles: string;
   telegramAccountLabel: string;
   telegramSecretsHint: string;
+  cachePurgeTitle: string;
+  cachePurgeDesc: string;
+  cachePurgeBtn: string;
+  cachePurgeConfirm: string;
+  cachePurgeDone: string;
+  cachePurgeFailed: string;
   // Database backup
   dbBackupSection: string;
   dbBackupDesc: string;
@@ -265,6 +272,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     recentSaves: 'Saved History',
     emptySavesTitle: 'No saved files yet',
     emptySavesDesc: 'Fetched media and downloaded files will appear here for quick access.',
+    emptySavesDescGuest:
+      'Guests do not keep a history. Sign in and saved files will appear here.',
     reDownload: 'Save again',
     invalidUrlError: 'Please enter a valid http or https media link.',
     inspectFailed: 'Could not read link details. Check the link and try again.',
@@ -424,6 +433,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramNoFiles: 'No files have been published yet.',
     telegramAccountLabel: 'Account',
     telegramSecretsHint: 'Secrets are stored on the server and never sent back to the browser.',
+    cachePurgeTitle: 'Server disk',
+    cachePurgeDesc:
+      'Telegram is the storage. This deletes every cached download left on the server disk; published files stay available from Telegram.',
+    cachePurgeBtn: 'Clear server cache',
+    cachePurgeConfirm: 'Delete every cached file from the server disk? Downloads already published to Telegram are not affected.',
+    cachePurgeDone: 'Server cache cleared.',
+    cachePurgeFailed: 'Could not clear the server cache.',
     dbBackupSection: 'Database backup',
     dbBackupDesc: 'Download a consistent copy of the SQLite database (users, history, Telegram file index).',
     dbBackupBtn: 'Download backup',
@@ -483,6 +499,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     recentSaves: 'تاریخچه دانلودها',
     emptySavesTitle: 'هنوز فایلی ذخیره نشده',
     emptySavesDesc: 'رسانه‌های بررسی‌شده و دانلودهای شما برای دسترسی سریع اینجا نمایش داده می‌شوند.',
+    emptySavesDescGuest:
+      'حالت مهمان تاریخچه‌ای ندارد. پس از ورود، فایل‌های ذخیره‌شده اینجا نمایش داده می‌شوند.',
     reDownload: 'دانلود مجدد',
     invalidUrlError: 'لطفاً یک لینک معتبر با http یا https وارد کنید.',
     inspectFailed: 'دریافت اطلاعات لینک انجام نشد. لینک را بررسی کنید.',
@@ -642,6 +660,14 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramNoFiles: 'هنوز فایلی منتشر نشده است.',
     telegramAccountLabel: 'حساب',
     telegramSecretsHint: 'اطلاعات محرمانه روی سرور نگه‌داری می‌شود و هرگز به مرورگر بازگردانده نمی‌شود.',
+    cachePurgeTitle: 'دیسک سرور',
+    cachePurgeDesc:
+      'دیسک برنامه همان تلگرام است. این دکمه هر فایل کش‌شده روی دیسک سرور را پاک می‌کند؛ فایل‌هایی که در تلگرام منتشر شده‌اند همچنان قابل دانلود می‌مانند.',
+    cachePurgeBtn: 'پاک‌سازی کش سرور',
+    cachePurgeConfirm:
+      'همهٔ فایل‌های کش‌شده روی دیسک سرور حذف شوند؟ فایل‌های منتشرشده در تلگرام آسیبی نمی‌بینند.',
+    cachePurgeDone: 'کش سرور پاک شد.',
+    cachePurgeFailed: 'پاک‌سازی کش سرور انجام نشد.',
     dbBackupSection: 'بکاپ دیتابیس',
     dbBackupDesc: 'دریافت یک نسخه یکدست از دیتابیس SQLite (کاربران، تاریخچه و فهرست فایل‌های تلگرام).',
     dbBackupBtn: 'دانلود بکاپ',
@@ -701,6 +727,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     recentSaves: 'История загрузок',
     emptySavesTitle: 'Загрузок пока нет',
     emptySavesDesc: 'Проверенные и сохранённые медиафайлы появятся здесь.',
+    emptySavesDescGuest:
+      'У гостей история не сохраняется. Войдите, и файлы появятся здесь.',
     reDownload: 'Скачать снова',
     invalidUrlError: 'Введите корректную ссылку http или https.',
     inspectFailed: 'Не удалось получить данные по ссылке.',
@@ -860,6 +888,14 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramNoFiles: 'Файлы ещё не опубликованы.',
     telegramAccountLabel: 'Аккаунт',
     telegramSecretsHint: 'Секреты хранятся на сервере и никогда не возвращаются в браузер.',
+    cachePurgeTitle: 'Диск сервера',
+    cachePurgeDesc:
+      'Хранилище — это Telegram. Кнопка удаляет все кэшированные загрузки с диска сервера; файлы, уже опубликованные в Telegram, остаются доступны.',
+    cachePurgeBtn: 'Очистить кэш сервера',
+    cachePurgeConfirm:
+      'Удалить все кэшированные файлы с диска сервера? На файлы, опубликованные в Telegram, это не влияет.',
+    cachePurgeDone: 'Кэш сервера очищен.',
+    cachePurgeFailed: 'Не удалось очистить кэш сервера.',
     dbBackupSection: 'Резервная копия базы',
     dbBackupDesc: 'Скачать согласованную копию базы SQLite (пользователи, история, индекс файлов Telegram).',
     dbBackupBtn: 'Скачать копию',
@@ -919,6 +955,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     recentSaves: '下载记录',
     emptySavesTitle: '暂无保存记录',
     emptySavesDesc: '解析后的媒体和已下载的文件将显示在这里，方便再次保存。',
+    emptySavesDescGuest: '访客不保留历史记录。登录后，保存的文件会显示在这里。',
     reDownload: '重新保存',
     invalidUrlError: '请输入有效的 http 或 https 链接。',
     inspectFailed: '无法读取链接信息，请检查后重试。',
@@ -1078,6 +1115,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramNoFiles: '尚未发布任何文件。',
     telegramAccountLabel: '账户',
     telegramSecretsHint: '密钥保存在服务器上，绝不下发到浏览器。',
+    cachePurgeTitle: '服务器磁盘',
+    cachePurgeDesc:
+      '存储就是 Telegram。此按钮会删除服务器磁盘上所有缓存的下载文件；已发布到 Telegram 的文件仍可下载。',
+    cachePurgeBtn: '清理服务器缓存',
+    cachePurgeConfirm: '删除服务器磁盘上的所有缓存文件？已发布到 Telegram 的文件不受影响。',
+    cachePurgeDone: '服务器缓存已清理。',
+    cachePurgeFailed: '无法清理服务器缓存。',
     dbBackupSection: '数据库备份',
     dbBackupDesc: '下载 SQLite 数据库的一致性副本（用户、历史记录、Telegram 文件索引）。',
     dbBackupBtn: '下载备份',

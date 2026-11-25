@@ -79,6 +79,7 @@ interface DownloaderViewProps {
   history: SavedItem[];
   onAddHistory: (item: SavedItem) => void;
   onYouTubeGlowChange: (isRed: boolean) => void;
+  isGuest?: boolean;
 }
 
 export function isYouTubeUrlString(raw: string): boolean {
@@ -124,6 +125,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   history,
   onAddHistory,
   onYouTubeGlowChange,
+  isGuest = false,
 }) => {
   const [urlInput, setUrlInput] = useState('');
   const [selectedQuality, setSelectedQuality] = useState(defaultQuality);
@@ -1189,7 +1191,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                 {t.emptySavesTitle}
               </div>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-xs mx-auto leading-relaxed">
-                {t.emptySavesDesc}
+                {isGuest ? t.emptySavesDescGuest : t.emptySavesDesc}
               </p>
             </div>
           ) : (

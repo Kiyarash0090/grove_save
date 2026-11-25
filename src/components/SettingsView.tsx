@@ -160,6 +160,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   >([]);
   const [tgFileCount, setTgFileCount] = useState(0);
   const [tgTotalBytes, setTgTotalBytes] = useState(0);
+  const [cachePurgeBusy, setCachePurgeBusy] = useState(false);
+  const [cachePurgeMessage, setCachePurgeMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(
+    null
+  );
 
   // Admin-only database backup stats
   const [dbStats, setDbStats] = useState<{
@@ -1001,6 +1005,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setTgMessage({ type: 'error', text: t.telegramTestFailed });
     } finally {
       setTgLoading(false);
+    }
+  };
+
+  const purgeServerCache = async () => {
+    if (!isAdmin) return;
+    if (!window.confirm(t.cachePurgeConfirm)) return;
+    setCachePurgeBusy(true);
+    setCachePurgeMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/storage/purge`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        removedEntries?: number;
+        freedBytes?: number;
+        failures?: string[];
+        error?: string;
+      };
+      if (res.ok && data.success) {
+        const count = data.removedEntries || 0;
+        setCachePurgeMessage({
+          type: 'success',
+          text: `${t.cachePurgeDone} (${count} · ${formatBytes(data.freedBytes || 0)})`,
+        });
+        void fetchTelegramFiles();
+      } else {
+        setCachePurgeMessage({
+          type: 'error',
+          text: data.error || t.cachePurgeFailed,
+        });
+      }
+    } catch {
+      setCachePurgeMessage({ type: 'error', text: t.cachePurgeFailed });
+    } finally {
+      setCachePurgeBusy(false);
     }
   };
 
@@ -1966,6 +2008,48 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     </li>
                   ))}
                 </ul>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Server disk / cache purge */}
+        <section aria-label={t.cachePurgeTitle}>
+          <h2 className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+            {t.cachePurgeTitle}
+          </h2>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <div className="px-4 py-4 flex items-start gap-3 border-b border-black/10 dark:border-white/10">
+              <HardDrive className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-black dark:text-white">{t.cachePurgeTitle}</h3>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{t.cachePurgeDesc}</p>
+              </div>
+            </div>
+            <div className="p-4 sm:p-5 space-y-3">
+              <button
+                type="button"
+                onClick={() => void purgeServerCache()}
+                disabled={cachePurgeBusy}
+                className="w-full min-h-[44px] px-4 rounded-xl border border-red-300 dark:border-red-800 text-red-600 dark:text-red-400 text-sm font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-60"
+              >
+                {cachePurgeBusy ? (
+                  <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4 shrink-0" />
+                )}
+                <span>{t.cachePurgeBtn}</span>
+              </button>
+              {cachePurgeMessage && (
+                <p
+                  className={`text-xs ${
+                    cachePurgeMessage.type === 'success'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-red-600 dark:text-red-400'
+                  }`}
+                >
+                  {cachePurgeMessage.text}
+                </p>
               )}
             </div>
           </div>
