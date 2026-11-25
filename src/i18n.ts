@@ -22,6 +22,8 @@ export interface TranslationDict {
   preparing: string;
   downloading: string;
   savedToDevice: string;
+  copyDownloadLink: string;
+  linkCopied: string;
   readyToSave: string;
   watchOnline: string;
   hidePlayer: string;
@@ -159,6 +161,61 @@ export interface TranslationDict {
   youtubeSaveCookiesBtn: string;
   xrayNavDesc: string;
   potNavDesc: string;
+  // Telegram storage
+  sectionTelegram: string;
+  telegramNavDesc: string;
+  telegramEnableLabel: string;
+  telegramEnableDesc: string;
+  telegramUploadLabel: string;
+  telegramUploadDesc: string;
+  telegramModeLabel: string;
+  telegramModeUser: string;
+  telegramModeBot: string;
+  telegramApiIdLabel: string;
+  telegramApiHashLabel: string;
+  telegramBotTokenLabel: string;
+  telegramChannelLabel: string;
+  telegramChannelPlaceholder: string;
+  telegramPhoneLabel: string;
+  telegramPhonePlaceholder: string;
+  telegramCodeLabel: string;
+  telegramCodePlaceholder: string;
+  telegramPasswordLabel: string;
+  telegramPasswordPlaceholder: string;
+  telegramSendCodeBtn: string;
+  telegramSignInBtn: string;
+  telegramSaveBtn: string;
+  telegramTestBtn: string;
+  telegramLogoutBtn: string;
+  telegramConnected: string;
+  telegramNotConnected: string;
+  telegramCodeSent: string;
+  telegramSignedInMsg: string;
+  telegramSavedMsg: string;
+  telegramTestSuccess: string;
+  telegramTestFailed: string;
+  telegramNeedPassword: string;
+  telegramApiIdDesc: string;
+  telegramStorageTitle: string;
+  telegramStorageDesc: string;
+  telegramFilesCount: string;
+  telegramOpenFileBtn: string;
+  telegramNoFiles: string;
+  telegramAccountLabel: string;
+  telegramSecretsHint: string;
+  // Database backup
+  dbBackupSection: string;
+  dbBackupDesc: string;
+  dbBackupBtn: string;
+  dbBackupStats: string;
+  dbBackupUsers: string;
+  dbBackupHistory: string;
+  dbBackupTelegram: string;
+  dbBackupSize: string;
+  dbBackupCreateBtn: string;
+  dbBackupCreatedMsg: string;
+  dbBackupServerTitle: string;
+  dbBackupEmpty: string;
 }
 
 export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
@@ -190,6 +247,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     preparing: 'Preparing stream...',
     downloading: 'Saving file...',
     savedToDevice: 'Saved to device storage',
+    copyDownloadLink: 'Copy download link',
+    linkCopied: 'Link copied',
     readyToSave: 'Ready to save',
     watchOnline: 'Watch Online',
     hidePlayer: 'Hide Player',
@@ -324,6 +383,59 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeSaveCookiesBtn: 'Save Cookies',
     xrayNavDesc: 'Manage servers, proxy tunnel & YouTube tests',
     potNavDesc: 'bgutil server, yt-dlp plugin & YouTube cookies',
+    sectionTelegram: 'Telegram Storage',
+    telegramNavDesc: 'Store downloads in a Telegram channel & serve direct links',
+    telegramEnableLabel: 'Telegram storage',
+    telegramEnableDesc: 'Publish finished downloads to your Telegram channel instead of the server disk.',
+    telegramUploadLabel: 'Upload downloads',
+    telegramUploadDesc: 'When on, every finished download is uploaded to the channel and removed from the server disk.',
+    telegramModeLabel: 'Account type',
+    telegramModeUser: 'User account',
+    telegramModeBot: 'Bot',
+    telegramApiIdLabel: 'API ID',
+    telegramApiHashLabel: 'API hash',
+    telegramBotTokenLabel: 'Bot token',
+    telegramChannelLabel: 'Channel',
+    telegramChannelPlaceholder: '@my_channel or https://t.me/my_channel',
+    telegramPhoneLabel: 'Phone number',
+    telegramPhonePlaceholder: '+15551234567',
+    telegramCodeLabel: 'Login code',
+    telegramCodePlaceholder: '12345',
+    telegramPasswordLabel: 'Two-step password',
+    telegramPasswordPlaceholder: 'Only if two-step verification is enabled',
+    telegramSendCodeBtn: 'Send code',
+    telegramSignInBtn: 'Sign in',
+    telegramSaveBtn: 'Save settings',
+    telegramTestBtn: 'Test channel',
+    telegramLogoutBtn: 'Disconnect',
+    telegramConnected: 'Connected',
+    telegramNotConnected: 'Not connected',
+    telegramCodeSent: 'Login code sent to your Telegram app',
+    telegramSignedInMsg: 'Signed in to Telegram',
+    telegramSavedMsg: 'Telegram settings saved',
+    telegramTestSuccess: 'Channel reachable',
+    telegramTestFailed: 'Channel test failed',
+    telegramNeedPassword: 'Two-step verification is on — enter the password',
+    telegramApiIdDesc: 'Create an app at my.telegram.org to get your API ID and API hash.',
+    telegramStorageTitle: 'Stored files',
+    telegramStorageDesc: 'Every published file is tracked in the database with its owner and channel location.',
+    telegramFilesCount: 'files',
+    telegramOpenFileBtn: 'Open',
+    telegramNoFiles: 'No files have been published yet.',
+    telegramAccountLabel: 'Account',
+    telegramSecretsHint: 'Secrets are stored on the server and never sent back to the browser.',
+    dbBackupSection: 'Database backup',
+    dbBackupDesc: 'Download a consistent copy of the SQLite database (users, history, Telegram file index).',
+    dbBackupBtn: 'Download backup',
+    dbBackupStats: 'Database',
+    dbBackupUsers: 'users',
+    dbBackupHistory: 'history',
+    dbBackupTelegram: 'Telegram files',
+    dbBackupSize: 'size',
+    dbBackupCreateBtn: 'Save backup on server',
+    dbBackupCreatedMsg: 'Backup saved on the server.',
+    dbBackupServerTitle: 'Backups on the server',
+    dbBackupEmpty: 'No server backups yet.',
   },
   fa: {
     dir: 'rtl',
@@ -353,6 +465,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     preparing: 'در حال آماده‌سازی...',
     downloading: 'در حال ذخیره فایل...',
     savedToDevice: 'در حافظه دستگاه ذخیره شد',
+    copyDownloadLink: 'کپی لینک دانلود',
+    linkCopied: 'لینک کپی شد',
     readyToSave: 'آماده برای ذخیره',
     watchOnline: 'پخش آنلاین',
     hidePlayer: 'بستن پخش‌کننده',
@@ -487,6 +601,59 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeSaveCookiesBtn: 'ذخیره کوکی‌ها',
     xrayNavDesc: 'مدیریت سرورها، تونل وی‌پی‌ان و تست دانلود یوتیوب',
     potNavDesc: 'سرور bgutil، افزونه yt-dlp و کوکی‌های یوتیوب',
+    sectionTelegram: 'ذخیره‌سازی تلگرام',
+    telegramNavDesc: 'ذخیره دانلودها در کانال تلگرام و ساخت لینک مستقیم',
+    telegramEnableLabel: 'ذخیره‌سازی روی تلگرام',
+    telegramEnableDesc: 'دانلودهای آماده به‌جای دیسک سرور در کانال تلگرام منتشر می‌شوند.',
+    telegramUploadLabel: 'آپلود دانلودها',
+    telegramUploadDesc: 'وقتی روشن باشد، هر دانلود تمام‌شده به کانال آپلود و از دیسک سرور حذف می‌شود.',
+    telegramModeLabel: 'نوع حساب',
+    telegramModeUser: 'حساب کاربری',
+    telegramModeBot: 'ربات',
+    telegramApiIdLabel: 'API ID',
+    telegramApiHashLabel: 'API hash',
+    telegramBotTokenLabel: 'توکن ربات',
+    telegramChannelLabel: 'کانال',
+    telegramChannelPlaceholder: '@my_channel یا https://t.me/my_channel',
+    telegramPhoneLabel: 'شماره تلفن',
+    telegramPhonePlaceholder: '+989121234567',
+    telegramCodeLabel: 'کد ورود',
+    telegramCodePlaceholder: '12345',
+    telegramPasswordLabel: 'رمز تأیید دو مرحله‌ای',
+    telegramPasswordPlaceholder: 'فقط اگر تأیید دو مرحله‌ای فعال است',
+    telegramSendCodeBtn: 'ارسال کد',
+    telegramSignInBtn: 'ورود',
+    telegramSaveBtn: 'ذخیره تنظیمات',
+    telegramTestBtn: 'تست کانال',
+    telegramLogoutBtn: 'قطع اتصال',
+    telegramConnected: 'متصل',
+    telegramNotConnected: 'متصل نیست',
+    telegramCodeSent: 'کد ورود به تلگرام شما ارسال شد',
+    telegramSignedInMsg: 'ورود به تلگرام انجام شد',
+    telegramSavedMsg: 'تنظیمات تلگرام ذخیره شد',
+    telegramTestSuccess: 'کانال در دسترس است',
+    telegramTestFailed: 'تست کانال ناموفق بود',
+    telegramNeedPassword: 'تأیید دو مرحله‌ای فعال است — رمز را وارد کنید',
+    telegramApiIdDesc: 'برای دریافت API ID و API hash در my.telegram.org یک اپلیکیشن بسازید.',
+    telegramStorageTitle: 'فایل‌های ذخیره‌شده',
+    telegramStorageDesc: 'هر فایل منتشرشده همراه با مالک و محل کانال در دیتابیس ثبت می‌شود.',
+    telegramFilesCount: 'فایل',
+    telegramOpenFileBtn: 'باز کردن',
+    telegramNoFiles: 'هنوز فایلی منتشر نشده است.',
+    telegramAccountLabel: 'حساب',
+    telegramSecretsHint: 'اطلاعات محرمانه روی سرور نگه‌داری می‌شود و هرگز به مرورگر بازگردانده نمی‌شود.',
+    dbBackupSection: 'بکاپ دیتابیس',
+    dbBackupDesc: 'دریافت یک نسخه یکدست از دیتابیس SQLite (کاربران، تاریخچه و فهرست فایل‌های تلگرام).',
+    dbBackupBtn: 'دانلود بکاپ',
+    dbBackupStats: 'دیتابیس',
+    dbBackupUsers: 'کاربر',
+    dbBackupHistory: 'تاریخچه',
+    dbBackupTelegram: 'فایل تلگرام',
+    dbBackupSize: 'حجم',
+    dbBackupCreateBtn: 'ذخیره بکاپ روی سرور',
+    dbBackupCreatedMsg: 'بکاپ روی سرور ذخیره شد.',
+    dbBackupServerTitle: 'بکاپ‌های روی سرور',
+    dbBackupEmpty: 'هنوز بکاپی روی سرور ذخیره نشده است.',
   },
   ru: {
     dir: 'ltr',
@@ -516,6 +683,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     preparing: 'Подготовка потока...',
     downloading: 'Сохранение файла...',
     savedToDevice: 'Сохранено в память устройства',
+    copyDownloadLink: 'Скопировать ссылку',
+    linkCopied: 'Ссылка скопирована',
     readyToSave: 'Готово к сохранению',
     watchOnline: 'Смотреть онлайн',
     hidePlayer: 'Скрыть плеер',
@@ -650,6 +819,59 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeSaveCookiesBtn: 'Сохранить Cookies',
     xrayNavDesc: 'Серверы, прокси-туннель и тесты на YouTube',
     potNavDesc: 'Сервер bgutil, плагин yt-dlp и cookies YouTube',
+    sectionTelegram: 'Хранилище Telegram',
+    telegramNavDesc: 'Хранить загрузки в канале Telegram и отдавать прямые ссылки',
+    telegramEnableLabel: 'Хранилище Telegram',
+    telegramEnableDesc: 'Публиковать готовые загрузки в канале Telegram вместо диска сервера.',
+    telegramUploadLabel: 'Загружать файлы',
+    telegramUploadDesc: 'Если включено, каждая готовая загрузка отправляется в канал и удаляется с диска сервера.',
+    telegramModeLabel: 'Тип аккаунта',
+    telegramModeUser: 'Аккаунт пользователя',
+    telegramModeBot: 'Бот',
+    telegramApiIdLabel: 'API ID',
+    telegramApiHashLabel: 'API hash',
+    telegramBotTokenLabel: 'Токен бота',
+    telegramChannelLabel: 'Канал',
+    telegramChannelPlaceholder: '@my_channel или https://t.me/my_channel',
+    telegramPhoneLabel: 'Номер телефона',
+    telegramPhonePlaceholder: '+79001234567',
+    telegramCodeLabel: 'Код входа',
+    telegramCodePlaceholder: '12345',
+    telegramPasswordLabel: 'Пароль двухэтапной проверки',
+    telegramPasswordPlaceholder: 'Только если включена двухэтапная проверка',
+    telegramSendCodeBtn: 'Отправить код',
+    telegramSignInBtn: 'Войти',
+    telegramSaveBtn: 'Сохранить настройки',
+    telegramTestBtn: 'Проверить канал',
+    telegramLogoutBtn: 'Отключить',
+    telegramConnected: 'Подключено',
+    telegramNotConnected: 'Не подключено',
+    telegramCodeSent: 'Код входа отправлен в приложение Telegram',
+    telegramSignedInMsg: 'Вход в Telegram выполнен',
+    telegramSavedMsg: 'Настройки Telegram сохранены',
+    telegramTestSuccess: 'Канал доступен',
+    telegramTestFailed: 'Проверка канала не удалась',
+    telegramNeedPassword: 'Включена двухэтапная проверка — введите пароль',
+    telegramApiIdDesc: 'Создайте приложение на my.telegram.org, чтобы получить API ID и API hash.',
+    telegramStorageTitle: 'Сохранённые файлы',
+    telegramStorageDesc: 'Каждый опубликованный файл записывается в базу с владельцем и местом в канале.',
+    telegramFilesCount: 'файлов',
+    telegramOpenFileBtn: 'Открыть',
+    telegramNoFiles: 'Файлы ещё не опубликованы.',
+    telegramAccountLabel: 'Аккаунт',
+    telegramSecretsHint: 'Секреты хранятся на сервере и никогда не возвращаются в браузер.',
+    dbBackupSection: 'Резервная копия базы',
+    dbBackupDesc: 'Скачать согласованную копию базы SQLite (пользователи, история, индекс файлов Telegram).',
+    dbBackupBtn: 'Скачать копию',
+    dbBackupStats: 'База данных',
+    dbBackupUsers: 'пользователей',
+    dbBackupHistory: 'история',
+    dbBackupTelegram: 'Файлы Telegram',
+    dbBackupSize: 'размер',
+    dbBackupCreateBtn: 'Сохранить копию на сервере',
+    dbBackupCreatedMsg: 'Копия сохранена на сервере.',
+    dbBackupServerTitle: 'Копии на сервере',
+    dbBackupEmpty: 'На сервере пока нет резервных копий.',
   },
   zh: {
     dir: 'ltr',
@@ -679,6 +901,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     preparing: '正在准备媒体流...',
     downloading: '正在保存文件...',
     savedToDevice: '已保存至设备存储',
+    copyDownloadLink: '复制下载链接',
+    linkCopied: '链接已复制',
     readyToSave: '准备就绪',
     watchOnline: '在线观看',
     hidePlayer: '收起播放器',
@@ -813,5 +1037,58 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeSaveCookiesBtn: '保存 Cookies',
     xrayNavDesc: '管理节点配置、代理隧道与 YouTube 下载测试',
     potNavDesc: 'bgutil 服务、yt-dlp 插件与 YouTube Cookies',
+    sectionTelegram: 'Telegram 存储',
+    telegramNavDesc: '将下载文件存入 Telegram 频道并提供直链',
+    telegramEnableLabel: 'Telegram 存储',
+    telegramEnableDesc: '将完成的下载发布到 Telegram 频道，而不是服务器磁盘。',
+    telegramUploadLabel: '上传下载文件',
+    telegramUploadDesc: '开启后，每个完成的下载都会上传到频道并从服务器磁盘删除。',
+    telegramModeLabel: '账户类型',
+    telegramModeUser: '用户账户',
+    telegramModeBot: '机器人',
+    telegramApiIdLabel: 'API ID',
+    telegramApiHashLabel: 'API hash',
+    telegramBotTokenLabel: '机器人 Token',
+    telegramChannelLabel: '频道',
+    telegramChannelPlaceholder: '@my_channel 或 https://t.me/my_channel',
+    telegramPhoneLabel: '手机号',
+    telegramPhonePlaceholder: '+8613800138000',
+    telegramCodeLabel: '登录验证码',
+    telegramCodePlaceholder: '12345',
+    telegramPasswordLabel: '两步验证密码',
+    telegramPasswordPlaceholder: '仅在启用两步验证时需要',
+    telegramSendCodeBtn: '发送验证码',
+    telegramSignInBtn: '登录',
+    telegramSaveBtn: '保存设置',
+    telegramTestBtn: '测试频道',
+    telegramLogoutBtn: '断开连接',
+    telegramConnected: '已连接',
+    telegramNotConnected: '未连接',
+    telegramCodeSent: '验证码已发送到您的 Telegram',
+    telegramSignedInMsg: '已登录 Telegram',
+    telegramSavedMsg: 'Telegram 设置已保存',
+    telegramTestSuccess: '频道可访问',
+    telegramTestFailed: '频道测试失败',
+    telegramNeedPassword: '已启用两步验证 — 请输入密码',
+    telegramApiIdDesc: '在 my.telegram.org 创建应用以获取 API ID 和 API hash。',
+    telegramStorageTitle: '已存储文件',
+    telegramStorageDesc: '每个已发布文件都会连同其归属和频道位置记录到数据库。',
+    telegramFilesCount: '文件',
+    telegramOpenFileBtn: '打开',
+    telegramNoFiles: '尚未发布任何文件。',
+    telegramAccountLabel: '账户',
+    telegramSecretsHint: '密钥保存在服务器上，绝不下发到浏览器。',
+    dbBackupSection: '数据库备份',
+    dbBackupDesc: '下载 SQLite 数据库的一致性副本（用户、历史记录、Telegram 文件索引）。',
+    dbBackupBtn: '下载备份',
+    dbBackupStats: '数据库',
+    dbBackupUsers: '用户',
+    dbBackupHistory: '历史记录',
+    dbBackupTelegram: 'Telegram 文件',
+    dbBackupSize: '大小',
+    dbBackupCreateBtn: '在服务器上保存备份',
+    dbBackupCreatedMsg: '备份已保存到服务器。',
+    dbBackupServerTitle: '服务器上的备份',
+    dbBackupEmpty: '服务器上还没有备份。',
   },
 };

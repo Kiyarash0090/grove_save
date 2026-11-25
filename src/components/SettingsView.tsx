@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   ChevronLeft,
+  Database,
   Download,
   Globe,
   HardDrive,
@@ -16,6 +17,7 @@ import {
   Moon,
   Play,
   Plus,
+  Send,
   Server,
   Shield,
   ShieldCheck,
@@ -74,7 +76,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const [clearedFeedback, setClearedFeedback] = useState(false);
 
-  const [adminPage, setAdminPage] = useState<'main' | 'xray' | 'pot'>('main');
+  const [adminPage, setAdminPage] = useState<'main' | 'xray' | 'pot' | 'telegram'>('main');
 
   // Admin-only YouTube Cookies state (PO Token is handled automatically by bgutil-ytdlp-pot-provider)
   const [youtubeCookies, setYoutubeCookies] = useState('');
@@ -122,6 +124,55 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [potVersion, setPotVersion] = useState<string | null>(null);
   const [potLoading, setPotLoading] = useState(false);
   const [potMessage, setPotMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Admin-only Telegram storage state
+  interface TelegramStatus {
+    enabled: boolean;
+    uploadEnabled: boolean;
+    mode: 'user' | 'bot';
+    channel: string;
+    apiId: number | null;
+    hasApiHash: boolean;
+    apiHashMasked: string;
+    hasBotToken: boolean;
+    hasSession: boolean;
+    signedIn: boolean;
+    account: string | null;
+    lastError: string | null;
+    pendingLogin: boolean;
+  }
+  const [tgStatus, setTgStatus] = useState<TelegramStatus | null>(null);
+  const [tgEnabled, setTgEnabled] = useState(false);
+  const [tgUploadEnabled, setTgUploadEnabled] = useState(false);
+  const [tgMode, setTgMode] = useState<'user' | 'bot'>('user');
+  const [tgApiId, setTgApiId] = useState('');
+  const [tgApiHash, setTgApiHash] = useState('');
+  const [tgBotToken, setTgBotToken] = useState('');
+  const [tgChannel, setTgChannel] = useState('');
+  const [tgPhone, setTgPhone] = useState('');
+  const [tgCode, setTgCode] = useState('');
+  const [tgPassword, setTgPassword] = useState('');
+  const [tgNeedsPassword, setTgNeedsPassword] = useState(false);
+  const [tgLoading, setTgLoading] = useState(false);
+  const [tgMessage, setTgMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [tgFiles, setTgFiles] = useState<
+    Array<{ id: string; title: string; file_name: string | null; size_bytes: number; created_at: number; user_email: string | null }>
+  >([]);
+  const [tgFileCount, setTgFileCount] = useState(0);
+  const [tgTotalBytes, setTgTotalBytes] = useState(0);
+
+  // Admin-only database backup stats
+  const [dbStats, setDbStats] = useState<{
+    sizeBytes: number;
+    users: number;
+    history: number;
+    telegramFiles: number;
+  } | null>(null);
+  const [dbBackups, setDbBackups] = useState<
+    Array<{ fileName: string; sizeBytes: number; createdAt: number }>
+  >([]);
+  const [dbBackupBusy, setDbBackupBusy] = useState(false);
+  const [dbBackupMessage, setDbBackupMessage] = useState<string | null>(null);
 
   const isAdmin = user?.role === 'admin';
 
@@ -677,21 +728,323 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const applyTelegramStatus = (data: Partial<TelegramStatus>) => {
+    setTgStatus(data as TelegramStatus);
+    if (typeof data.enabled === 'boolean') setTgEnabled(data.enabled);
+    if (typeof data.uploadEnabled === 'boolean') setTgUploadEnabled(data.uploadEnabled);
+    if (data.mode === 'user' || data.mode === 'bot') setTgMode(data.mode);
+    if (typeof data.channel === 'string') setTgChannel(data.channel);
+    if (typeof data.apiId === 'number') setTgApiId(String(data.apiId));
+  };
+
+  const fetchTelegramStatus = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${apiBase}/api/admin/telegram`, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        applyTelegramStatus((await res.json()) as TelegramStatus);
+      }
+    } catch {}
+  };
+
+  const fetchTelegramFiles = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${apiBase}/api/admin/telegram/files?limit=20`, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          items?: typeof tgFiles;
+          count?: number;
+          totalBytes?: number;
+        };
+        setTgFiles(Array.isArray(data.items) ? data.items : []);
+        setTgFileCount(typeof data.count === 'number' ? data.count : 0);
+        setTgTotalBytes(typeof data.totalBytes === 'number' ? data.totalBytes : 0);
+      }
+    } catch {}
+  };
+
+  const fetchDbStats = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${apiBase}/api/admin/db/stats`, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          sizeBytes?: number;
+          users?: number;
+          history?: number;
+          telegramFiles?: number;
+        };
+        setDbStats({
+          sizeBytes: data.sizeBytes || 0,
+          users: data.users || 0,
+          history: data.history || 0,
+          telegramFiles: data.telegramFiles || 0,
+        });
+      }
+    } catch {}
+  };
+
+  const fetchDbBackups = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${apiBase}/api/admin/db/backups`, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          items?: Array<{ fileName: string; sizeBytes: number; createdAt: number }>;
+        };
+        setDbBackups(Array.isArray(data.items) ? data.items : []);
+      }
+    } catch {}
+  };
+
+  const createDbBackupOnServer = async () => {
+    if (!isAdmin || dbBackupBusy) return;
+    setDbBackupBusy(true);
+    setDbBackupMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/db/backup`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+      });
+      const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+      if (res.ok && data.success) {
+        setDbBackupMessage(t.dbBackupCreatedMsg);
+        void fetchDbBackups();
+        void fetchDbStats();
+      } else {
+        setDbBackupMessage(data.error || 'Backup failed');
+      }
+    } catch {
+      setDbBackupMessage('Backup failed');
+    } finally {
+      setDbBackupBusy(false);
+    }
+  };
+
+  const saveTelegramSettings = async (overrides: Record<string, unknown> = {}) => {
+    if (!isAdmin) return;
+    setTgLoading(true);
+    setTgMessage(null);
+    try {
+      const body: Record<string, unknown> = {
+        enabled: tgEnabled,
+        uploadEnabled: tgUploadEnabled,
+        mode: tgMode,
+        channel: tgChannel,
+        apiId: tgApiId ? Number(tgApiId) : null,
+        ...overrides,
+      };
+      // Only send secrets when the admin actually typed something new.
+      if (tgApiHash.trim()) body.apiHash = tgApiHash.trim();
+      if (tgBotToken.trim()) body.botToken = tgBotToken.trim();
+
+      const res = await fetch(`${apiBase}/api/admin/telegram`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as Partial<TelegramStatus> & { error?: string };
+      if (res.ok) {
+        applyTelegramStatus(data);
+        setTgApiHash('');
+        setTgBotToken('');
+        setTgMessage({ type: 'success', text: t.telegramSavedMsg });
+        void fetchDbStats();
+      } else {
+        setTgMessage({ type: 'error', text: data.error || t.telegramTestFailed });
+      }
+    } catch {
+      setTgMessage({ type: 'error', text: t.telegramTestFailed });
+    } finally {
+      setTgLoading(false);
+    }
+  };
+
+  const testTelegramChannel = async () => {
+    if (!isAdmin) return;
+    setTgLoading(true);
+    setTgMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/telegram/test`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as { success?: boolean; channel?: string; account?: string; error?: string };
+      if (data.success) {
+        const parts = [t.telegramTestSuccess];
+        if (data.channel) parts.push(data.channel);
+        if (data.account) parts.push(data.account);
+        setTgMessage({ type: 'success', text: parts.join(' · ') });
+      } else {
+        setTgMessage({ type: 'error', text: `${t.telegramTestFailed}: ${data.error || ''}` });
+      }
+    } catch {
+      setTgMessage({ type: 'error', text: t.telegramTestFailed });
+    } finally {
+      setTgLoading(false);
+    }
+  };
+
+  const sendTelegramCode = async () => {
+    if (!isAdmin) return;
+    if (!tgPhone.trim()) {
+      setTgMessage({ type: 'error', text: t.telegramPhoneLabel });
+      return;
+    }
+    setTgLoading(true);
+    setTgMessage(null);
+    try {
+      // Persist the API credentials first so the sign-in step can reuse them.
+      const body: Record<string, unknown> = { apiId: tgApiId ? Number(tgApiId) : null };
+      if (tgApiHash.trim()) body.apiHash = tgApiHash.trim();
+      await fetch(`${apiBase}/api/admin/telegram`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify(body),
+      });
+
+      const res = await fetch(`${apiBase}/api/admin/telegram/send-code`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({
+          phoneNumber: tgPhone.trim(),
+          apiId: tgApiId ? Number(tgApiId) : undefined,
+          apiHash: tgApiHash.trim() || undefined,
+        }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (data.success) {
+        setTgMessage({ type: 'success', text: t.telegramCodeSent });
+      } else {
+        setTgMessage({ type: 'error', text: data.error || t.telegramTestFailed });
+      }
+    } catch {
+      setTgMessage({ type: 'error', text: t.telegramTestFailed });
+    } finally {
+      setTgLoading(false);
+    }
+  };
+
+  const signInTelegram = async () => {
+    if (!isAdmin) return;
+    if (!tgCode.trim()) {
+      setTgMessage({ type: 'error', text: t.telegramCodeLabel });
+      return;
+    }
+    setTgLoading(true);
+    setTgMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/telegram/sign-in`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({ code: tgCode.trim(), password: tgPassword }),
+      });
+      const data = (await res.json()) as Partial<TelegramStatus> & {
+        success?: boolean;
+        needsPassword?: boolean;
+        error?: string;
+      };
+      if (data.needsPassword) {
+        setTgNeedsPassword(true);
+        setTgMessage({ type: 'error', text: t.telegramNeedPassword });
+      } else if (data.success) {
+        applyTelegramStatus(data);
+        setTgNeedsPassword(false);
+        setTgCode('');
+        setTgPassword('');
+        setTgApiHash('');
+        setTgMessage({ type: 'success', text: t.telegramSignedInMsg });
+      } else {
+        setTgMessage({ type: 'error', text: data.error || t.telegramTestFailed });
+      }
+    } catch {
+      setTgMessage({ type: 'error', text: t.telegramTestFailed });
+    } finally {
+      setTgLoading(false);
+    }
+  };
+
+  const disconnectTelegram = async () => {
+    if (!isAdmin) return;
+    setTgLoading(true);
+    setTgMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/telegram/logout`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as Partial<TelegramStatus>;
+      applyTelegramStatus(data);
+      setTgNeedsPassword(false);
+      setTgMessage({ type: 'success', text: t.telegramSavedMsg });
+    } catch {
+      setTgMessage({ type: 'error', text: t.telegramTestFailed });
+    } finally {
+      setTgLoading(false);
+    }
+  };
+
+  const formatBytes = (bytes: number): string => {
+    if (!bytes || bytes < 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit += 1;
+    }
+    return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+  };
+
   // Load admin-only configurations strictly when authenticated user is admin
   useEffect(() => {
     if (isAdmin) {
       void fetchYouTubeAuth();
       void fetchXrayStatus();
       void fetchPotProviderStatus();
+      void fetchTelegramStatus();
+      void fetchTelegramFiles();
+      void fetchDbStats();
+      void fetchDbBackups();
     } else {
       setAdminPage('main');
     }
   }, [isAdmin, authToken]);
 
+  // Refresh the Telegram inventory whenever the Telegram page is opened
+  useEffect(() => {
+    if (isAdmin && adminPage === 'telegram') {
+      void fetchTelegramStatus();
+      void fetchTelegramFiles();
+      void fetchDbStats();
+      void fetchDbBackups();
+    }
+  }, [isAdmin, adminPage]);
+
   const ChevronIcon = t.dir === 'rtl' ? ChevronLeft : ChevronRight;
   const BackArrowIcon = t.dir === 'rtl' ? ArrowRight : ArrowLeft;
 
-  const openAdminPage = (page: 'main' | 'xray' | 'pot') => {
+  const openAdminPage = (page: 'main' | 'xray' | 'pot' | 'telegram') => {
     setAdminPage(page);
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1252,6 +1605,465 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     );
   }
 
+  if (isAdmin && adminPage === 'telegram') {
+    const connected = Boolean(tgStatus?.signedIn);
+    const statusLabel = connected ? t.telegramConnected : t.telegramNotConnected;
+
+    return (
+      <div className="max-w-3xl mx-auto pb-28 space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+          <button
+            type="button"
+            onClick={() => openAdminPage('main')}
+            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+          >
+            <BackArrowIcon className="w-4 h-4 shrink-0" />
+            <span>{t.backToSettings}</span>
+          </button>
+        </div>
+
+        <div className="px-1">
+          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">{t.sectionAdmin}</p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-black dark:text-white flex items-center gap-2.5">
+            <Send className="w-6 h-6 shrink-0" />
+            <span>{t.sectionTelegram}</span>
+          </h1>
+        </div>
+
+        <section aria-label={t.sectionTelegram}>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <div className="px-4 py-4 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-black dark:text-white">{t.telegramEnableLabel}</div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{t.telegramEnableDesc}</p>
+                <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
+                  {statusLabel}
+                  {connected && tgStatus?.account ? ` · ${tgStatus.account}` : ''}
+                  {tgChannel ? ` · ${tgChannel}` : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={tgEnabled}
+                aria-label={t.telegramEnableLabel}
+                disabled={tgLoading}
+                onClick={() => {
+                  const next = !tgEnabled;
+                  setTgEnabled(next);
+                  void saveTelegramSettings({ enabled: next });
+                }}
+                className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
+                  tgEnabled
+                    ? 'bg-black text-white dark:bg-white dark:text-black'
+                    : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                }`}
+              >
+                <span className="text-xs font-bold">{tgEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-black dark:text-white">{t.telegramUploadLabel}</div>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{t.telegramUploadDesc}</p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={tgUploadEnabled}
+                  aria-label={t.telegramUploadLabel}
+                  disabled={tgLoading}
+                  onClick={() => {
+                    const next = !tgUploadEnabled;
+                    setTgUploadEnabled(next);
+                    void saveTelegramSettings({ uploadEnabled: next });
+                  }}
+                  className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
+                    tgUploadEnabled
+                      ? 'bg-black text-white dark:bg-white dark:text-black'
+                      : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                  }`}
+                >
+                  <span className="text-xs font-bold">{tgUploadEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                  {t.telegramModeLabel}
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTgMode('user')}
+                    className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                      tgMode === 'user'
+                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                        : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
+                    }`}
+                  >
+                    {t.telegramModeUser}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTgMode('bot')}
+                    className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                      tgMode === 'bot'
+                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                        : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
+                    }`}
+                  >
+                    {t.telegramModeBot}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.telegramApiIdLabel}
+                  </label>
+                  <input
+                    dir="ltr"
+                    type="number"
+                    value={tgApiId}
+                    onChange={(e) => setTgApiId(e.target.value)}
+                    placeholder="12345678"
+                    className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 tabular-nums focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.telegramApiHashLabel}
+                  </label>
+                  <input
+                    dir="ltr"
+                    type="password"
+                    value={tgApiHash}
+                    onChange={(e) => setTgApiHash(e.target.value)}
+                    placeholder={tgStatus?.hasApiHash ? tgStatus.apiHashMasked : '0123456789abcdef0123456789abcdef'}
+                    autoComplete="new-password"
+                    className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
+                </div>
+              </div>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{t.telegramApiIdDesc}</p>
+
+              {tgMode === 'bot' && (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.telegramBotTokenLabel}
+                  </label>
+                  <input
+                    dir="ltr"
+                    type="password"
+                    value={tgBotToken}
+                    onChange={(e) => setTgBotToken(e.target.value)}
+                    placeholder={tgStatus?.hasBotToken ? '••••••••••••' : '123456789:AA...'}
+                    autoComplete="new-password"
+                    className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                  {t.telegramChannelLabel}
+                </label>
+                <input
+                  dir="ltr"
+                  type="text"
+                  value={tgChannel}
+                  onChange={(e) => setTgChannel(e.target.value)}
+                  placeholder={t.telegramChannelPlaceholder}
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                />
+              </div>
+
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{t.telegramSecretsHint}</p>
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => saveTelegramSettings()}
+                  disabled={tgLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {tgLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>{t.telegramSaveBtn}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={testTelegramChannel}
+                  disabled={tgLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                >
+                  {t.telegramTestBtn}
+                </button>
+              </div>
+
+              {tgMessage && (
+                <div
+                  className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
+                    tgMessage.type === 'success'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
+                      : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
+                  }`}
+                >
+                  {tgMessage.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  )}
+                  <span className="break-words min-w-0 font-mono">{tgMessage.text}</span>
+                </div>
+              )}
+            </div>
+
+            {tgMode === 'user' && (
+              <>
+                <div className="h-px bg-black/10 dark:bg-white/10" />
+                <div className="p-4 sm:p-5 space-y-4">
+                  <div className="flex items-start gap-3">
+                    <Smartphone className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <h2 className="text-sm font-semibold text-black dark:text-white">{t.telegramAccountLabel}</h2>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                        {statusLabel}
+                        {tgStatus?.account ? ` · ${tgStatus.account}` : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  {!connected && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                          {t.telegramPhoneLabel}
+                        </label>
+                        <input
+                          dir="ltr"
+                          type="tel"
+                          value={tgPhone}
+                          onChange={(e) => setTgPhone(e.target.value)}
+                          placeholder={t.telegramPhonePlaceholder}
+                          autoComplete="tel"
+                          className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                        />
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={sendTelegramCode}
+                        disabled={tgLoading}
+                        className="w-full min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold disabled:opacity-50"
+                      >
+                        {t.telegramSendCodeBtn}
+                      </button>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                            {t.telegramCodeLabel}
+                          </label>
+                          <input
+                            dir="ltr"
+                            type="text"
+                            inputMode="numeric"
+                            value={tgCode}
+                            onChange={(e) => setTgCode(e.target.value)}
+                            placeholder={t.telegramCodePlaceholder}
+                            autoComplete="one-time-code"
+                            className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 tabular-nums focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                            {t.telegramPasswordLabel}
+                          </label>
+                          <input
+                            dir="ltr"
+                            type="password"
+                            value={tgPassword}
+                            onChange={(e) => setTgPassword(e.target.value)}
+                            placeholder={t.telegramPasswordPlaceholder}
+                            autoComplete="current-password"
+                            className={`w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20 ${
+                              tgNeedsPassword
+                                ? 'border-red-400 dark:border-red-700'
+                                : 'border-black/10 dark:border-white/15'
+                            }`}
+                          />
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={signInTelegram}
+                        disabled={tgLoading}
+                        className="w-full min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {tgLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                        <span>{t.telegramSignInBtn}</span>
+                      </button>
+                    </>
+                  )}
+
+                  {connected && (
+                    <button
+                      type="button"
+                      onClick={disconnectTelegram}
+                      disabled={tgLoading}
+                      className="w-full min-h-[44px] px-4 rounded-xl border border-red-300 dark:border-red-800 text-red-600 dark:text-red-400 text-sm font-semibold disabled:opacity-50"
+                    >
+                      {t.telegramLogoutBtn}
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+
+        {/* Stored files inventory */}
+        <section aria-label={t.telegramStorageTitle}>
+          <h2 className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+            {t.telegramStorageTitle}
+          </h2>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <div className="p-4 sm:p-5 space-y-3">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.telegramStorageDesc}</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-300">
+                <span>
+                  {tgFileCount} {t.telegramFilesCount}
+                </span>
+                <span>{formatBytes(tgTotalBytes)}</span>
+              </div>
+
+              {tgFiles.length === 0 ? (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.telegramNoFiles}</p>
+              ) : (
+                <ul className="divide-y divide-black/10 dark:divide-white/10 -mx-1">
+                  {tgFiles.map((file) => (
+                    <li key={file.id} className="px-1 py-2.5 flex items-center justify-between gap-3">
+                      <span className="min-w-0">
+                        <span className="block text-xs font-medium text-black dark:text-white truncate" dir="auto">
+                          {file.title || file.file_name || file.id}
+                        </span>
+                        <span className="block text-[11px] text-zinc-500 dark:text-zinc-400 truncate font-mono">
+                          {formatBytes(file.size_bytes)}
+                          {file.user_email ? ` · ${file.user_email}` : ''}
+                        </span>
+                      </span>
+                      <a
+                        href={`${apiBase}/api/download/${encodeURIComponent(file.id)}`}
+                        className="shrink-0 min-h-[36px] px-3 rounded-lg border border-black/10 dark:border-white/15 text-[11px] font-semibold inline-flex items-center text-black dark:text-white hover:bg-black/5 dark:hover:bg-white/10"
+                      >
+                        {t.telegramOpenFileBtn}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Database backup */}
+        <section aria-label={t.dbBackupSection}>
+          <h2 className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+            {t.dbBackupSection}
+          </h2>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <div className="px-4 py-4 flex items-start gap-3 border-b border-black/10 dark:border-white/10">
+              <Database className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-black dark:text-white">{t.dbBackupSection}</h3>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{t.dbBackupDesc}</p>
+              </div>
+            </div>
+            <div className="p-4 sm:p-5 space-y-4">
+              {dbStats && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: t.dbBackupUsers, value: dbStats.users },
+                    { label: t.dbBackupHistory, value: dbStats.history },
+                    { label: t.dbBackupTelegram, value: dbStats.telegramFiles },
+                    { label: t.dbBackupSize, value: formatBytes(dbStats.sizeBytes) },
+                  ].map((stat) => (
+                    <div
+                      key={stat.label}
+                      className="rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 px-3 py-2.5"
+                    >
+                      <div className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">{stat.label}</div>
+                      <div className="text-sm font-semibold text-black dark:text-white font-mono tabular-nums mt-0.5">
+                        {stat.value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <a
+                  href={`${apiBase}/api/admin/db/backup`}
+                  download
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold inline-flex items-center justify-center gap-2"
+                >
+                  <Download className="w-4 h-4 shrink-0" />
+                  <span>{t.dbBackupBtn}</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => void createDbBackupOnServer()}
+                  disabled={dbBackupBusy}
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-white dark:bg-black border border-black/15 dark:border-white/20 text-black dark:text-white text-sm font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <Database className="w-4 h-4 shrink-0" />
+                  <span>{dbBackupBusy ? '...' : t.dbBackupCreateBtn}</span>
+                </button>
+              </div>
+
+              {dbBackupMessage && (
+                <p className="text-xs text-zinc-600 dark:text-zinc-300">{dbBackupMessage}</p>
+              )}
+
+              <div>
+                <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400 mb-1.5">
+                  {t.dbBackupServerTitle}
+                </div>
+                {dbBackups.length === 0 ? (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.dbBackupEmpty}</p>
+                ) : (
+                  <ul className="space-y-1">
+                    {dbBackups.slice(0, 8).map((item) => (
+                      <li key={item.fileName}>
+                        <a
+                          href={`${apiBase}/api/admin/db/backups/${encodeURIComponent(item.fileName)}`}
+                          className="flex items-center gap-2 rounded-lg px-3 py-2 bg-white dark:bg-black border border-black/10 dark:border-white/15 text-xs"
+                        >
+                          <Download className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+                          <span className="font-mono truncate flex-1 text-black dark:text-white">
+                            {item.fileName}
+                          </span>
+                          <span className="text-zinc-500 dark:text-zinc-400 tabular-nums shrink-0">
+                            {formatBytes(item.sizeBytes)}
+                          </span>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-3xl mx-auto pb-28 space-y-6">
       <div className="px-1">
@@ -1524,6 +2336,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     {potRunning
                       ? `${t.potStatusRunning} · ${potPluginInstalled ? t.potPluginReady : t.potPluginMissing}`
                       : t.potNavDesc}
+                  </span>
+                </span>
+              </span>
+              <ChevronIcon className="w-4 h-4 text-zinc-400 shrink-0" />
+            </button>
+
+            <div className="h-px bg-black/10 dark:bg-white/10 ms-16" />
+
+            <button
+              type="button"
+              onClick={() => openAdminPage('telegram')}
+              className="w-full min-h-[64px] px-4 py-3 flex items-center justify-between gap-3 text-start hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            >
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
+                  <Send className="w-4 h-4 text-black dark:text-white" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-black dark:text-white truncate">
+                    {t.sectionAdmin} · {t.sectionTelegram}
+                  </span>
+                  <span className="block text-xs text-zinc-500 dark:text-zinc-400 truncate mt-0.5">
+                    {tgStatus?.signedIn && tgEnabled
+                      ? `${t.telegramConnected} · ${tgFileCount} ${t.telegramFilesCount}`
+                      : t.telegramNavDesc}
                   </span>
                 </span>
               </span>

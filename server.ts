@@ -9,7 +9,7 @@ import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup as sqliteBackup } from 'node:sqlite';
 import { pipeline } from 'node:stream/promises';
 import tls from 'node:tls';
 import { promisify } from 'node:util';
@@ -17,6 +17,15 @@ import { Ytdl, chooseFormat, Quality } from '@distube/ytdl-core';
 import type { VideoFormat } from '@distube/ytdl-core';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import {
+  TelegramClient,
+  Api,
+  sessions,
+  utils as tgUtils,
+  client as tgClientLib,
+  password as tgPassword,
+} from 'telegram';
+import bigInt from 'big-integer';
 
 const ytdl = new Ytdl();
 const execFileAsync = promisify(execFile);
@@ -54,6 +63,7 @@ const USERS_FILE = path.resolve(DATA_DIR, 'users.json');
 const ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
 const YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
 const XRAY_CONFIG_FILE = path.resolve(DATA_DIR, 'xray-runtime.json');
+const BACKUP_DIR = path.resolve(DATA_DIR, 'backups');
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -67,6 +77,9 @@ function ensureDataDir(): void {
   }
   if (!fs.existsSync(YT_DLP_PLUGINS_DIR)) {
     fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(BACKUP_DIR)) {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
   }
 }
 
@@ -86,6 +99,14 @@ interface DownloadJob {
   contentDisposition: string;
   error?: string;
   createdAt: number;
+  fileName?: string;
+  telegramFileId?: string;
+  telegramMessageId?: number;
+  telegramChatId?: string;
+  telegramUploading?: boolean;
+  telegramUploadError?: string;
+  ownerUserId?: string | null;
+  author?: string;
 }
 
 interface MediaAudioTrack {
@@ -193,6 +214,28 @@ db.exec(`
     UNIQUE(user_id, url)
   );
   CREATE INDEX IF NOT EXISTS idx_history_user_created ON download_history(user_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS telegram_files (
+    id TEXT PRIMARY KEY,
+    user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+    job_id TEXT,
+    source_url TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    quality TEXT,
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    access_hash TEXT,
+    file_ref TEXT,
+    file_name TEXT,
+    mime_type TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    caption TEXT,
+    created_at INTEGER NOT NULL,
+    deleted_at INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_tg_files_user_created ON telegram_files(user_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_tg_files_job ON telegram_files(job_id);
 `);
 
 function normalizeQualityValue(raw: unknown): string {
@@ -506,11 +549,23 @@ interface AdminPotProviderConfig {
   port: number;
 }
 
+interface AdminTelegramConfig {
+  enabled: boolean;
+  uploadEnabled: boolean;
+  apiId: number | null;
+  apiHash: string;
+  botToken: string;
+  session: string;
+  mode: 'user' | 'bot';
+  channel: string;
+}
+
 interface AdminConfig {
   youtubeCookies: string;
   youtubePoToken: string;
   xray: AdminXrayConfig;
   potProvider: AdminPotProviderConfig;
+  telegram: AdminTelegramConfig;
 }
 
 const DEFAULT_XRAY_TEST_YOUTUBE_URL = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
@@ -533,6 +588,16 @@ function defaultAdminConfig(): AdminConfig {
       mode: 'managed',
       baseUrl: 'http://127.0.0.1:4416',
       port: 4416,
+    },
+    telegram: {
+      enabled: false,
+      uploadEnabled: false,
+      apiId: null,
+      apiHash: '',
+      botToken: '',
+      session: '',
+      mode: 'user',
+      channel: '',
     },
   };
 }
@@ -610,6 +675,19 @@ function loadAdminConfig(): AdminConfig {
               ? parsed.potProvider.port
               : 4416,
         },
+        telegram: {
+          enabled: Boolean(parsed.telegram?.enabled),
+          uploadEnabled: Boolean(parsed.telegram?.uploadEnabled),
+          apiId:
+            typeof parsed.telegram?.apiId === 'number' && Number.isFinite(parsed.telegram.apiId)
+              ? parsed.telegram.apiId
+              : null,
+          apiHash: typeof parsed.telegram?.apiHash === 'string' ? parsed.telegram.apiHash.trim() : '',
+          botToken: typeof parsed.telegram?.botToken === 'string' ? parsed.telegram.botToken.trim() : '',
+          session: typeof parsed.telegram?.session === 'string' ? parsed.telegram.session.trim() : '',
+          mode: parsed.telegram?.mode === 'bot' ? 'bot' : 'user',
+          channel: typeof parsed.telegram?.channel === 'string' ? parsed.telegram.channel.trim() : '',
+        },
       };
     }
   } catch {
@@ -629,6 +707,519 @@ function saveAdminConfig(cfg: AdminConfig): void {
 }
 
 const adminConfig: AdminConfig = loadAdminConfig();
+
+/* ------------------------------------------------------------------ *
+ * Telegram storage backend
+ *
+ * Files are uploaded to a Telegram channel and served back to users
+ * through a server-side, Range-aware proxy route. Nothing is kept on
+ * the app's own disk beyond the short-lived cache file that already
+ * exists for every download job.
+ * ------------------------------------------------------------------ */
+
+interface PendingTelegramLogin {
+  apiId: number;
+  apiHash: string;
+  phoneNumber: string;
+  phoneCodeHash: string;
+  isCodeViaApp: boolean;
+  client: TelegramClient;
+  createdAt: number;
+}
+
+const telegramState: {
+  client: TelegramClient | null;
+  clientKey: string;
+  connecting: Promise<TelegramClient> | null;
+  lastError: string | null;
+  selfLabel: string | null;
+} = {
+  client: null,
+  clientKey: '',
+  connecting: null,
+  lastError: null,
+  selfLabel: null,
+};
+
+let pendingTelegramLogin: PendingTelegramLogin | null = null;
+
+function telegramCredentials(cfg: AdminTelegramConfig): { apiId: number; apiHash: string } | null {
+  if (typeof cfg.apiId !== 'number' || !Number.isFinite(cfg.apiId) || !cfg.apiHash) return null;
+  return { apiId: cfg.apiId, apiHash: cfg.apiHash };
+}
+
+function telegramIsConfigured(cfg: AdminTelegramConfig): boolean {
+  if (!telegramCredentials(cfg)) return false;
+  if (cfg.mode === 'bot') return Boolean(cfg.botToken);
+  return Boolean(cfg.session);
+}
+
+function telegramEnabledForUploads(cfg: AdminTelegramConfig): boolean {
+  return Boolean(cfg.enabled && cfg.uploadEnabled && cfg.channel && telegramIsConfigured(cfg));
+}
+
+async function disposeTelegramClient(): Promise<void> {
+  const existing = telegramState.client;
+  telegramState.client = null;
+  telegramState.clientKey = '';
+  telegramState.selfLabel = null;
+  if (!existing) return;
+  try {
+    await existing.disconnect();
+  } catch {
+    // A dead socket is fine to ignore here.
+  }
+  try {
+    await existing.destroy();
+  } catch {
+    // destroy() is optional for the GramJS client.
+  }
+}
+
+/**
+ * Returns a connected GramJS client for the configured Telegram account.
+ * The client is cached and rebuilt whenever the credentials change.
+ */
+async function getTelegramClient(): Promise<TelegramClient> {
+  const cfg = adminConfig.telegram;
+  const creds = telegramCredentials(cfg);
+  if (!creds) {
+    throw new Error('Telegram API ID and API hash are required.');
+  }
+
+  const sessionValue = cfg.mode === 'bot' ? '' : cfg.session;
+  if (cfg.mode === 'user' && !sessionValue) {
+    throw new Error('Telegram account is not signed in yet.');
+  }
+  if (cfg.mode === 'bot' && !cfg.botToken) {
+    throw new Error('Telegram bot token is required.');
+  }
+
+  const key = `${creds.apiId}:${creds.apiHash}:${cfg.mode}:${cfg.mode === 'bot' ? cfg.botToken : sessionValue}`;
+  if (telegramState.client && telegramState.clientKey === key) {
+    return telegramState.client;
+  }
+  if (telegramState.connecting && telegramState.clientKey === key) {
+    return telegramState.connecting;
+  }
+
+  const build = (async () => {
+    await disposeTelegramClient();
+    const session = new sessions.StringSession(sessionValue || '');
+    const client = new TelegramClient(session, creds.apiId, creds.apiHash, {
+      connectionRetries: 5,
+      useWSS: false,
+      autoReconnect: true,
+      deviceModel: 'Grove Save',
+      systemVersion: 'Server',
+      appVersion: '1.0.0',
+    });
+    await client.connect();
+
+    if (cfg.mode === 'bot') {
+      if (!(await client.checkAuthorization())) {
+        await client.start({ botAuthToken: cfg.botToken });
+      }
+    } else if (!(await client.checkAuthorization())) {
+      await client.disconnect();
+      throw new Error('Telegram session is no longer valid. Sign in again from the admin panel.');
+    }
+
+    try {
+      const me = (await client.getMe()) as { firstName?: string; username?: string; id?: unknown };
+      telegramState.selfLabel = me.username ? `@${me.username}` : me.firstName || null;
+    } catch {
+      telegramState.selfLabel = null;
+    }
+
+    telegramState.client = client;
+    telegramState.clientKey = key;
+    telegramState.lastError = null;
+    return client;
+  })();
+
+  telegramState.connecting = build;
+  try {
+    return await build;
+  } catch (err) {
+    telegramState.lastError = err instanceof Error ? err.message : String(err);
+    telegramState.connecting = null;
+    throw err;
+  } finally {
+    if (telegramState.connecting === build) {
+      telegramState.connecting = null;
+    }
+  }
+}
+
+async function telegramClientIfReady(): Promise<TelegramClient | null> {
+  if (!telegramIsConfigured(adminConfig.telegram)) return null;
+  try {
+    return await getTelegramClient();
+  } catch (err) {
+    telegramState.lastError = err instanceof Error ? err.message : String(err);
+    return null;
+  }
+}
+
+function telegramStatusView() {
+  const cfg = adminConfig.telegram;
+  return {
+    enabled: cfg.enabled,
+    uploadEnabled: cfg.uploadEnabled,
+    mode: cfg.mode,
+    channel: cfg.channel,
+    apiId: cfg.apiId,
+    hasApiHash: Boolean(cfg.apiHash),
+    apiHashMasked: cfg.apiHash ? `${cfg.apiHash.slice(0, 4)}…${cfg.apiHash.slice(-4)}` : '',
+    hasBotToken: Boolean(cfg.botToken),
+    hasSession: Boolean(cfg.session),
+    signedIn: telegramState.client !== null && telegramState.clientKey.startsWith(`${cfg.apiId || 0}:`),
+    account: telegramState.selfLabel,
+    lastError: telegramState.lastError,
+    pendingLogin: Boolean(pendingTelegramLogin),
+  };
+}
+
+function telegramFileIdForJob(jobId: string): string | null {
+  const row = db
+    .prepare('SELECT id FROM telegram_files WHERE job_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1')
+    .get(jobId) as { id?: string } | undefined;
+  return row?.id ?? null;
+}
+
+interface TelegramFileRow {
+  id: string;
+  user_id: string | null;
+  job_id: string | null;
+  source_url: string | null;
+  title: string;
+  author: string;
+  quality: string | null;
+  chat_id: string;
+  message_id: number;
+  file_name: string | null;
+  mime_type: string | null;
+  size_bytes: number;
+  created_at: number;
+}
+
+function recordTelegramFile(row: {
+  userId: string | null;
+  jobId: string;
+  sourceUrl: string;
+  title: string;
+  author: string;
+  quality: string;
+  chatId: string;
+  messageId: number;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}): string {
+  const id = crypto.randomUUID();
+  db.prepare(
+    `INSERT INTO telegram_files
+       (id, user_id, job_id, source_url, title, author, quality, chat_id, message_id, file_name, mime_type, size_bytes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id,
+    row.userId,
+    row.jobId,
+    row.sourceUrl,
+    row.title,
+    row.author,
+    row.quality,
+    row.chatId,
+    row.messageId,
+    row.fileName,
+    row.mimeType,
+    row.sizeBytes,
+    Date.now()
+  );
+  return id;
+}
+
+function lookupTelegramFile(id: string): TelegramFileRow | null {
+  const row = db
+    .prepare('SELECT * FROM telegram_files WHERE id = ? AND deleted_at IS NULL')
+    .get(id) as TelegramFileRow | undefined;
+  return row ?? null;
+}
+
+/**
+ * Uploads a finished job's cache file to the configured Telegram channel and
+ * records the mapping in the database. On success the local cache file is
+ * deleted, because Telegram is the only storage for published downloads.
+ */
+async function uploadJobToTelegram(job: DownloadJob, ownerUserId: string | null, author: string): Promise<void> {
+  const cfg = adminConfig.telegram;
+  if (!telegramEnabledForUploads(cfg)) return;
+
+  let client: TelegramClient;
+  try {
+    client = await getTelegramClient();
+  } catch (err) {
+    job.telegramUploadError = err instanceof Error ? err.message : 'Telegram is unavailable.';
+    console.error('[telegram] upload skipped:', job.telegramUploadError);
+    return;
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.stat(job.filePath);
+  } catch {
+    job.telegramUploadError = 'Cache file disappeared before upload.';
+    return;
+  }
+
+  const fileName = job.fileName || sanitizeFilename(`${job.title}-${job.quality}`) + `.${job.ext}`;
+  const caption = `${job.title}\n${job.quality.toUpperCase()} · grove save`;
+
+  job.telegramUploading = true;
+  try {
+    const uploaded = (await client.sendFile(cfg.channel, {
+      file: new tgClientLib.uploads.CustomFile(fileName, stat.size, job.filePath),
+      caption,
+      forceDocument: true,
+      workers: 4,
+      supportsStreaming: false,
+      progressCallback: (progress: number) => {
+        // Uploading happens after the local download is complete; keep the job at 100%
+        // so the UI never jumps backwards while bytes move to Telegram.
+        job.progress = 100;
+        void progress;
+      },
+    })) as { id: number };
+
+    // Resolve the canonical (marked) chat id so the stored row keeps working
+    // even if the admin later renames the channel username.
+    let chatId = cfg.channel;
+    try {
+      const inputPeer = await client.getInputEntity(cfg.channel);
+      chatId = tgUtils.getPeerId(inputPeer as never);
+    } catch {
+      chatId = cfg.channel;
+    }
+
+    const recordId = recordTelegramFile({
+      userId: ownerUserId,
+      jobId: job.id,
+      sourceUrl: job.url,
+      title: job.title,
+      author,
+      quality: job.quality,
+      chatId: chatId || cfg.channel,
+      messageId: uploaded.id,
+      fileName,
+      mimeType: job.mimeType,
+      sizeBytes: stat.size,
+    });
+
+    job.telegramFileId = recordId;
+    job.telegramMessageId = uploaded.id;
+    job.telegramChatId = chatId || cfg.channel;
+    job.telegramUploadError = undefined;
+
+    await fs.promises.rm(job.filePath, { force: true }).catch(() => {});
+  } catch (err) {
+    job.telegramUploadError = err instanceof Error ? err.message : 'Telegram upload failed.';
+    console.error('[telegram] upload failed:', job.telegramUploadError);
+  } finally {
+    job.telegramUploading = false;
+  }
+}
+
+interface ResolvedTelegramFile {
+  message: any;
+  dcId: number;
+  location: any;
+  size: number;
+}
+
+async function resolveTelegramFile(client: TelegramClient, row: TelegramFileRow): Promise<ResolvedTelegramFile> {
+  // File references expire, so the message is re-fetched on every request
+  // instead of persisting the reference bytes in the database.
+  const messages = await client.getMessages(row.chat_id, { ids: row.message_id });
+  const message = Array.isArray(messages) ? messages[0] : undefined;
+  if (!message) {
+    throw new Error('The stored Telegram message no longer exists in the channel.');
+  }
+  const info = tgUtils.getFileInfo(message as never);
+  const size = typeof info.size === 'number' ? info.size : Number(info.size) || row.size_bytes;
+  if (typeof info.dcId !== 'number') {
+    throw new Error('Could not determine the Telegram data center for this file.');
+  }
+  return { message, dcId: info.dcId, location: info.location, size };
+}
+
+/**
+ * Streams a byte range of a Telegram-stored file into an HTTP response.
+ * Supports `Range` so browsers and download managers can seek/resume.
+ */
+async function streamTelegramFile(row: TelegramFileRow, req: Request, res: Response): Promise<void> {
+  // Never let this reject: Express 4 does not catch async handler rejections,
+  // and a bad Telegram login would otherwise take the whole server down.
+  let client: TelegramClient;
+  let resolved: ResolvedTelegramFile;
+  try {
+    client = await getTelegramClient();
+    resolved = await resolveTelegramFile(client, row);
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(503).json({
+        error: err instanceof Error ? err.message : 'Telegram storage is unavailable.',
+      });
+    } else {
+      res.destroy();
+    }
+    return;
+  }
+
+  const total = resolved.size || row.size_bytes || 0;
+  const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
+  let start = 0;
+  let end = Math.max(total - 1, 0);
+  let partial = false;
+
+  if (rangeHeader) {
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
+    if (match) {
+      const rawStart = match[1];
+      const rawEnd = match[2];
+      if (rawStart === '' && rawEnd !== '') {
+        const suffix = Number(rawEnd);
+        if (Number.isFinite(suffix) && suffix > 0) {
+          start = Math.max(total - suffix, 0);
+          end = total - 1;
+          partial = true;
+        }
+      } else if (rawStart !== '') {
+        const s = Number(rawStart);
+        if (Number.isFinite(s) && s >= 0) {
+          // A start at or past EOF is unsatisfiable, not a reason to send the tail.
+          if (total > 0 && s >= total) {
+            res.status(416).setHeader('Content-Range', `bytes */${total}`);
+            res.end();
+            return;
+          }
+          start = s;
+          if (rawEnd !== '') {
+            const e = Number(rawEnd);
+            if (Number.isFinite(e)) end = Math.min(e, total - 1);
+          }
+          partial = true;
+        }
+      }
+      if (partial && end < start) {
+        res.status(416).setHeader('Content-Range', `bytes */${total}`);
+        res.end();
+        return;
+      }
+    }
+  }
+
+  const length = Math.max(end - start + 1, 0);
+  const fileName = row.file_name || 'grove-save-media';
+  const disposition = (() => {
+    const ascii = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '_');
+    return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+  })();
+
+  res.status(partial ? 206 : 200);
+  res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Disposition', disposition);
+  res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+  if (total > 0) {
+    res.setHeader('Content-Length', String(length));
+    if (partial) {
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+    }
+  }
+
+  if (length === 0) {
+    res.end();
+    return;
+  }
+
+  let aborted = false;
+  const onClose = () => {
+    aborted = true;
+  };
+  res.on('close', onClose);
+
+  const CHUNK = 256 * 1024;
+
+  // Streams [cursor, end] with the current file reference. Throws when Telegram
+  // drops the reference; the caller refreshes it and resumes from `cursor`.
+  let cursor = start;
+  const pump = async (): Promise<void> => {
+    if (cursor > end) return;
+    const iterator = client.iterDownload({
+      file: resolved.location,
+      dcId: resolved.dcId,
+      offset: bigInt(cursor),
+      fileSize: bigInt(total),
+      requestSize: CHUNK,
+      limit: Math.ceil((end + 1 - cursor) / CHUNK),
+    });
+    for await (const chunk of iterator) {
+      if (aborted || cursor > end) return;
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as ArrayBuffer);
+      const room = end + 1 - cursor;
+      const slice = buf.length > room ? buf.subarray(0, room) : buf;
+      if (slice.length === 0) break;
+      cursor += slice.length;
+      if (!res.write(slice)) {
+        await new Promise<void>((done) => {
+          const release = () => {
+            res.off('drain', release);
+            res.off('close', release);
+            done();
+          };
+          res.once('drain', release);
+          res.once('close', release);
+        });
+      }
+    }
+  };
+
+  try {
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await pump();
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (aborted || cursor > end) break;
+        // File references expire mid-stream. Fetch a fresh one and continue from
+        // the exact byte already sent, so the client never receives duplicates.
+        try {
+          resolved = await resolveTelegramFile(client, row);
+        } catch {
+          break;
+        }
+      }
+    }
+    if (aborted) return;
+    if (cursor <= end) {
+      const message =
+        lastError instanceof Error ? lastError.message : 'Telegram download ended before the requested range.';
+      if (!res.headersSent) {
+        res.status(502).json({ error: message });
+      } else {
+        res.destroy(new Error(message));
+      }
+      return;
+    }
+    res.end();
+  } finally {
+    res.off('close', onClose);
+  }
+}
 
 function parseCookies(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -2765,6 +3356,479 @@ async function startServer() {
     }
   });
 
+  /* -------------------- Telegram storage (admin only) -------------------- */
+
+  app.get('/api/admin/telegram', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    res.json(telegramStatusView());
+  });
+
+  app.put('/api/admin/telegram', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = (req.body || {}) as Record<string, unknown>;
+    const next = adminConfig.telegram;
+    let credentialsChanged = false;
+
+    if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
+    if (typeof body.uploadEnabled === 'boolean') next.uploadEnabled = body.uploadEnabled;
+    if (body.mode === 'user' || body.mode === 'bot') {
+      if (next.mode !== body.mode) credentialsChanged = true;
+      next.mode = body.mode;
+    }
+    if (typeof body.channel === 'string') {
+      const channel = body.channel.trim();
+      next.channel = channel.replace(/^https?:\/\/t\.me\//i, '').replace(/^@?/, '@');
+      if (next.channel === '@') next.channel = '';
+    }
+    if (typeof body.apiId === 'number' || typeof body.apiId === 'string') {
+      const parsedId = Number(body.apiId);
+      if (Number.isInteger(parsedId) && parsedId > 0) {
+        if (next.apiId !== parsedId) credentialsChanged = true;
+        next.apiId = parsedId;
+      } else if (body.apiId === '' || body.apiId === null) {
+        next.apiId = null;
+        credentialsChanged = true;
+      }
+    }
+    if (typeof body.apiHash === 'string') {
+      const hash = body.apiHash.trim();
+      // An empty value from the UI means "keep the stored secret".
+      if (hash && hash !== next.apiHash) {
+        next.apiHash = hash;
+        credentialsChanged = true;
+      }
+    }
+    if (typeof body.botToken === 'string') {
+      const token = body.botToken.trim();
+      if (token && token !== next.botToken) {
+        next.botToken = token;
+        credentialsChanged = true;
+      }
+    }
+    if (body.clearSession === true) {
+      next.session = '';
+      credentialsChanged = true;
+    }
+
+    saveAdminConfig(adminConfig);
+    if (credentialsChanged) {
+      void disposeTelegramClient();
+    }
+    res.json({ success: true, ...telegramStatusView() });
+  });
+
+  app.post('/api/admin/telegram/test', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const cfg = adminConfig.telegram;
+    if (!cfg.channel) {
+      res.json({ success: false, error: 'Set a target channel first.' });
+      return;
+    }
+    if (!telegramIsConfigured(cfg)) {
+      res.json({ success: false, error: 'Telegram account is not connected yet.' });
+      return;
+    }
+    try {
+      const client = await getTelegramClient();
+      const entity = await client.getEntity(cfg.channel);
+      const title =
+        (entity as { title?: string; username?: string }).title ||
+        ((entity as { username?: string }).username ? `@${(entity as { username?: string }).username}` : cfg.channel);
+      res.json({ success: true, channel: title, account: telegramState.selfLabel });
+    } catch (err) {
+      res.json({ success: false, error: err instanceof Error ? err.message : 'Telegram test failed.' });
+    }
+  });
+
+  app.post('/api/admin/telegram/send-code', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = (req.body || {}) as { phoneNumber?: unknown; apiId?: unknown; apiHash?: unknown; forceSms?: unknown };
+    const phoneNumber = typeof body.phoneNumber === 'string' ? body.phoneNumber.trim() : '';
+    if (!phoneNumber) {
+      res.status(400).json({ error: 'Phone number is required.' });
+      return;
+    }
+
+    const credsIn = adminConfig.telegram;
+    const apiId =
+      typeof body.apiId === 'number' && Number.isFinite(body.apiId) ? body.apiId : credsIn.apiId;
+    const apiHash =
+      typeof body.apiHash === 'string' && body.apiHash.trim() ? body.apiHash.trim() : credsIn.apiHash;
+    if (!apiId || !apiHash) {
+      res.status(400).json({ error: 'API ID and API hash are required.' });
+      return;
+    }
+
+    try {
+      if (pendingTelegramLogin) {
+        await pendingTelegramLogin.client.disconnect().catch(() => {});
+        pendingTelegramLogin = null;
+      }
+      const tempClient = new TelegramClient(new sessions.StringSession(''), apiId, apiHash, {
+        connectionRetries: 3,
+        useWSS: false,
+        deviceModel: 'Grove Save',
+        systemVersion: 'Server',
+        appVersion: '1.0.0',
+      });
+      await tempClient.connect();
+      const sent = await tempClient.sendCode({ apiId, apiHash }, phoneNumber, Boolean(body.forceSms));
+
+      pendingTelegramLogin = {
+        apiId,
+        apiHash,
+        phoneNumber,
+        phoneCodeHash: sent.phoneCodeHash,
+        isCodeViaApp: Boolean(sent.isCodeViaApp),
+        client: tempClient,
+        createdAt: Date.now(),
+      };
+
+      res.json({ success: true, isCodeViaApp: Boolean(sent.isCodeViaApp) });
+    } catch (err) {
+      res.json({ success: false, error: err instanceof Error ? err.message : 'Could not send the login code.' });
+    }
+  });
+
+  app.post('/api/admin/telegram/sign-in', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = (req.body || {}) as { code?: unknown; password?: unknown };
+    const code = typeof body.code === 'string' ? body.code.trim() : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!code) {
+      res.status(400).json({ error: 'Login code is required.' });
+      return;
+    }
+    const pending = pendingTelegramLogin;
+    if (!pending) {
+      res.status(400).json({ error: 'Request a login code first.' });
+      return;
+    }
+
+    try {
+      let signedIn = false;
+      try {
+        await pending.client.invoke(
+          new Api.auth.SignIn({
+            phoneNumber: pending.phoneNumber,
+            phoneCodeHash: pending.phoneCodeHash,
+            phoneCode: code,
+          })
+        );
+        signedIn = true;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!/SESSION_PASSWORD_NEEDED/i.test(message)) throw err;
+
+        if (!password) {
+          res.status(409).json({
+            success: false,
+            needsPassword: true,
+            error: 'Two-step verification is enabled on this account. Enter the password.',
+          });
+          return;
+        }
+
+        const pwd = await pending.client.invoke(new Api.account.GetPassword());
+        const check = await tgPassword.computeCheck(pwd, password);
+        await pending.client.invoke(new Api.auth.CheckPassword({ password: check }));
+        signedIn = true;
+      }
+
+      if (!signedIn) {
+        res.json({ success: false, error: 'Telegram sign-in did not complete.' });
+        return;
+      }
+
+      const sessionString = (pending.client.session as InstanceType<typeof sessions.StringSession>).save();
+      adminConfig.telegram.apiId = pending.apiId;
+      adminConfig.telegram.apiHash = pending.apiHash;
+      adminConfig.telegram.session = sessionString;
+      adminConfig.telegram.mode = 'user';
+      adminConfig.telegram.enabled = true;
+      saveAdminConfig(adminConfig);
+
+      const oldClient = pending.client;
+      pendingTelegramLogin = null;
+      await oldClient.disconnect().catch(() => {});
+      await disposeTelegramClient();
+
+      res.json({ success: true, ...telegramStatusView() });
+    } catch (err) {
+      res.json({ success: false, error: err instanceof Error ? err.message : 'Telegram sign-in failed.' });
+    }
+  });
+
+  app.post('/api/admin/telegram/logout', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    if (pendingTelegramLogin) {
+      await pendingTelegramLogin.client.disconnect().catch(() => {});
+      pendingTelegramLogin = null;
+    }
+    const current = telegramState.client;
+    if (current) {
+      await current.invoke(new Api.auth.LogOut()).catch(() => {});
+    }
+    await disposeTelegramClient();
+    adminConfig.telegram.session = '';
+    adminConfig.telegram.botToken = '';
+    adminConfig.telegram.enabled = false;
+    adminConfig.telegram.uploadEnabled = false;
+    saveAdminConfig(adminConfig);
+    res.json({ success: true, ...telegramStatusView() });
+  });
+
+  // Lists channels/supergroups the connected account can post to.
+  app.get('/api/admin/telegram/chats', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    try {
+      const client = await getTelegramClient();
+      const dialogs = await client.getDialogs({ limit: 100 });
+      const chats = dialogs
+        .filter((d) => Boolean(d.isChannel || d.isGroup))
+        .map((d) => ({
+          id: String(d.id),
+          title: d.title || '',
+          username: (d.entity as { username?: string } | undefined)?.username || null,
+          isChannel: Boolean(d.isChannel),
+        }))
+        .slice(0, 100);
+      res.json({ success: true, chats });
+    } catch (err) {
+      res.json({ success: false, error: err instanceof Error ? err.message : 'Could not load chats.' });
+    }
+  });
+
+  // Stored files, newest first.
+  app.get('/api/admin/telegram/files', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const rows = db
+      .prepare(
+        `SELECT f.id, f.title, f.author, f.quality, f.file_name, f.mime_type, f.size_bytes, f.created_at,
+                f.user_id, u.email AS user_email
+           FROM telegram_files f
+           LEFT JOIN users u ON u.id = f.user_id
+          WHERE f.deleted_at IS NULL
+          ORDER BY f.created_at DESC
+          LIMIT ?`
+      )
+      .all(limit) as Array<Record<string, unknown>>;
+    const total = db
+      .prepare('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes), 0) AS bytes FROM telegram_files WHERE deleted_at IS NULL')
+      .get() as { n: number; bytes: number };
+    res.json({ items: rows, count: total.n, totalBytes: total.bytes });
+  });
+
+  /* -------------------- Database backup (admin only) -------------------- */
+
+  function backupStamp(): string {
+    return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  }
+
+  const BACKUP_FILE_RE = /^grove-backup-[0-9A-Za-z-]+\.db$/;
+
+  // Newest first.
+  function listDatabaseSnapshots(): Array<{
+    fileName: string;
+    sizeBytes: number;
+    createdAt: number;
+    filePath: string;
+  }> {
+    if (!fs.existsSync(BACKUP_DIR)) return [];
+    try {
+      return fs
+        .readdirSync(BACKUP_DIR)
+        .filter((name) => BACKUP_FILE_RE.test(name))
+        .map((name) => {
+          const filePath = path.resolve(BACKUP_DIR, name);
+          try {
+            const stat = fs.statSync(filePath);
+            return { fileName: name, sizeBytes: stat.size, createdAt: stat.mtimeMs, filePath };
+          } catch {
+            return null;
+          }
+        })
+        .filter(
+          (
+            item
+          ): item is { fileName: string; sizeBytes: number; createdAt: number; filePath: string } =>
+            item !== null
+        )
+        .sort((a, b) => b.createdAt - a.createdAt);
+    } catch {
+      return [];
+    }
+  }
+
+  // Writes a consistent point-in-time copy of the database into data/backups
+  // (SQLite's own backup API, so an open WAL can't corrupt the copy) and prunes
+  // older snapshots, keeping the newest ten.
+  async function writeDatabaseSnapshot(): Promise<{
+    fileName: string;
+    sizeBytes: number;
+    createdAt: number;
+  }> {
+    if (!fs.existsSync(BACKUP_DIR)) {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    }
+    const fileName = `grove-backup-${backupStamp()}.db`;
+    const target = path.resolve(BACKUP_DIR, fileName);
+    if (!target.startsWith(BACKUP_DIR + path.sep)) {
+      throw new Error('Invalid backup path.');
+    }
+    await sqliteBackup(db, target);
+    try {
+      fs.chmodSync(target, 0o600);
+    } catch {
+      // chmod is not available on every platform.
+    }
+
+    const entries = listDatabaseSnapshots();
+    for (const entry of entries.slice(10)) {
+      try {
+        fs.rmSync(entry.filePath, { force: true });
+      } catch {
+        // Pruning is best-effort.
+      }
+    }
+
+    const stat = fs.statSync(target);
+    return { fileName, sizeBytes: stat.size, createdAt: stat.mtimeMs };
+  }
+
+  app.get('/api/admin/db/backup', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    void (async () => {
+      try {
+        const snapshot = await writeDatabaseSnapshot();
+        const filePath = path.resolve(BACKUP_DIR, snapshot.fileName);
+        res.download(filePath, snapshot.fileName, (err) => {
+          if (err && !res.headersSent) {
+            res.status(500).json({ error: 'Backup download failed.' });
+          }
+        });
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'Backup download failed.',
+        });
+      }
+    })();
+  });
+
+  // Creates a snapshot on the server's own volume.
+  app.post('/api/admin/db/backup', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    void (async () => {
+      try {
+        res.json({ success: true, backup: await writeDatabaseSnapshot() });
+      } catch (err) {
+        res.status(500).json({
+          success: false,
+          error: err instanceof Error ? err.message : 'Could not create the backup.',
+        });
+      }
+    })();
+  });
+
+  app.get('/api/admin/db/backups', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const items = listDatabaseSnapshots().map(({ fileName, sizeBytes, createdAt }) => ({
+      fileName,
+      sizeBytes,
+      createdAt,
+    }));
+    res.json({ items, directory: path.relative(DATA_DIR, BACKUP_DIR) });
+  });
+
+  app.get('/api/admin/db/backups/:fileName', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const fileName = typeof req.params.fileName === 'string' ? req.params.fileName : '';
+    if (!BACKUP_FILE_RE.test(fileName)) {
+      res.status(400).json({ error: 'Invalid backup name.' });
+      return;
+    }
+    const target = path.resolve(BACKUP_DIR, fileName);
+    if (!target.startsWith(BACKUP_DIR + path.sep) || !fs.existsSync(target)) {
+      res.status(404).json({ error: 'Backup not found.' });
+      return;
+    }
+    res.download(target, fileName);
+  });
+
+  app.get('/api/admin/db/stats', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const count = (sql: string) => {
+      try {
+        return (db.prepare(sql).get() as { n: number }).n;
+      } catch {
+        return 0;
+      }
+    };
+    let sizeBytes = 0;
+    try {
+      sizeBytes = fs.statSync(DB_FILE).size;
+    } catch {}
+    res.json({
+      sizeBytes,
+      users: count('SELECT COUNT(*) AS n FROM users'),
+      history: count('SELECT COUNT(*) AS n FROM download_history'),
+      telegramFiles: count('SELECT COUNT(*) AS n FROM telegram_files WHERE deleted_at IS NULL'),
+    });
+  });
+
   // Xray VPN Proxy endpoints (admin only)
   app.get('/api/admin/xray', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const user = req.authUser!;
@@ -3717,6 +4781,16 @@ async function startServer() {
     const stat = await fs.promises.stat(job.filePath);
     job.totalBytes = stat.size;
     job.downloadedBytes = stat.size;
+
+    // Publish to the Telegram channel when the admin enabled it. While the bytes
+    // move to Telegram the job stays in "processing" so no client starts a
+    // download from the cache file that is about to be removed.
+    if (telegramEnabledForUploads(adminConfig.telegram)) {
+      job.progress = 99;
+      job.status = 'processing';
+      await uploadJobToTelegram(job, job.ownerUserId ?? null, job.author || 'grove save');
+    }
+
     job.progress = 100;
     job.status = 'ready';
   }
@@ -4046,8 +5120,14 @@ async function startServer() {
     }
   }
 
-  app.post('/api/media/prepare', async (req: Request, res: Response) => {
-    const body = req.body as { url?: unknown; quality?: unknown; title?: unknown; audioFormatId?: unknown };
+  app.post('/api/media/prepare', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const body = req.body as {
+      url?: unknown;
+      quality?: unknown;
+      title?: unknown;
+      author?: unknown;
+      audioFormatId?: unknown;
+    };
     const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
     const quality =
       typeof body.quality === 'string' &&
@@ -4055,6 +5135,7 @@ async function startServer() {
         ? body.quality.trim()
         : '1080p';
     const rawTitle = typeof body.title === 'string' ? body.title : 'grove-save-media';
+    const rawAuthor = typeof body.author === 'string' ? body.author.slice(0, 200) : '';
     const audioFormatId = validateAudioFormatId(body.audioFormatId);
 
     const parsed = await validatePublicUrl(rawUrl);
@@ -4087,6 +5168,8 @@ async function startServer() {
       filePath,
       contentDisposition: buildContentDisposition(rawTitle, quality, ext),
       createdAt: Date.now(),
+      ownerUserId: req.authUser?.id ?? null,
+      author: rawAuthor,
     };
     downloadJobs.set(id, job);
 
@@ -4106,6 +5189,27 @@ async function startServer() {
     }
     const job = downloadJobs.get(jobId);
     if (!job) {
+      // Published files outlive the in-memory job, so a restarted server can
+      // still report them as ready.
+      const storedId = telegramFileIdForJob(jobId);
+      const stored = storedId ? lookupTelegramFile(storedId) : null;
+      if (stored) {
+        res.json({
+          id: jobId,
+          status: 'ready',
+          progress: 100,
+          downloadedBytes: stored.size_bytes,
+          totalBytes: stored.size_bytes,
+          quality: stored.quality || '',
+          ext: (stored.file_name || '').toLowerCase().endsWith('.mp3') ? 'mp3' : 'mp4',
+          title: stored.title,
+          error: null,
+          storage: 'telegram',
+          fileId: stored.id,
+          downloadPath: `/api/download/${stored.id}`,
+        });
+        return;
+      }
       res.status(404).json({ error: 'Download job not found or expired.' });
       return;
     }
@@ -4119,20 +5223,46 @@ async function startServer() {
       ext: job.ext,
       title: job.title,
       error: job.error || null,
+      storage: job.telegramFileId ? 'telegram' : 'local',
+      fileId: job.telegramFileId ?? null,
+      downloadPath: job.telegramFileId
+        ? `/api/download/${job.telegramFileId}`
+        : `/api/media/files/${job.id}`,
+      telegramMessageId: job.telegramMessageId ?? null,
     });
   });
 
-  app.get('/api/media/files/:jobId', (req: Request, res: Response) => {
+  app.get('/api/media/files/:jobId', async (req: Request, res: Response) => {
     const jobId = typeof req.params.jobId === 'string' ? req.params.jobId : '';
     if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
       res.status(400).json({ error: 'Invalid file identifier.' });
       return;
     }
     const job = downloadJobs.get(jobId);
-    if (!job || job.status !== 'ready') {
+    if (!job) {
+      // The in-memory job is gone after a restart, but the Telegram copy is permanent.
+      const storedId = telegramFileIdForJob(jobId);
+      const stored = storedId ? lookupTelegramFile(storedId) : null;
+      if (stored) {
+        await streamTelegramFile(stored, req, res);
+        return;
+      }
       res.status(404).json({ error: 'Prepared file is not ready or has expired.' });
       return;
     }
+    if (job.status !== 'ready') {
+      res.status(404).json({ error: 'Prepared file is not ready or has expired.' });
+      return;
+    }
+
+    if (job.telegramFileId) {
+      const stored = lookupTelegramFile(job.telegramFileId);
+      if (stored) {
+        await streamTelegramFile(stored, req, res);
+        return;
+      }
+    }
+
     const resolved = path.resolve(job.filePath);
     if (!resolved.startsWith(CACHE_DIR + path.sep) || !fs.existsSync(resolved)) {
       res.status(404).json({ error: 'Prepared file missing.' });
@@ -4142,6 +5272,51 @@ async function startServer() {
     res.setHeader('Content-Type', job.mimeType);
     res.setHeader('Content-Disposition', job.contentDisposition);
     res.sendFile(resolved);
+  });
+
+  // Permanent direct download link for a Telegram-stored file. This is the
+  // stable URL handed to users: it survives restarts and cache expiry.
+  app.get('/api/download/:fileId', async (req: Request, res: Response) => {
+    const fileId = typeof req.params.fileId === 'string' ? req.params.fileId : '';
+    if (!/^[0-9a-f-]{36}$/i.test(fileId)) {
+      res.status(400).json({ error: 'Invalid file identifier.' });
+      return;
+    }
+    const stored = lookupTelegramFile(fileId);
+    if (!stored) {
+      res.status(404).json({ error: 'File not found.' });
+      return;
+    }
+    if (!telegramIsConfigured(adminConfig.telegram)) {
+      res.status(503).json({ error: 'Telegram storage is not configured.' });
+      return;
+    }
+    await streamTelegramFile(stored, req, res);
+  });
+
+  // Metadata for a stored file, used by the UI to build the shareable link.
+  app.get('/api/download/:fileId/info', (req: Request, res: Response) => {
+    const fileId = typeof req.params.fileId === 'string' ? req.params.fileId : '';
+    if (!/^[0-9a-f-]{36}$/i.test(fileId)) {
+      res.status(400).json({ error: 'Invalid file identifier.' });
+      return;
+    }
+    const stored = lookupTelegramFile(fileId);
+    if (!stored) {
+      res.status(404).json({ error: 'File not found.' });
+      return;
+    }
+    res.json({
+      id: stored.id,
+      title: stored.title,
+      author: stored.author,
+      quality: stored.quality,
+      fileName: stored.file_name,
+      mimeType: stored.mime_type,
+      sizeBytes: stored.size_bytes,
+      createdAt: stored.created_at,
+      downloadPath: `/api/download/${stored.id}`,
+    });
   });
 
   // Online inline player streaming endpoint (supports Range requests, audio track switching, and Xray VPN proxy)
@@ -4801,6 +5976,11 @@ export class ErrorOverlay {}
       if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed') {
         await startBgutilPotServer();
       }
+      if (telegramIsConfigured(adminConfig.telegram) && adminConfig.telegram.enabled) {
+        await getTelegramClient().catch((err) => {
+          telegramState.lastError = err instanceof Error ? err.message : String(err);
+        });
+      }
     } catch {
       // Non-fatal boot background provisioning error; inspectable via admin panels
     }
@@ -4808,7 +5988,14 @@ export class ErrorOverlay {}
   void bootBackgroundServices();
 
   const handleShutdown = () => {
-    void Promise.allSettled([stopBgutilPotServer(), stopXrayProcess()]).finally(() => {
+    void Promise.allSettled([
+      stopBgutilPotServer(),
+      stopXrayProcess(),
+      disposeTelegramClient(),
+      pendingTelegramLogin
+        ? pendingTelegramLogin.client.disconnect().catch(() => {})
+        : Promise.resolve(),
+    ]).finally(() => {
       try {
         db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
         db.close();

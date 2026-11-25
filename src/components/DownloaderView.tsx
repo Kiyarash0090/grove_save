@@ -8,10 +8,12 @@ import {
   ClipboardPaste,
   CloudDownload,
   Film,
+  Link2,
   Loader2,
   Music,
   Play,
   Search,
+  Send,
   Volume2,
   X,
 } from 'lucide-react';
@@ -66,6 +68,8 @@ interface ReadyJob {
   quality: string;
   sizeBytes: number;
   thumbnail: string | null;
+  fileId?: string | null;
+  downloadPath?: string;
 }
 
 interface DownloaderViewProps {
@@ -132,6 +136,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   const [jobBytes, setJobBytes] = useState<number>(0);
   const [readyJob, setReadyJob] = useState<ReadyJob | null>(null);
   const [savedConfirmed, setSavedConfirmed] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const [imgFailed, setImgFailed] = useState(false);
   const [showPlayer, setShowPlayer] = useState(false);
@@ -356,6 +361,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
           url: targetUrl,
           quality,
           title,
+          author,
           ...(audioFormatId ? { audioFormatId } : {}),
         }),
       });
@@ -377,6 +383,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             downloadedBytes: number;
             totalBytes: number | null;
             error?: string;
+            fileId?: string | null;
+            downloadPath?: string;
           };
 
           setJobProgress(job.progress || 0);
@@ -397,6 +405,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
               quality,
               sizeBytes: finalSize,
               thumbnail: thumb,
+              fileId: job.fileId ?? null,
+              downloadPath: job.downloadPath,
             };
             setReadyJob(completed);
             setJobProgress(100);
@@ -431,9 +441,13 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     }
   };
 
-  const triggerFileSaveFromSite = (jobId: string) => {
+  const isTelegramReady = Boolean(readyJob?.fileId);
+
+  const triggerFileSaveFromSite = (jobId: string, fileId?: string | null) => {
     const link = document.createElement('a');
-    link.href = `${apiBase}/api/media/files/${encodeURIComponent(jobId)}`;
+    link.href = fileId
+      ? `${apiBase}/api/download/${encodeURIComponent(fileId)}`
+      : `${apiBase}/api/media/files/${encodeURIComponent(jobId)}`;
     link.download = '';
     document.body.appendChild(link);
     link.click();
@@ -441,14 +455,30 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     setSavedConfirmed(true);
   };
 
+  const copyReadyDownloadLink = async () => {
+    if (!readyJob) return;
+    const path = readyJob.downloadPath
+      ? `${apiBase}${readyJob.downloadPath}`
+      : `${apiBase}/api/media/files/${encodeURIComponent(readyJob.jobId)}`;
+    const absolute = /^https?:\/\//i.test(path) ? path : `${window.location.origin}${path}`;
+    try {
+      await navigator.clipboard.writeText(absolute);
+      setSavedConfirmed(true);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      setErrorMsg(t.clipboardBlocked);
+    }
+  };
+
   const handleHistoryDownload = async (item: SavedItem) => {
     if (item.jobId) {
       try {
         const check = await fetch(`${apiBase}/api/media/jobs/${encodeURIComponent(item.jobId)}`);
         if (check.ok) {
-          const data = (await check.json()) as { status?: string };
+          const data = (await check.json()) as { status?: string; fileId?: string | null };
           if (data.status === 'ready') {
-            triggerFileSaveFromSite(item.jobId);
+            triggerFileSaveFromSite(item.jobId, data.fileId);
             return;
           }
         }
@@ -1023,7 +1053,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                 {jobStage === 'ready' && readyJob ? (
                   <button
                     type="button"
-                    onClick={() => triggerFileSaveFromSite(readyJob.jobId)}
+                    onClick={() => triggerFileSaveFromSite(readyJob.jobId, readyJob.fileId)}
                     className={`w-full min-h-[54px] px-6 rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2.5 transition active:scale-[0.98] ${
                       isRedGlow
                         ? 'bg-red-600 text-white shadow-[0_0_28px_rgba(220,38,38,0.45)] hover:bg-red-500'
@@ -1075,6 +1105,25 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       </>
                     )}
                   </button>
+                )}
+
+                {jobStage === 'ready' && readyJob && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={copyReadyDownloadLink}
+                      className="flex-1 min-h-[44px] px-3 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold inline-flex items-center justify-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
+                    >
+                      {linkCopied ? <Check className="w-4 h-4 shrink-0" /> : <Link2 className="w-4 h-4 shrink-0" />}
+                      <span>{linkCopied ? t.linkCopied : t.copyDownloadLink}</span>
+                    </button>
+                    {isTelegramReady && (
+                      <span className="min-h-[44px] px-3 rounded-xl border border-black/10 dark:border-white/15 bg-black/[0.03] dark:bg-white/[0.05] text-[11px] font-medium text-zinc-600 dark:text-zinc-300 inline-flex items-center gap-1.5">
+                        <Send className="w-3.5 h-3.5 shrink-0" />
+                        <span>Telegram</span>
+                      </span>
+                    )}
+                  </div>
                 )}
 
                 {isBusy && (
