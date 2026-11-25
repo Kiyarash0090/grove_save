@@ -44,9 +44,12 @@ interface StoredUser {
   };
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DATA_DIR = path.resolve(
+  process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'data')
+);
 const CACHE_DIR = path.resolve(DATA_DIR, 'cache');
 const BIN_DIR = path.resolve(DATA_DIR, 'bin');
+const YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
 const USERS_FILE = path.resolve(DATA_DIR, 'users.json');
 const ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
 const YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
@@ -58,6 +61,12 @@ function ensureDataDir(): void {
   }
   if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(BIN_DIR)) {
+    fs.mkdirSync(BIN_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(YT_DLP_PLUGINS_DIR)) {
+    fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
   }
 }
 
@@ -805,22 +814,74 @@ function extractYouTubeId(parsed: URL): string | null {
 
 let cachedYtDlpRunner: { cmd: string; baseArgs: string[] } | null | undefined;
 let cachedYtDlpVersion: string | null | undefined;
+let ytDlpInstallPromise: Promise<{ cmd: string; baseArgs: string[] } | null> | null = null;
 
-async function getYtDlpRunner(): Promise<{ cmd: string; baseArgs: string[] } | null> {
+async function installYtDlpBinary(): Promise<{ cmd: string; baseArgs: string[] } | null> {
+  if (process.platform !== 'linux') return null;
+  if (ytDlpInstallPromise) return ytDlpInstallPromise;
+
+  ytDlpInstallPromise = (async () => {
+    try {
+      ensureDataDir();
+      const targetPath = path.join(BIN_DIR, 'yt-dlp');
+      const archAsset = process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux';
+      const candidateUrls = [
+        `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${archAsset}`,
+        'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp',
+      ];
+
+      for (const downloadUrl of candidateUrls) {
+        try {
+          const tmpPath = `${targetPath}.tmp`;
+          const res = await fetch(downloadUrl, { signal: AbortSignal.timeout(45000) });
+          if (!res.ok) continue;
+          const buf = Buffer.from(await res.arrayBuffer());
+          await fs.promises.writeFile(tmpPath, buf, { mode: 0o755 });
+          await fs.promises.chmod(tmpPath, 0o755);
+          await fs.promises.rename(tmpPath, targetPath);
+
+          const { stdout } = await execFileAsync(targetPath, ['--version'], { timeout: 10000 });
+          if (stdout.trim()) {
+            cachedYtDlpRunner = { cmd: targetPath, baseArgs: [] };
+            cachedYtDlpVersion = stdout.trim();
+            return cachedYtDlpRunner;
+          }
+        } catch {
+          // Try next candidate (e.g. pure Python zipapp on Alpine/musl)
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      ytDlpInstallPromise = null;
+    }
+  })();
+
+  return ytDlpInstallPromise;
+}
+
+async function getYtDlpRunner(options?: { autoInstall?: boolean }): Promise<{ cmd: string; baseArgs: string[] } | null> {
   if (cachedYtDlpRunner) return cachedYtDlpRunner;
+  const managedBin = path.join(BIN_DIR, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
   const candidates: { cmd: string; baseArgs: string[] }[] =
     process.platform === 'win32'
       ? [
+          { cmd: managedBin, baseArgs: [] },
           { cmd: 'python', baseArgs: ['-m', 'yt_dlp'] },
           { cmd: 'yt-dlp', baseArgs: [] },
         ]
       : [
           { cmd: 'yt-dlp', baseArgs: [] },
+          { cmd: '/usr/local/bin/yt-dlp', baseArgs: [] },
+          { cmd: '/usr/bin/yt-dlp', baseArgs: [] },
+          { cmd: managedBin, baseArgs: [] },
           { cmd: 'python3', baseArgs: ['-m', 'yt_dlp'] },
         ];
   for (const c of candidates) {
     try {
-      const { stdout } = await execFileAsync(c.cmd, [...c.baseArgs, '--version'], { timeout: 5000 });
+      if (c.cmd === managedBin && !fs.existsSync(managedBin)) continue;
+      const { stdout } = await execFileAsync(c.cmd, [...c.baseArgs, '--version'], { timeout: 8000 });
       if (stdout.trim()) {
         cachedYtDlpRunner = c;
         cachedYtDlpVersion = stdout.trim();
@@ -830,22 +891,53 @@ async function getYtDlpRunner(): Promise<{ cmd: string; baseArgs: string[] } | n
       // Try next candidate
     }
   }
+  if (options?.autoInstall !== false && process.platform === 'linux') {
+    return installYtDlpBinary();
+  }
   return null;
 }
 
 async function getYtDlpPath(): Promise<string | null> {
-  const runner = await getYtDlpRunner();
+  const runner = await getYtDlpRunner({ autoInstall: false });
   return runner ? 'available' : null;
 }
 
 async function getYtDlpVersion(): Promise<string | null> {
   if (cachedYtDlpVersion) return cachedYtDlpVersion;
-  await getYtDlpRunner();
+  await getYtDlpRunner({ autoInstall: false });
   return cachedYtDlpVersion || null;
 }
 
+function getBgutilPluginDirIfPresent(): string | null {
+  const managedExtractor = path.join(YT_DLP_PLUGINS_DIR, 'yt_dlp_plugins', 'extractor');
+  if (
+    fs.existsSync(path.join(managedExtractor, 'getpot_bgutil.py')) ||
+    fs.existsSync(path.join(managedExtractor, 'getpot_bgutil_http.py'))
+  ) {
+    return YT_DLP_PLUGINS_DIR;
+  }
+  const repoPluginDirs = [
+    path.join(DATA_DIR, 'bgutil-pot', 'plugin'),
+    '/opt/bgutil-pot/plugin',
+  ];
+  for (const dir of repoPluginDirs) {
+    if (
+      fs.existsSync(path.join(dir, 'yt_dlp_plugins', 'extractor', 'getpot_bgutil.py')) ||
+      fs.existsSync(path.join(dir, 'yt_dlp_plugins', 'extractor', 'getpot_bgutil_http.py'))
+    ) {
+      return dir;
+    }
+  }
+  return null;
+}
+
 function buildYtDlpArgs(baseArgs: string[]): string[] {
-  return ['--js-runtimes', 'node', '--no-check-certificate', '--remote-components', 'ejs:github', ...baseArgs];
+  const args = ['--js-runtimes', 'node', '--no-check-certificate', '--remote-components', 'ejs:github'];
+  const pluginDir = getBgutilPluginDirIfPresent();
+  if (pluginDir) {
+    args.push('--plugin-dirs', pluginDir);
+  }
+  return [...args, ...baseArgs];
 }
 
 // --- Xray VPN Core Manager (Admin Only) ---
@@ -1816,14 +1908,132 @@ function findBgutilPotEntry(): string | null {
   return null;
 }
 
-async function isBgutilPipPluginInstalled(): Promise<boolean> {
-  const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+function syncBgutilPluginFromRepo(): boolean {
+  const sources = [
+    path.join(DATA_DIR, 'bgutil-pot', 'plugin', 'yt_dlp_plugins'),
+    '/opt/bgutil-pot/plugin/yt_dlp_plugins',
+  ];
+  const src = sources.find(
+    (s) =>
+      fs.existsSync(path.join(s, 'extractor', 'getpot_bgutil.py')) ||
+      fs.existsSync(path.join(s, 'extractor', 'getpot_bgutil_http.py'))
+  );
+  if (!src) return false;
+
+  const targetPlugin = path.join(YT_DLP_PLUGINS_DIR, 'yt_dlp_plugins');
   try {
-    await execFileAsync(pyCmd, ['-m', 'pip', 'show', 'bgutil-ytdlp-pot-provider'], { timeout: 5000 });
-    return true;
+    if (!fs.existsSync(path.join(targetPlugin, 'extractor', 'getpot_bgutil.py'))) {
+      fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
+      fs.cpSync(src, targetPlugin, { recursive: true, force: true });
+    }
   } catch {
-    return false;
+    // Non-fatal if repo plugin dir itself is directly usable via getBgutilPluginDirIfPresent()
   }
+
+  // Best-effort copy to user's ~/.yt-dlp/plugins as well
+  try {
+    const userPluginDir = path.join(os.homedir(), '.yt-dlp', 'plugins', 'bgutil-ytdlp-pot-provider', 'yt_dlp_plugins');
+    if (!fs.existsSync(path.join(userPluginDir, 'extractor', 'getpot_bgutil.py'))) {
+      fs.mkdirSync(path.dirname(userPluginDir), { recursive: true });
+      fs.cpSync(src, userPluginDir, { recursive: true, force: true });
+    }
+  } catch {
+    // Ignore read-only home directory
+  }
+  return true;
+}
+
+function hasBgutilInPluginFolder(dirPath: string): boolean {
+  try {
+    if (!fs.existsSync(dirPath)) return false;
+    if (
+      fs.existsSync(path.join(dirPath, 'yt_dlp_plugins', 'extractor', 'getpot_bgutil.py')) ||
+      fs.existsSync(path.join(dirPath, 'yt_dlp_plugins', 'extractor', 'getpot_bgutil_http.py'))
+    ) {
+      return true;
+    }
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const lower = entry.name.toLowerCase();
+      if (lower.includes('bgutil')) return true;
+      if (entry.isDirectory()) {
+        const sub = path.join(dirPath, entry.name);
+        if (
+          fs.existsSync(path.join(sub, 'yt_dlp_plugins', 'extractor', 'getpot_bgutil.py')) ||
+          fs.existsSync(path.join(sub, 'yt_dlp_plugins', 'extractor', 'getpot_bgutil_http.py'))
+        ) {
+          return true;
+        }
+      }
+    }
+  } catch {}
+  return false;
+}
+
+async function isBgutilPipPluginInstalled(): Promise<boolean> {
+  syncBgutilPluginFromRepo();
+  if (getBgutilPluginDirIfPresent()) {
+    return true;
+  }
+
+  const pluginDirs = [
+    YT_DLP_PLUGINS_DIR,
+    path.join(os.homedir(), '.yt-dlp', 'plugins'),
+    path.join(os.homedir(), '.config', 'yt-dlp', 'plugins'),
+    '/etc/yt-dlp/plugins',
+    '/etc/yt-dlp-plugins',
+    '/usr/local/share/yt-dlp/plugins',
+    '/usr/share/yt-dlp/plugins',
+  ];
+  for (const dir of pluginDirs) {
+    if (hasBgutilInPluginFolder(dir)) {
+      return true;
+    }
+  }
+
+  const pythonCandidates = new Set<string>(
+    process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python']
+  );
+
+  // Also inspect yt-dlp binary shebang if it's a Python script (e.g., venv / pipx)
+  try {
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+    const { stdout } = await execFileAsync(whichCmd, ['yt-dlp'], { timeout: 3000 });
+    const ytDlpFile = stdout.trim().split(/\r?\n/)[0]?.trim();
+    if (ytDlpFile && fs.existsSync(ytDlpFile)) {
+      const fd = await fs.promises.open(ytDlpFile, 'r');
+      const buf = Buffer.alloc(160);
+      await fd.read(buf, 0, 160, 0);
+      await fd.close();
+      const firstLine = buf.toString('utf8').split(/\r?\n/)[0] || '';
+      if (firstLine.startsWith('#!') && firstLine.toLowerCase().includes('python')) {
+        const shebangBin = firstLine.slice(2).trim().split(/\s+/)[0];
+        if (shebangBin && fs.existsSync(shebangBin)) {
+          pythonCandidates.add(shebangBin);
+        }
+      }
+    }
+  } catch {}
+
+  for (const pyCmd of pythonCandidates) {
+    try {
+      await execFileAsync(
+        pyCmd,
+        [
+          '-c',
+          "import importlib.util, sys; sys.exit(0 if (importlib.util.find_spec('yt_dlp_plugins.extractor.getpot_bgutil') or importlib.util.find_spec('yt_dlp_plugins.extractor.getpot_bgutil_http')) else 1)",
+        ],
+        { timeout: 6000 }
+      );
+      return true;
+    } catch {}
+    try {
+      await execFileAsync(pyCmd, ['-m', 'pip', 'show', 'bgutil-ytdlp-pot-provider'], { timeout: 10000 });
+      return true;
+    } catch {}
+  }
+
+  return false;
 }
 
 function getEffectivePotBaseUrl(): string {
@@ -1875,6 +2085,8 @@ async function stopBgutilPotServer(): Promise<void> {
   });
 }
 
+let bgutilInstallPromise: Promise<{ entryPath: string; pluginInstalled: boolean }> | null = null;
+
 async function startBgutilPotServer(): Promise<void> {
   await stopBgutilPotServer();
   bgutilState.lastError = null;
@@ -1884,7 +2096,19 @@ async function startBgutilPotServer(): Promise<void> {
     return;
   }
 
-  const entryPath = findBgutilPotEntry();
+  let entryPath = findBgutilPotEntry();
+  if (!entryPath) {
+    try {
+      const installed = await installBgutilPotServer();
+      entryPath = installed.entryPath;
+    } catch (err) {
+      bgutilState.lastError =
+        err instanceof Error
+          ? err.message
+          : 'bgutil-ytdlp-pot-provider server is not installed on this host.';
+      return;
+    }
+  }
   if (!entryPath) {
     bgutilState.lastError = 'bgutil-ytdlp-pot-provider server is not installed on this host.';
     return;
@@ -1951,59 +2175,104 @@ async function startBgutilPotServer(): Promise<void> {
 }
 
 async function installBgutilPotServer(): Promise<{ entryPath: string; pluginInstalled: boolean }> {
-  ensureDataDir();
-  const targetDir = path.join(DATA_DIR, 'bgutil-pot');
-  const serverDir = path.join(targetDir, 'server');
-  const entryPath = path.join(serverDir, 'build', 'main.js');
+  if (bgutilInstallPromise) return bgutilInstallPromise;
 
-  if (!fs.existsSync(entryPath)) {
-    const tarballUrl = 'https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/heads/master.tar.gz';
-    const tarPath = path.join(DATA_DIR, 'bgutil-pot.tar.gz');
-    const res = await fetch(tarballUrl, { signal: AbortSignal.timeout(45000) });
-    if (!res.ok) {
-      throw new Error(`Failed to download bgutil-ytdlp-pot-provider (HTTP ${res.status}).`);
-    }
-    const buf = Buffer.from(await res.arrayBuffer());
-    await fs.promises.writeFile(tarPath, buf);
+  bgutilInstallPromise = (async () => {
+    ensureDataDir();
+    const prebuiltEntry = findBgutilPotEntry();
+    const targetDir = path.join(DATA_DIR, 'bgutil-pot');
+    const serverDir = path.join(targetDir, 'server');
+    const entryPath = prebuiltEntry || path.join(serverDir, 'build', 'main.js');
 
-    try {
-      await fs.promises.rm(targetDir, { recursive: true, force: true });
-      await fs.promises.mkdir(targetDir, { recursive: true });
-      await execFileAsync('tar', ['-xzf', tarPath, '--strip-components=1', '-C', targetDir], {
-        timeout: 20000,
-      });
-    } finally {
-      await fs.promises.rm(tarPath, { force: true }).catch(() => {});
-    }
+    if (!fs.existsSync(entryPath)) {
+      const tarballUrl = 'https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/heads/master.tar.gz';
+      const tarPath = path.join(DATA_DIR, 'bgutil-pot.tar.gz');
+      const res = await fetch(tarballUrl, { signal: AbortSignal.timeout(45000) });
+      if (!res.ok) {
+        throw new Error(`Failed to download bgutil-ytdlp-pot-provider (HTTP ${res.status}).`);
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      await fs.promises.writeFile(tarPath, buf);
 
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-    await execFileAsync(npmCmd, ['ci'], { cwd: serverDir, timeout: 180000 });
-    await execFileAsync(npxCmd, ['tsc'], { cwd: serverDir, timeout: 60000 });
-  }
-
-  let pluginInstalled = await isBgutilPipPluginInstalled();
-  if (!pluginInstalled) {
-    const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
-    try {
-      await execFileAsync(
-        pyCmd,
-        ['-m', 'pip', 'install', '--break-system-packages', '-U', 'bgutil-ytdlp-pot-provider'],
-        { timeout: 60000 }
-      );
-      pluginInstalled = await isBgutilPipPluginInstalled();
-    } catch {
       try {
-        await execFileAsync(pyCmd, ['-m', 'pip', 'install', '-U', 'bgutil-ytdlp-pot-provider'], { timeout: 60000 });
-        pluginInstalled = await isBgutilPipPluginInstalled();
-      } catch {
-        pluginInstalled = false;
+        await fs.promises.rm(targetDir, { recursive: true, force: true });
+        await fs.promises.mkdir(targetDir, { recursive: true });
+        await execFileAsync('tar', ['-xzf', tarPath, '--strip-components=1', '-C', targetDir], {
+          timeout: 20000,
+        });
+      } finally {
+        await fs.promises.rm(tarPath, { force: true }).catch(() => {});
+      }
+
+      const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      const buildEnv: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: 'development' };
+      await execFileAsync(npmCmd, ['ci', '--include=dev'], {
+        cwd: serverDir,
+        env: buildEnv,
+        timeout: 180000,
+      });
+      const localTsc = path.join(
+        serverDir,
+        'node_modules',
+        '.bin',
+        process.platform === 'win32' ? 'tsc.cmd' : 'tsc'
+      );
+      if (fs.existsSync(localTsc)) {
+        await execFileAsync(localTsc, [], { cwd: serverDir, env: buildEnv, timeout: 60000 });
+      } else {
+        await execFileAsync(npxCmd, ['tsc'], { cwd: serverDir, env: buildEnv, timeout: 60000 });
       }
     }
-  }
 
-  bgutilState.entryPath = entryPath;
-  return { entryPath, pluginInstalled };
+    // Ensure yt-dlp binary is ready and sync plugin files from repo / release zip / pip
+    await getYtDlpRunner({ autoInstall: true });
+    syncBgutilPluginFromRepo();
+
+    let pluginInstalled = await isBgutilPipPluginInstalled();
+    if (!pluginInstalled) {
+      const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+      try {
+        await execFileAsync(
+          pyCmd,
+          ['-m', 'pip', 'install', '--break-system-packages', '-U', 'bgutil-ytdlp-pot-provider'],
+          { timeout: 60000 }
+        );
+        pluginInstalled = await isBgutilPipPluginInstalled();
+      } catch {
+        try {
+          await execFileAsync(pyCmd, ['-m', 'pip', 'install', '-U', 'bgutil-ytdlp-pot-provider'], { timeout: 60000 });
+          pluginInstalled = await isBgutilPipPluginInstalled();
+        } catch {
+          pluginInstalled = await isBgutilPipPluginInstalled();
+        }
+      }
+    }
+
+    if (!pluginInstalled) {
+      try {
+        const zipUrl = 'https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/latest/download/bgutil-ytdlp-pot-provider.zip';
+        const zipRes = await fetch(zipUrl, { signal: AbortSignal.timeout(30000) });
+        if (zipRes.ok) {
+          const zipPath = path.join(DATA_DIR, 'bgutil-plugin.zip');
+          await fs.promises.writeFile(zipPath, Buffer.from(await zipRes.arrayBuffer()));
+          fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
+          await execFileAsync('unzip', ['-o', zipPath, '-d', YT_DLP_PLUGINS_DIR], { timeout: 15000 });
+          await fs.promises.rm(zipPath, { force: true }).catch(() => {});
+          pluginInstalled = await isBgutilPipPluginInstalled();
+        }
+      } catch {}
+    }
+
+    bgutilState.entryPath = entryPath;
+    return { entryPath, pluginInstalled };
+  })();
+
+  try {
+    return await bgutilInstallPromise;
+  } finally {
+    bgutilInstallPromise = null;
+  }
 }
 
 function formatPoTokenArg(rawToken: string): string {
@@ -2020,6 +2289,8 @@ async function getYtDlpAuthAndProxy(overrides?: {
   const extraArgs: string[] = [];
   const env: NodeJS.ProcessEnv = { ...process.env };
 
+  syncBgutilPluginFromRepo();
+
   const cookies = overrides?.cookies !== undefined ? overrides.cookies.trim() : adminConfig.youtubeCookies.trim();
   const poToken = overrides?.poToken !== undefined ? overrides.poToken.trim() : adminConfig.youtubePoToken.trim();
 
@@ -2028,15 +2299,17 @@ async function getYtDlpAuthAndProxy(overrides?: {
     await fs.promises.writeFile(YT_COOKIES_FILE, cookies, { encoding: 'utf8', mode: 0o600 });
     extraArgs.push('--cookies', YT_COOKIES_FILE);
   }
-  if (poToken) {
-    extraArgs.push('--extractor-args', `youtube:po_token=${formatPoTokenArg(poToken)}`);
-  }
   if (adminConfig.potProvider.enabled) {
+    if (adminConfig.potProvider.mode === 'managed' && !bgutilState.running && findBgutilPotEntry()) {
+      await startBgutilPotServer();
+    }
     const shouldAttach =
       adminConfig.potProvider.mode === 'external' || bgutilState.running;
     if (shouldAttach) {
       extraArgs.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${getEffectivePotBaseUrl()}`);
     }
+  } else if (poToken) {
+    extraArgs.push('--extractor-args', `youtube:po_token=${formatPoTokenArg(poToken)}`);
   }
   if (!overrides?.skipProxy && adminConfig.xray.enabled && xrayState.running) {
     const socksProxy = `socks5h://127.0.0.1:${adminConfig.xray.socksPort}`;
@@ -2450,9 +2723,7 @@ async function startServer() {
         fs.promises.rm(YT_COOKIES_FILE, { force: true }).catch(() => {});
       }
     }
-    if (typeof body.youtubePoToken === 'string') {
-      adminConfig.youtubePoToken = body.youtubePoToken.trim();
-    }
+    adminConfig.youtubePoToken = typeof body.youtubePoToken === 'string' ? body.youtubePoToken.trim() : '';
     saveAdminConfig(adminConfig);
     res.json({ success: true });
   });
@@ -4504,19 +4775,48 @@ export class ErrorOverlay {}
     });
   }
 
-  // Auto-start Xray VPN on boot if admin enabled it, then start managed bgutil POT server
+  // Remove orphaned temporary downloads left in persistent cache from previous runs
+  fs.promises.readdir(CACHE_DIR)
+    .then((entries) =>
+      Promise.allSettled(
+        entries.map((entry) => fs.promises.rm(path.join(CACHE_DIR, entry), { recursive: true, force: true }))
+      )
+    )
+    .catch(() => {});
+
+  // Auto-provision prerequisites on Linux/Railway boot (non-blocking) & start Xray + bgutil POT server
   const bootBackgroundServices = async () => {
-    if (adminConfig.xray.enabled && adminConfig.xray.configInput.trim()) {
-      await startXrayProcess();
-    }
-    if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed' && findBgutilPotEntry()) {
-      await startBgutilPotServer();
+    try {
+      if (process.platform === 'linux') {
+        const existingXray = await findXrayBinary();
+        if (!existingXray) {
+          await installXrayBinary().catch(() => {});
+        }
+      }
+      if (adminConfig.xray.enabled && adminConfig.xray.configInput.trim()) {
+        await startXrayProcess();
+      }
+      await getYtDlpRunner({ autoInstall: true }).catch(() => null);
+      syncBgutilPluginFromRepo();
+      if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed') {
+        await startBgutilPotServer();
+      }
+    } catch {
+      // Non-fatal boot background provisioning error; inspectable via admin panels
     }
   };
   void bootBackgroundServices();
 
   const handleShutdown = () => {
-    void Promise.allSettled([stopBgutilPotServer(), stopXrayProcess()]).finally(() => process.exit(0));
+    void Promise.allSettled([stopBgutilPotServer(), stopXrayProcess()]).finally(() => {
+      try {
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        db.close();
+      } catch {
+        // ignore close errors during shutdown
+      }
+      process.exit(0);
+    });
   };
   process.once('SIGINT', handleShutdown);
   process.once('SIGTERM', handleShutdown);

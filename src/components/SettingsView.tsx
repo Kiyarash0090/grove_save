@@ -1,12 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertCircle,
+  ArrowLeft,
+  ArrowRight,
   CheckCircle2,
   ChevronRight,
   ChevronLeft,
   Download,
-  Eye,
-  EyeOff,
   Globe,
   HardDrive,
   KeyRound,
@@ -74,10 +74,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const [clearedFeedback, setClearedFeedback] = useState(false);
 
-  // Admin-only YouTube Auth state
+  const [adminPage, setAdminPage] = useState<'main' | 'xray' | 'pot'>('main');
+
+  // Admin-only YouTube Cookies state (PO Token is handled automatically by bgutil-ytdlp-pot-provider)
   const [youtubeCookies, setYoutubeCookies] = useState('');
-  const [youtubePoToken, setYoutubePoToken] = useState('');
-  const [showPoToken, setShowPoToken] = useState(false);
   const [youtubeLoading, setYoutubeLoading] = useState(false);
   const [youtubeMessage, setYoutubeMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -146,9 +146,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         headers: getAuthHeaders(),
       });
       if (res.ok) {
-        const data = (await res.json()) as { youtubeCookies?: string; youtubePoToken?: string };
+        const data = (await res.json()) as { youtubeCookies?: string };
         setYoutubeCookies(data.youtubeCookies || '');
-        setYoutubePoToken(data.youtubePoToken || '');
       }
     } catch {}
   };
@@ -199,7 +198,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         method: 'PUT',
         credentials: 'include',
         headers: getAuthHeaders(true),
-        body: JSON.stringify({ youtubeCookies, youtubePoToken }),
+        body: JSON.stringify({ youtubeCookies }),
       });
       if (res.ok) {
         setYoutubeMessage({ type: 'success', text: t.youtubeSaved });
@@ -223,7 +222,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         method: 'POST',
         credentials: 'include',
         headers: getAuthHeaders(true),
-        body: JSON.stringify({ youtubeCookies, youtubePoToken }),
+        body: JSON.stringify({ youtubeCookies }),
       });
       const data = (await res.json()) as { success?: boolean; title?: string; error?: string };
       if (data.success) {
@@ -679,21 +678,579 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   // Load admin-only configurations strictly when authenticated user is admin
-  React.useEffect(() => {
+  useEffect(() => {
     if (isAdmin) {
       void fetchYouTubeAuth();
       void fetchXrayStatus();
       void fetchPotProviderStatus();
+    } else {
+      setAdminPage('main');
     }
   }, [isAdmin, authToken]);
 
   const ChevronIcon = t.dir === 'rtl' ? ChevronLeft : ChevronRight;
+  const BackArrowIcon = t.dir === 'rtl' ? ArrowRight : ArrowLeft;
+
+  const openAdminPage = (page: 'main' | 'xray' | 'pot') => {
+    setAdminPage(page);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
 
   const handleClear = () => {
     onClearHistory();
     setClearedFeedback(true);
     setTimeout(() => setClearedFeedback(false), 1800);
   };
+
+  if (isAdmin && adminPage === 'xray') {
+    return (
+      <div className="max-w-3xl mx-auto pb-28 space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+          <button
+            type="button"
+            onClick={() => openAdminPage('main')}
+            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+          >
+            <BackArrowIcon className="w-4 h-4 shrink-0" />
+            <span>{t.backToSettings}</span>
+          </button>
+        </div>
+
+        <div className="px-1">
+          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+            {t.sectionAdmin}
+          </p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-black dark:text-white flex items-center gap-2.5">
+            <Shield className="w-6 h-6 shrink-0" />
+            <span>{t.sectionXray}</span>
+          </h1>
+        </div>
+
+        <section aria-label={t.sectionXray}>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <div className="px-4 py-4 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-black dark:text-white">
+                  {t.xrayEnableLabel}
+                </div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                  {t.xrayEnableDesc}
+                </p>
+                <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
+                  {!xrayBinaryInstalled
+                    ? t.xrayStatusNotInstalled
+                    : xrayRunning
+                      ? `${t.xrayStatusConnected} · SOCKS5 :${xrayPorts.socks} / HTTP :${xrayPorts.http}`
+                      : t.xrayStatusStopped}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={xrayEnabled}
+                aria-label={t.xrayEnableLabel}
+                disabled={xrayLoading}
+                onClick={() => {
+                  const next = !xrayEnabled;
+                  setXrayEnabled(next);
+                  if (xrayConfigInput.trim()) {
+                    void saveXrayConfig(next);
+                  }
+                }}
+                className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
+                  xrayEnabled
+                    ? 'bg-black text-white dark:bg-white dark:text-black'
+                    : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                }`}
+              >
+                <span className="text-xs font-bold">{xrayEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 space-y-5">
+              {!xrayBinaryInstalled && (
+                <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
+                  <span className="text-xs text-zinc-600 dark:text-zinc-300">
+                    {t.xrayStatusNotInstalled}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={installXrayCore}
+                    disabled={xrayLoading}
+                    className="min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                  >
+                    {t.xrayInstallBtn}
+                  </button>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                  {t.xrayTestUrlLabel}
+                </label>
+                <input
+                  dir="ltr"
+                  type="url"
+                  value={xrayTestYoutubeUrl}
+                  onChange={(e) => setXrayTestYoutubeUrl(e.target.value)}
+                  placeholder="https://www.youtube.com/watch?v=jNQXAC9IVRw"
+                  className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                />
+                <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.xrayTestUrlDesc}</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                  {t.xrayConfigLabel}
+                </label>
+                <textarea
+                  dir="ltr"
+                  value={xrayConfigInput}
+                  onChange={(e) => setXrayConfigInput(e.target.value)}
+                  placeholder={t.xrayConfigPlaceholder}
+                  rows={5}
+                  className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                />
+                <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.xrayConfigDesc}</p>
+              </div>
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={importXrayProfiles}
+                  disabled={xrayLoading || !xrayConfigInput.trim()}
+                  className="min-h-[44px] px-4 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>{t.xrayImportBtn}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => saveXrayConfig()}
+                  disabled={xrayLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {xrayLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>{t.xraySaveBtn}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => testXrayVpn()}
+                  disabled={xrayLoading || xrayTestingAll || !xrayConfigInput.trim()}
+                  className="min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                >
+                  {t.xrayTestBtn}
+                </button>
+              </div>
+
+              {xrayMessage && (
+                <div
+                  className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
+                    xrayMessage.type === 'success'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
+                      : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
+                  }`}
+                >
+                  {xrayMessage.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  )}
+                  <span className="break-words min-w-0 font-mono">{xrayMessage.text}</span>
+                </div>
+              )}
+
+              <div className="pt-3 border-t border-black/10 dark:border-white/10 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-zinc-600 dark:text-zinc-300 tabular-nums">
+                    {t.xrayProfilesTitle} ({xrayProfiles.length})
+                  </div>
+                  {xrayProfiles.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={testAllXrayProfiles}
+                      disabled={xrayTestingAll || xrayLoading}
+                      className="min-h-[40px] px-3 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {xrayTestingAll ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5" />
+                      )}
+                      <span>{t.xrayTestAllBtn}</span>
+                    </button>
+                  )}
+                </div>
+
+                {xrayProfiles.length === 0 ? (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 py-2">
+                    {t.xrayProfilesEmpty}
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {xrayProfiles.map((profile) => {
+                      const isActive = profile.id === xrayActiveProfileId;
+                      const isTesting = xrayTestingProfileId === profile.id;
+                      return (
+                        <div
+                          key={profile.id}
+                          className={`p-3 rounded-xl border transition-colors ${
+                            isActive
+                              ? 'bg-white dark:bg-black border-black dark:border-white'
+                              : 'bg-white/70 dark:bg-black/60 border-black/10 dark:border-white/15'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-semibold text-black dark:text-white break-words">
+                                {profile.name}
+                              </div>
+                              <div className="mt-0.5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 tabular-nums">
+                                {profile.protocol.toUpperCase()} · {profile.address}
+                                {isActive ? ` · ${t.xrayActiveLabel}` : ''}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => testXrayVpn(profile.id)}
+                                disabled={isTesting || xrayTestingAll}
+                                className="min-h-[40px] px-3 rounded-lg border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-zinc-900 text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                {isTesting ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Play className="w-3.5 h-3.5" />
+                                )}
+                                <span>{t.xrayTestProfileBtn}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => activateXrayProfile(profile.id)}
+                                disabled={xrayLoading || isActive}
+                                className={`min-h-[40px] px-3 rounded-lg text-xs font-semibold whitespace-nowrap disabled:opacity-50 ${
+                                  isActive
+                                    ? 'bg-black text-white dark:bg-white dark:text-black'
+                                    : 'border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white'
+                                }`}
+                              >
+                                {isActive ? t.xrayActiveLabel : t.xrayActivateBtn}
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={t.xrayDeleteBtn}
+                                onClick={() => deleteXrayProfile(profile.id)}
+                                disabled={xrayLoading || isTesting}
+                                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg border border-black/10 dark:border-white/15 text-zinc-500 hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {profile.lastTest && (
+                            <div
+                              className={`mt-2 pt-2 border-t border-black/5 dark:border-white/10 text-[11px] font-mono flex items-start gap-1.5 ${
+                                profile.lastTest.ok
+                                  ? 'text-emerald-700 dark:text-emerald-300'
+                                  : 'text-red-700 dark:text-red-300'
+                              }`}
+                            >
+                              {profile.lastTest.ok ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              ) : (
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                              )}
+                              <span className="break-words min-w-0">
+                                {profile.lastTest.ok
+                                  ? [
+                                      t.xrayTestedPass,
+                                      typeof profile.lastTest.downloadedBytes === 'number'
+                                        ? `${Math.max(1, Math.round(profile.lastTest.downloadedBytes / 1024))} KB`
+                                        : null,
+                                      typeof profile.lastTest.latencyMs === 'number'
+                                        ? `${(profile.lastTest.latencyMs / 1000).toFixed(1)}s`
+                                        : null,
+                                      profile.lastTest.exitIp ? `IP ${profile.lastTest.exitIp}` : null,
+                                      profile.lastTest.title || null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(' · ')
+                                  : `${t.xrayTestedFail}: ${profile.lastTest.error || ''}`}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (isAdmin && adminPage === 'pot') {
+    return (
+      <div className="max-w-3xl mx-auto pb-28 space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+          <button
+            type="button"
+            onClick={() => openAdminPage('main')}
+            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+          >
+            <BackArrowIcon className="w-4 h-4 shrink-0" />
+            <span>{t.backToSettings}</span>
+          </button>
+        </div>
+
+        <div className="px-1">
+          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+            {t.sectionAdmin}
+          </p>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-black dark:text-white flex items-center gap-2.5">
+            <Server className="w-6 h-6 shrink-0" />
+            <span>{t.sectionPotProvider}</span>
+          </h1>
+        </div>
+
+        <section aria-label={t.sectionPotProvider}>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <div className="px-4 py-4 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-black dark:text-white">
+                  {t.potEnableLabel}
+                </div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                  {t.potEnableDesc}
+                </p>
+                <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
+                  {potMode === 'managed' && !potInstalled
+                    ? t.potStatusNotInstalled
+                    : potRunning
+                      ? `${t.potStatusRunning}${potVersion ? ` v${potVersion}` : ''} · ${potMode === 'managed' ? `127.0.0.1:${potPort}` : potBaseUrl}`
+                      : t.potStatusStopped}
+                  {' · '}
+                  {potPluginInstalled ? t.potPluginReady : t.potPluginMissing}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={potEnabled}
+                aria-label={t.potEnableLabel}
+                disabled={potLoading}
+                onClick={() => {
+                  const next = !potEnabled;
+                  setPotEnabled(next);
+                  void savePotProviderConfig(next);
+                }}
+                className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
+                  potEnabled
+                    ? 'bg-black text-white dark:bg-white dark:text-black'
+                    : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                }`}
+              >
+                <span className="text-xs font-bold">{potEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 space-y-4">
+              {potMode === 'managed' && (!potInstalled || !potPluginInstalled) && (
+                <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
+                  <span className="text-xs text-zinc-600 dark:text-zinc-300">
+                    {!potInstalled ? t.potStatusNotInstalled : t.potPluginMissing}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={installPotProvider}
+                    disabled={potLoading}
+                    className="min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                  >
+                    {t.potInstallBtn}
+                  </button>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                  {t.potModeLabel}
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPotMode('managed')}
+                    className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                      potMode === 'managed'
+                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                        : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
+                    }`}
+                  >
+                    {t.potModeManaged}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPotMode('external')}
+                    className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                      potMode === 'external'
+                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                        : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
+                    }`}
+                  >
+                    {t.potModeExternal}
+                  </button>
+                </div>
+              </div>
+
+              {potMode === 'managed' ? (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.potPortLabel}
+                  </label>
+                  <input
+                    dir="ltr"
+                    type="number"
+                    min={1025}
+                    max={65534}
+                    value={potPort}
+                    onChange={(e) => setPotPort(Number(e.target.value) || 4416)}
+                    className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white tabular-nums focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.potBaseUrlLabel}
+                  </label>
+                  <input
+                    dir="ltr"
+                    type="url"
+                    value={potBaseUrl}
+                    onChange={(e) => setPotBaseUrl(e.target.value)}
+                    placeholder="http://127.0.0.1:4416"
+                    className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => savePotProviderConfig()}
+                  disabled={potLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {potLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>{t.potSaveBtn}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={testPotProvider}
+                  disabled={potLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                >
+                  {t.potTestBtn}
+                </button>
+              </div>
+
+              {potMessage && (
+                <div
+                  className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
+                    potMessage.type === 'success'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
+                      : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
+                  }`}
+                >
+                  {potMessage.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  )}
+                  <span className="break-words min-w-0 font-mono">{potMessage.text}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="h-px bg-black/10 dark:bg-white/10" />
+
+            {/* Moved YouTube Cookies section (PO Token field removed) */}
+            <div className="p-4 sm:p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <KeyRound className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold text-black dark:text-white">
+                    {t.youtubeCookiesSection}
+                  </h2>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    {t.youtubeCookiesDesc}
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                  {t.youtubeCookiesLabel}
+                </label>
+                <textarea
+                  dir="ltr"
+                  value={youtubeCookies}
+                  onChange={(e) => setYoutubeCookies(e.target.value)}
+                  placeholder={t.youtubeCookiesPlaceholder}
+                  rows={5}
+                  className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                />
+              </div>
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={saveYouTubeAuth}
+                  disabled={youtubeLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {youtubeLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>{t.youtubeSaveCookiesBtn}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={testYouTubeAuth}
+                  disabled={youtubeLoading}
+                  className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                >
+                  {t.youtubeTestBtn}
+                </button>
+              </div>
+
+              {youtubeMessage && (
+                <div
+                  className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
+                    youtubeMessage.type === 'success'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
+                      : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
+                  }`}
+                >
+                  {youtubeMessage.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  )}
+                  <span className="break-words min-w-0">{youtubeMessage.text}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-3xl mx-auto pb-28 space-y-6">
@@ -915,546 +1472,65 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
-      {/* Admin-Only Sections (Hidden completely from guests and standard users) */}
+      {/* Admin-Only Navigation Buttons (Hidden completely from guests and standard users; open full pages, never popups) */}
       {isAdmin && (
-        <>
-          {/* Section 5: YouTube Authentication (Cookies & PO Token) */}
-          <section aria-labelledby="settings-youtube">
-            <h2
-              id="settings-youtube"
-              className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
+        <section aria-labelledby="settings-admin-panel">
+          <h2
+            id="settings-admin-panel"
+            className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+          >
+            {t.sectionAdmin}
+          </h2>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => openAdminPage('xray')}
+              className="w-full min-h-[64px] px-4 py-3 flex items-center justify-between gap-3 text-start hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
             >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>{t.sectionAdmin} · {t.sectionYouTube}</span>
-            </h2>
-            <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
-              <div className="px-4 py-3 border-b border-black/10 dark:border-white/10">
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.youtubeCookiesDesc}</p>
-              </div>
-              <div className="p-4 space-y-4">
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    {t.youtubeCookiesLabel}
-                  </label>
-                  <textarea
-                    dir="ltr"
-                    value={youtubeCookies}
-                    onChange={(e) => setYoutubeCookies(e.target.value)}
-                    placeholder={t.youtubeCookiesPlaceholder}
-                    rows={4}
-                    className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                  />
-                </div>
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
+                  <Shield className="w-4 h-4 text-black dark:text-white" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-black dark:text-white truncate">
+                    {t.sectionAdmin} · {t.sectionXray}
+                  </span>
+                  <span className="block text-xs text-zinc-500 dark:text-zinc-400 truncate mt-0.5">
+                    {xrayRunning
+                      ? `${t.xrayStatusConnected} · ${xrayProfiles.length} ${t.itemsCount}`
+                      : `${t.xrayNavDesc}`}
+                  </span>
+                </span>
+              </span>
+              <ChevronIcon className="w-4 h-4 text-zinc-400 shrink-0" />
+            </button>
 
-                <div className="h-px bg-black/10 dark:bg-white/10" />
+            <div className="h-px bg-black/10 dark:bg-white/10 ms-16" />
 
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    {t.youtubePoTokenLabel}
-                  </label>
-                  <div className="relative flex items-center">
-                    <input
-                      dir="ltr"
-                      type={showPoToken ? 'text' : 'password'}
-                      value={youtubePoToken}
-                      onChange={(e) => setYoutubePoToken(e.target.value)}
-                      placeholder={t.youtubePoTokenPlaceholder}
-                      className="w-full min-h-[44px] ps-3 pe-11 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPoToken((v) => !v)}
-                      aria-label={showPoToken ? 'Hide PO Token' : 'Show PO Token'}
-                      className="absolute end-1 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-zinc-500 hover:text-black dark:hover:text-white transition-colors"
-                    >
-                      {showPoToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.youtubePoTokenDesc}</p>
-                </div>
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={saveYouTubeAuth}
-                    disabled={youtubeLoading}
-                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    {youtubeLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                    <span>{t.youtubeSaveBtn}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={testYouTubeAuth}
-                    disabled={youtubeLoading}
-                    className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
-                  >
-                    {t.youtubeTestBtn}
-                  </button>
-                </div>
-
-                {youtubeMessage && (
-                  <div
-                    className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
-                      youtubeMessage.type === 'success'
-                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
-                        : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
-                    }`}
-                  >
-                    {youtubeMessage.type === 'success' ? (
-                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    )}
-                    <span className="break-words min-w-0">{youtubeMessage.text}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
-
-          {/* Section 6: Xray VPN Proxy */}
-          <section aria-labelledby="settings-xray">
-            <h2
-              id="settings-xray"
-              className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
+            <button
+              type="button"
+              onClick={() => openAdminPage('pot')}
+              className="w-full min-h-[64px] px-4 py-3 flex items-center justify-between gap-3 text-start hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
             >
-              <Shield className="w-3.5 h-3.5" />
-              <span>{t.sectionAdmin} · {t.sectionXray}</span>
-            </h2>
-            <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
-              <div className="px-4 py-3.5 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-black dark:text-white">
-                    {t.xrayEnableLabel}
-                  </div>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                    {t.xrayEnableDesc}
-                  </p>
-                  <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
-                    {!xrayBinaryInstalled
-                      ? t.xrayStatusNotInstalled
-                      : xrayRunning
-                        ? `${t.xrayStatusConnected} · SOCKS5 :${xrayPorts.socks} / HTTP :${xrayPorts.http}`
-                        : t.xrayStatusStopped}
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={xrayEnabled}
-                  aria-label={t.xrayEnableLabel}
-                  disabled={xrayLoading}
-                  onClick={() => {
-                    const next = !xrayEnabled;
-                    setXrayEnabled(next);
-                    if (xrayConfigInput.trim()) {
-                      void saveXrayConfig(next);
-                    }
-                  }}
-                  className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
-                    xrayEnabled
-                      ? 'bg-black text-white dark:bg-white dark:text-black'
-                      : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
-                  }`}
-                >
-                  <span className="text-xs font-bold">{xrayEnabled ? 'ON' : 'OFF'}</span>
-                </button>
-              </div>
-
-              <div className="p-4 space-y-4">
-                {!xrayBinaryInstalled && (
-                  <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
-                    <span className="text-xs text-zinc-600 dark:text-zinc-300">
-                      {t.xrayStatusNotInstalled}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={installXrayCore}
-                      disabled={xrayLoading}
-                      className="min-h-[40px] px-3.5 rounded-lg bg-black text-white dark:bg-white dark:text-black text-xs font-semibold whitespace-nowrap disabled:opacity-50"
-                    >
-                      {t.xrayInstallBtn}
-                    </button>
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    {t.xrayTestUrlLabel}
-                  </label>
-                  <input
-                    dir="ltr"
-                    type="url"
-                    value={xrayTestYoutubeUrl}
-                    onChange={(e) => setXrayTestYoutubeUrl(e.target.value)}
-                    placeholder="https://www.youtube.com/watch?v=jNQXAC9IVRw"
-                    className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                  />
-                  <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.xrayTestUrlDesc}</p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    {t.xrayConfigLabel}
-                  </label>
-                  <textarea
-                    dir="ltr"
-                    value={xrayConfigInput}
-                    onChange={(e) => setXrayConfigInput(e.target.value)}
-                    placeholder={t.xrayConfigPlaceholder}
-                    rows={4}
-                    className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                  />
-                  <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.xrayConfigDesc}</p>
-                </div>
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={importXrayProfiles}
-                    disabled={xrayLoading || !xrayConfigInput.trim()}
-                    className="min-h-[44px] px-4 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>{t.xrayImportBtn}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => saveXrayConfig()}
-                    disabled={xrayLoading}
-                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    {xrayLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                    <span>{t.xraySaveBtn}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => testXrayVpn()}
-                    disabled={xrayLoading || xrayTestingAll || !xrayConfigInput.trim()}
-                    className="min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
-                  >
-                    {t.xrayTestBtn}
-                  </button>
-                </div>
-
-                {/* Saved Server Configs List with per-config YouTube lowest-quality download test */}
-                <div className="pt-2 border-t border-black/10 dark:border-white/10 space-y-2.5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="text-xs font-semibold text-zinc-600 dark:text-zinc-300 tabular-nums">
-                      {t.xrayProfilesTitle} ({xrayProfiles.length})
-                    </div>
-                    {xrayProfiles.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={testAllXrayProfiles}
-                        disabled={xrayTestingAll || xrayLoading}
-                        className="min-h-[40px] px-3 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
-                      >
-                        {xrayTestingAll ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Play className="w-3.5 h-3.5" />
-                        )}
-                        <span>{t.xrayTestAllBtn}</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {xrayProfiles.length === 0 ? (
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400 py-2">
-                      {t.xrayProfilesEmpty}
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {xrayProfiles.map((profile) => {
-                        const isActive = profile.id === xrayActiveProfileId;
-                        const isTesting = xrayTestingProfileId === profile.id;
-                        return (
-                          <div
-                            key={profile.id}
-                            className={`p-3 rounded-xl border transition-colors ${
-                              isActive
-                                ? 'bg-white dark:bg-black border-black dark:border-white'
-                                : 'bg-white/70 dark:bg-black/60 border-black/10 dark:border-white/15'
-                            }`}
-                          >
-                            <div className="flex flex-wrap items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1">
-                                <div className="text-xs font-semibold text-black dark:text-white break-words">
-                                  {profile.name}
-                                </div>
-                                <div className="mt-0.5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 tabular-nums">
-                                  {profile.protocol.toUpperCase()} · {profile.address}
-                                  {isActive ? ` · ${t.xrayActiveLabel}` : ''}
-                                </div>
-                              </div>
-
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => testXrayVpn(profile.id)}
-                                  disabled={isTesting || xrayTestingAll}
-                                  className="min-h-[40px] px-3 rounded-lg border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-zinc-900 text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
-                                >
-                                  {isTesting ? (
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                  ) : (
-                                    <Play className="w-3.5 h-3.5" />
-                                  )}
-                                  <span>{t.xrayTestProfileBtn}</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => activateXrayProfile(profile.id)}
-                                  disabled={xrayLoading || isActive}
-                                  className={`min-h-[40px] px-3 rounded-lg text-xs font-semibold whitespace-nowrap disabled:opacity-50 ${
-                                    isActive
-                                      ? 'bg-black text-white dark:bg-white dark:text-black'
-                                      : 'border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white'
-                                  }`}
-                                >
-                                  {isActive ? t.xrayActiveLabel : t.xrayActivateBtn}
-                                </button>
-                                <button
-                                  type="button"
-                                  aria-label={t.xrayDeleteBtn}
-                                  onClick={() => deleteXrayProfile(profile.id)}
-                                  disabled={xrayLoading || isTesting}
-                                  className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg border border-black/10 dark:border-white/15 text-zinc-500 hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-
-                            {profile.lastTest && (
-                              <div
-                                className={`mt-2 pt-2 border-t border-black/5 dark:border-white/10 text-[11px] font-mono flex items-start gap-1.5 ${
-                                  profile.lastTest.ok
-                                    ? 'text-emerald-700 dark:text-emerald-300'
-                                    : 'text-red-700 dark:text-red-300'
-                                }`}
-                              >
-                                {profile.lastTest.ok ? (
-                                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                                ) : (
-                                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                                )}
-                                <span className="break-words min-w-0">
-                                  {profile.lastTest.ok
-                                    ? [
-                                        t.xrayTestedPass,
-                                        typeof profile.lastTest.downloadedBytes === 'number'
-                                          ? `${Math.max(1, Math.round(profile.lastTest.downloadedBytes / 1024))} KB`
-                                          : null,
-                                        typeof profile.lastTest.latencyMs === 'number'
-                                          ? `${(profile.lastTest.latencyMs / 1000).toFixed(1)}s`
-                                          : null,
-                                        profile.lastTest.exitIp ? `IP ${profile.lastTest.exitIp}` : null,
-                                        profile.lastTest.title || null,
-                                      ]
-                                        .filter(Boolean)
-                                        .join(' · ')
-                                    : `${t.xrayTestedFail}: ${profile.lastTest.error || ''}`}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                {xrayMessage && (
-                  <div
-                    className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
-                      xrayMessage.type === 'success'
-                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
-                        : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
-                    }`}
-                  >
-                    {xrayMessage.type === 'success' ? (
-                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    )}
-                    <span className="break-words min-w-0 font-mono">{xrayMessage.text}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
-
-          {/* Section 7: bgutil-ytdlp-pot-provider Server */}
-          <section aria-labelledby="settings-pot-provider">
-            <h2
-              id="settings-pot-provider"
-              className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
-            >
-              <Server className="w-3.5 h-3.5" />
-              <span>{t.sectionAdmin} · {t.sectionPotProvider}</span>
-            </h2>
-            <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
-              <div className="px-4 py-3.5 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-black dark:text-white">
-                    {t.potEnableLabel}
-                  </div>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                    {t.potEnableDesc}
-                  </p>
-                  <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
-                    {potMode === 'managed' && !potInstalled
-                      ? t.potStatusNotInstalled
-                      : potRunning
-                        ? `${t.potStatusRunning}${potVersion ? ` v${potVersion}` : ''} · ${potMode === 'managed' ? `127.0.0.1:${potPort}` : potBaseUrl}`
-                        : t.potStatusStopped}
-                    {!potPluginInstalled ? ` · ${t.potPluginMissing}` : ''}
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={potEnabled}
-                  aria-label={t.potEnableLabel}
-                  disabled={potLoading}
-                  onClick={() => {
-                    const next = !potEnabled;
-                    setPotEnabled(next);
-                    void savePotProviderConfig(next);
-                  }}
-                  className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
-                    potEnabled
-                      ? 'bg-black text-white dark:bg-white dark:text-black'
-                      : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
-                  }`}
-                >
-                  <span className="text-xs font-bold">{potEnabled ? 'ON' : 'OFF'}</span>
-                </button>
-              </div>
-
-              <div className="p-4 space-y-4">
-                {(potMode === 'managed' && (!potInstalled || !potPluginInstalled)) && (
-                  <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
-                    <span className="text-xs text-zinc-600 dark:text-zinc-300">
-                      {!potInstalled ? t.potStatusNotInstalled : t.potPluginMissing}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={installPotProvider}
-                      disabled={potLoading}
-                      className="min-h-[40px] px-3.5 rounded-lg bg-black text-white dark:bg-white dark:text-black text-xs font-semibold whitespace-nowrap disabled:opacity-50"
-                    >
-                      {t.potInstallBtn}
-                    </button>
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                    {t.potModeLabel}
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setPotMode('managed')}
-                      className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
-                        potMode === 'managed'
-                          ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
-                          : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
-                      }`}
-                    >
-                      {t.potModeManaged}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPotMode('external')}
-                      className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
-                        potMode === 'external'
-                          ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
-                          : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
-                      }`}
-                    >
-                      {t.potModeExternal}
-                    </button>
-                  </div>
-                </div>
-
-                {potMode === 'managed' ? (
-                  <div>
-                    <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                      {t.potPortLabel}
-                    </label>
-                    <input
-                      dir="ltr"
-                      type="number"
-                      min={1025}
-                      max={65534}
-                      value={potPort}
-                      onChange={(e) => setPotPort(Number(e.target.value) || 4416)}
-                      className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white tabular-nums focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                    />
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
-                      {t.potBaseUrlLabel}
-                    </label>
-                    <input
-                      dir="ltr"
-                      type="url"
-                      value={potBaseUrl}
-                      onChange={(e) => setPotBaseUrl(e.target.value)}
-                      placeholder="http://127.0.0.1:4416"
-                      className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                    />
-                  </div>
-                )}
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => savePotProviderConfig()}
-                    disabled={potLoading}
-                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    {potLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                    <span>{t.potSaveBtn}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={testPotProvider}
-                    disabled={potLoading}
-                    className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
-                  >
-                    {t.potTestBtn}
-                  </button>
-                </div>
-
-                {potMessage && (
-                  <div
-                    className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
-                      potMessage.type === 'success'
-                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
-                        : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
-                    }`}
-                  >
-                    {potMessage.type === 'success' ? (
-                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    )}
-                    <span className="break-words min-w-0 font-mono">{potMessage.text}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
-        </>
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
+                  <Server className="w-4 h-4 text-black dark:text-white" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-black dark:text-white truncate">
+                    {t.sectionAdmin} · {t.sectionPotProvider}
+                  </span>
+                  <span className="block text-xs text-zinc-500 dark:text-zinc-400 truncate mt-0.5">
+                    {potRunning
+                      ? `${t.potStatusRunning} · ${potPluginInstalled ? t.potPluginReady : t.potPluginMissing}`
+                      : t.potNavDesc}
+                  </span>
+                </span>
+              </span>
+              <ChevronIcon className="w-4 h-4 text-zinc-400 shrink-0" />
+            </button>
+          </div>
+        </section>
       )}
 
       {showIOSGuide && (

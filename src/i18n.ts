@@ -152,6 +152,13 @@ export interface TranslationDict {
   potInstalledMsg: string;
   potTestSuccess: string;
   potTestFailed: string;
+  // Admin sub-page navigation & moved cookies section
+  backToSettings: string;
+  potPluginReady: string;
+  youtubeCookiesSection: string;
+  youtubeSaveCookiesBtn: string;
+  xrayNavDesc: string;
+  potNavDesc: string;
 }
 
 export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
@@ -311,6 +318,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'bgutil server & yt-dlp plugin installed',
     potTestSuccess: 'PO Token minted',
     potTestFailed: 'PO Token test failed',
+    backToSettings: 'Back to Settings',
+    potPluginReady: 'yt-dlp plugin ready',
+    youtubeCookiesSection: 'YouTube Cookies',
+    youtubeSaveCookiesBtn: 'Save Cookies',
+    xrayNavDesc: 'Manage servers, proxy tunnel & YouTube tests',
+    potNavDesc: 'bgutil server, yt-dlp plugin & YouTube cookies',
   },
   fa: {
     dir: 'rtl',
@@ -468,6 +481,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'سرور bgutil و افزونه yt-dlp نصب شد',
     potTestSuccess: 'توکن PO با موفقیت تولید شد',
     potTestFailed: 'تست سرور PO Token ناموفق بود',
+    backToSettings: 'بازگشت به تنظیمات',
+    potPluginReady: 'افزونه yt-dlp آماده است',
+    youtubeCookiesSection: 'کوکی‌های یوتیوب',
+    youtubeSaveCookiesBtn: 'ذخیره کوکی‌ها',
+    xrayNavDesc: 'مدیریت سرورها، تونل وی‌پی‌ان و تست دانلود یوتیوب',
+    potNavDesc: 'سرور bgutil، افزونه yt-dlp و کوکی‌های یوتیوب',
   },
   ru: {
     dir: 'ltr',
@@ -625,6 +644,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'Сервер bgutil и плагин yt-dlp установлены',
     potTestSuccess: 'PO Token получен',
     potTestFailed: 'Ошибка теста PO Token',
+    backToSettings: 'Назад к настройкам',
+    potPluginReady: 'Плагин yt-dlp готов',
+    youtubeCookiesSection: 'Cookies YouTube',
+    youtubeSaveCookiesBtn: 'Сохранить Cookies',
+    xrayNavDesc: 'Серверы, прокси-туннель и тесты на YouTube',
+    potNavDesc: 'Сервер bgutil, плагин yt-dlp и cookies YouTube',
   },
   zh: {
     dir: 'ltr',
@@ -782,5 +807,11 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'bgutil 服务器与 yt-dlp 插件安装完成',
     potTestSuccess: 'PO Token 生成成功',
     potTestFailed: 'PO Token 测试失败',
+    backToSettings: '返回设置',
+    potPluginReady: 'yt-dlp 插件已就绪',
+    youtubeCookiesSection: 'YouTube Cookies',
+    youtubeSaveCookiesBtn: '保存 Cookies',
+    xrayNavDesc: '管理节点配置、代理隧道与 YouTube 下载测试',
+    potNavDesc: 'bgutil 服务、yt-dlp 插件与 YouTube Cookies',
   },
 };
