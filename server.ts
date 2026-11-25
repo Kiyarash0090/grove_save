@@ -81,6 +81,19 @@ function cleanupExpiredJobs(): void {
 
 setInterval(cleanupExpiredJobs, 5 * 60 * 1000).unref();
 
+function hashPassword(password: string, salt?: string): { hash: string; salt: string } {
+  const usedSalt = salt || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, usedSalt, 64).toString('hex');
+  return { hash: derived, salt: usedSalt };
+}
+
+function verifyPassword(password: string, expectedHash: string, salt: string): boolean {
+  const actual = crypto.scryptSync(password, salt, 64);
+  const expected = Buffer.from(expectedHash, 'hex');
+  if (actual.length !== expected.length) return false;
+  return crypto.timingSafeEqual(actual, expected);
+}
+
 function loadUsers(): Map<string, StoredUser> {
   try {
     ensureDataDir();
@@ -107,17 +120,29 @@ function saveUsers(map: Map<string, StoredUser>): void {
 
 const usersByEmail = loadUsers();
 
-function hashPassword(password: string, salt?: string): { hash: string; salt: string } {
-  const usedSalt = salt || crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, usedSalt, 64).toString('hex');
-  return { hash: derived, salt: usedSalt };
-}
+// Sync admin account from environment variables if configured
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.ADMIN_USERNAME;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-function verifyPassword(password: string, expectedHash: string, salt: string): boolean {
-  const actual = crypto.scryptSync(password, salt, 64);
-  const expected = Buffer.from(expectedHash, 'hex');
-  if (actual.length !== expected.length) return false;
-  return crypto.timingSafeEqual(actual, expected);
+if (ADMIN_EMAIL && ADMIN_PASSWORD) {
+  const adminEmailClean = ADMIN_EMAIL.trim().toLowerCase();
+  const { hash, salt } = hashPassword(ADMIN_PASSWORD);
+  const existing = usersByEmail.get(adminEmailClean);
+  const adminUser: StoredUser = {
+    id: existing?.id || crypto.randomUUID(),
+    email: adminEmailClean,
+    displayName: existing?.displayName || 'Administrator',
+    passwordHash: hash,
+    passwordSalt: salt,
+    provider: 'email',
+    preferences: existing?.preferences || {
+      theme: 'dark',
+      language: 'en',
+      defaultQuality: '1080p',
+    },
+  };
+  usersByEmail.set(adminEmailClean, adminUser);
+  saveUsers(usersByEmail);
 }
 
 function signToken(userId: string, email: string): string {
