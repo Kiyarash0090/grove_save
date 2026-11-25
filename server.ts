@@ -53,22 +53,50 @@ interface StoredUser {
   };
 }
 
-const DATA_DIR = path.resolve(
+let DATA_DIR = path.resolve(
   process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'data')
 );
-const CACHE_DIR = path.resolve(DATA_DIR, 'cache');
-const BIN_DIR = path.resolve(DATA_DIR, 'bin');
-const YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
-const USERS_FILE = path.resolve(DATA_DIR, 'users.json');
-const ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
-const YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
-const XRAY_CONFIG_FILE = path.resolve(DATA_DIR, 'xray-runtime.json');
-const BACKUP_DIR = path.resolve(DATA_DIR, 'backups');
+
+function resolveWorkingPaths(): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.accessSync(DATA_DIR, fs.constants.W_OK);
+  } catch (err) {
+    const fallback = path.join(os.tmpdir(), 'grove_data');
+    console.warn(`[server] Warning: DATA_DIR (${DATA_DIR}) is not writable (${err instanceof Error ? err.message : err}). Falling back to ${fallback}`);
+    DATA_DIR = fallback;
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+  }
+}
+
+resolveWorkingPaths();
+
+let CACHE_DIR = path.resolve(DATA_DIR, 'cache');
+let BIN_DIR = path.resolve(DATA_DIR, 'bin');
+let YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
+let USERS_FILE = path.resolve(DATA_DIR, 'users.json');
+let ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
+let YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
+let XRAY_CONFIG_FILE = path.resolve(DATA_DIR, 'xray-runtime.json');
+let BACKUP_DIR = path.resolve(DATA_DIR, 'backups');
+let DB_FILE = path.resolve(DATA_DIR, 'grove.db');
 
 function ensureDataDir(): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
+  resolveWorkingPaths();
+  CACHE_DIR = path.resolve(DATA_DIR, 'cache');
+  BIN_DIR = path.resolve(DATA_DIR, 'bin');
+  YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
+  USERS_FILE = path.resolve(DATA_DIR, 'users.json');
+  ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
+  YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
+  XRAY_CONFIG_FILE = path.resolve(DATA_DIR, 'xray-runtime.json');
+  BACKUP_DIR = path.resolve(DATA_DIR, 'backups');
+  DB_FILE = path.resolve(DATA_DIR, 'grove.db');
+
   if (!fs.existsSync(CACHE_DIR)) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
   }
@@ -154,7 +182,7 @@ function verifyPassword(password: string, expectedHash: string, salt: string): b
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.ADMIN_USERNAME;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const ADMIN_EMAIL_NORMALIZED = ADMIN_EMAIL ? ADMIN_EMAIL.trim().toLowerCase() : '';
-const DB_FILE = path.resolve(DATA_DIR, 'grove.db');
+DB_FILE = path.resolve(DATA_DIR, 'grove.db');
 
 interface UserHistoryItem {
   id: string;
