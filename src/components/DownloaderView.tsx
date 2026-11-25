@@ -2,16 +2,35 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowDownToLine,
+  Captions,
   Check,
+  ChevronDown,
   ClipboardPaste,
   CloudDownload,
   Film,
   Loader2,
   Music,
+  Play,
   Search,
+  Volume2,
   X,
 } from 'lucide-react';
 import type { TranslationDict } from '../i18n';
+
+export interface MediaAudioTrack {
+  formatId: string;
+  language: string;
+  label: string;
+  ext: string;
+  abr: number | null;
+  isDefault: boolean;
+}
+
+export interface MediaSubtitleTrack {
+  lang: string;
+  label: string;
+  isAuto: boolean;
+}
 
 export interface MediaMetadata {
   url: string;
@@ -22,6 +41,9 @@ export interface MediaMetadata {
   providerGlow: 'red' | 'default';
   qualities: string[];
   engineMode?: 'live' | 'preview';
+  audioTracks?: MediaAudioTrack[];
+  manualSubtitles?: MediaSubtitleTrack[];
+  autoSubtitles?: MediaSubtitleTrack[];
 }
 
 export interface SavedItem {
@@ -112,6 +134,16 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   const [savedConfirmed, setSavedConfirmed] = useState(false);
 
   const [imgFailed, setImgFailed] = useState(false);
+  const [showPlayer, setShowPlayer] = useState(false);
+  const [audioOnlyMode, setAudioOnlyMode] = useState(false);
+  const [selectedAudioFormatId, setSelectedAudioFormatId] = useState<string>('');
+  const [selectedSubtitle, setSelectedSubtitle] = useState<MediaSubtitleTrack | null>(null);
+  const [subFilter, setSubFilter] = useState('');
+  const [showAutoSubs, setShowAutoSubs] = useState(false);
+  const [playerError, setPlayerError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const resumeTimeRef = useRef<number>(0);
+
   const lastInspectedRef = useRef<string>('');
   const pollTimerRef = useRef<number | null>(null);
 
@@ -122,7 +154,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   }, [isRedGlow, onYouTubeGlowChange]);
 
   useEffect(() => {
-    setSelectedQuality(defaultQuality);
+    setSelectedQuality(defaultQuality === 'audio' ? '1080p' : defaultQuality);
   }, [defaultQuality]);
 
   useEffect(() => {
@@ -168,6 +200,14 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     setReadyJob(null);
     setSavedConfirmed(false);
     setImgFailed(false);
+    setShowPlayer(false);
+    setAudioOnlyMode(false);
+    setPlayerError(null);
+    setSelectedAudioFormatId('');
+    setSelectedSubtitle(null);
+    setSubFilter('');
+    setShowAutoSubs(false);
+    resumeTimeRef.current = 0;
 
     try {
       const res = await fetch(`${apiBase}/api/media/inspect`, {
@@ -180,6 +220,17 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
         setErrorMsg(data.error || t.inspectFailed);
         setMedia(null);
       } else {
+        const audioTracks: MediaAudioTrack[] = Array.isArray(data.audioTracks) ? data.audioTracks : [];
+        const manualSubtitles: MediaSubtitleTrack[] = Array.isArray(data.manualSubtitles)
+          ? data.manualSubtitles
+          : [];
+        const autoSubtitles: MediaSubtitleTrack[] = Array.isArray(data.autoSubtitles) ? data.autoSubtitles : [];
+        const defaultTrack = audioTracks.find((tr) => tr.isDefault) || audioTracks[0];
+        setSelectedAudioFormatId(defaultTrack ? defaultTrack.formatId : '');
+        setShowAutoSubs(manualSubtitles.length === 0 && autoSubtitles.length > 0);
+        const filteredQualities = Array.isArray(data.qualities)
+          ? (data.qualities as string[]).filter((q) => q !== 'audio')
+          : ['2160p', '1080p', '720p', '480p', '360p'];
         setMedia({
           url: normalized,
           title: data.title,
@@ -187,10 +238,11 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
           durationSeconds: data.durationSeconds,
           thumbnail: data.thumbnail,
           providerGlow: data.providerGlow === 'red' ? 'red' : 'default',
-          qualities: Array.isArray(data.qualities)
-            ? data.qualities
-            : ['2160p', '1080p', '720p', '480p', '360p', 'audio'],
+          qualities: filteredQualities.length ? filteredQualities : ['1080p', '720p', '480p', '360p'],
           engineMode: data.engineMode,
+          audioTracks,
+          manualSubtitles,
+          autoSubtitles,
         });
       }
     } catch {
@@ -245,6 +297,11 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   };
 
   const handleQualitySelect = (q: string) => {
+    if (videoRef.current && showPlayer) {
+      resumeTimeRef.current = videoRef.current.currentTime || 0;
+    }
+    setPlayerError(null);
+    setAudioOnlyMode(false);
     setSelectedQuality(q);
     if (readyJob && readyJob.quality !== q) {
       setJobStage('idle');
@@ -253,12 +310,35 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     }
   };
 
+  const handleAudioTrackSelect = (formatId: string) => {
+    if (videoRef.current && showPlayer) {
+      resumeTimeRef.current = videoRef.current.currentTime || 0;
+    }
+    setPlayerError(null);
+    setSelectedAudioFormatId(formatId);
+    if (readyJob) {
+      setJobStage('idle');
+      setReadyJob(null);
+      setSavedConfirmed(false);
+    }
+  };
+
+  useEffect(() => {
+    const vid = videoRef.current;
+    if (!vid || !showPlayer) return;
+    const tracks = vid.textTracks;
+    for (let i = 0; i < tracks.length; i++) {
+      tracks[i].mode = selectedSubtitle ? 'showing' : 'disabled';
+    }
+  }, [selectedSubtitle, showPlayer]);
+
   const startAppDownload = async (
     targetUrl: string,
     title: string,
     quality: string,
     thumb: string | null,
-    author: string
+    author: string,
+    audioFormatId?: string
   ) => {
     stopPolling();
     setJobStage('downloading');
@@ -272,7 +352,12 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       const res = await fetch(`${apiBase}/api/media/prepare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl, quality, title }),
+        body: JSON.stringify({
+          url: targetUrl,
+          quality,
+          title,
+          ...(audioFormatId ? { audioFormatId } : {}),
+        }),
       });
       const data = (await res.json()) as { jobId?: string; error?: string };
       if (!res.ok || !data.jobId) {
@@ -371,8 +456,10 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
         // Re-prepare below if expired
       }
     }
+    const nextQuality = item.quality === 'audio' ? '1080p' : item.quality;
     setUrlInput(item.url);
-    setSelectedQuality(item.quality);
+    setSelectedQuality(nextQuality);
+    setAudioOnlyMode(item.quality === 'audio');
     startAppDownload(item.url, item.title, item.quality, item.thumbnail, item.author);
   };
 
@@ -381,7 +468,10 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     inspectUrl(urlInput);
   };
 
-  const availableQualities = media?.qualities || ['2160p', '1080p', '720p', '480p', '360p', 'audio'];
+  const availableQualities = (media?.qualities || ['2160p', '1080p', '720p', '480p', '360p']).filter(
+    (q) => q !== 'audio'
+  );
+  const effectiveDownloadQuality = audioOnlyMode ? 'audio' : selectedQuality;
   const isBusy = jobStage === 'downloading' || jobStage === 'processing';
 
   return (
@@ -507,7 +597,15 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
               className="rounded-2xl p-4 sm:p-5 bg-zinc-50 dark:bg-[#0A0A0A] border border-black/15 dark:border-white/20 space-y-5"
             >
               <div className="flex items-start gap-4">
-                <div className="w-28 sm:w-32 aspect-video rounded-xl overflow-hidden bg-zinc-200 dark:bg-zinc-900 border border-black/10 dark:border-white/10 shrink-0 flex items-center justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPlayerError(null);
+                    setShowPlayer((v) => !v);
+                  }}
+                  aria-label={showPlayer ? t.hidePlayer : t.watchOnline}
+                  className="group relative w-28 sm:w-32 aspect-video rounded-xl overflow-hidden bg-zinc-200 dark:bg-zinc-900 border border-black/10 dark:border-white/10 shrink-0 flex items-center justify-center"
+                >
                   {media.thumbnail && !imgFailed ? (
                     <img
                       src={media.thumbnail}
@@ -521,37 +619,111 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       <Film className="w-6 h-6" />
                     </div>
                   )}
-                </div>
+                  <span className="absolute inset-0 bg-black/35 group-hover:bg-black/50 transition flex items-center justify-center">
+                    <span className="w-9 h-9 rounded-full bg-white/90 text-black flex items-center justify-center shadow">
+                      <Play className="w-4 h-4 fill-current ms-0.5" />
+                    </span>
+                  </span>
+                </button>
 
-                <div className="min-w-0 flex-1 space-y-1">
-                  <h2 className="text-sm sm:text-base font-bold text-black dark:text-white line-clamp-2 leading-snug">
-                    {media.title}
-                  </h2>
-                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                    <span className="truncate max-w-[180px]">{media.author}</span>
-                    {formatDuration(media.durationSeconds) && (
-                      <>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-mono tabular-nums">
-                          {formatDuration(media.durationSeconds)}
-                        </span>
-                      </>
-                    )}
-                    <span aria-hidden="true">·</span>
-                    <span>{jobStage === 'ready' ? t.readyInApp : t.readyToSave}</span>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div>
+                    <h2 className="text-sm sm:text-base font-bold text-black dark:text-white line-clamp-2 leading-snug">
+                      {media.title}
+                    </h2>
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                      <span className="truncate max-w-[180px]">{media.author}</span>
+                      {formatDuration(media.durationSeconds) && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono tabular-nums">
+                            {formatDuration(media.durationSeconds)}
+                          </span>
+                        </>
+                      )}
+                      <span aria-hidden="true">·</span>
+                      <span>{jobStage === 'ready' ? t.readyInApp : t.readyToSave}</span>
+                    </div>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlayerError(null);
+                      setShowPlayer((v) => !v);
+                    }}
+                    className={`min-h-[40px] px-3.5 rounded-xl border text-xs font-semibold inline-flex items-center gap-2 transition active:scale-[0.98] ${
+                      showPlayer
+                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                        : 'bg-white dark:bg-black text-black dark:text-white border-black/15 dark:border-white/20 hover:border-black/40 dark:hover:border-white/40'
+                    }`}
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    <span>{showPlayer ? t.hidePlayer : t.watchOnline}</span>
+                  </button>
                 </div>
               </div>
 
-              {/* Quality Selection */}
+              {/* Inline Online Video Player */}
+              {showPlayer && (
+                <div className="rounded-xl overflow-hidden bg-black border border-black/15 dark:border-white/20">
+                  <video
+                    ref={videoRef}
+                    key={`${media.url}|${selectedQuality}|${selectedAudioFormatId}`}
+                    src={`${apiBase}/api/media/stream?url=${encodeURIComponent(media.url)}&quality=${encodeURIComponent(
+                      selectedQuality === 'audio' ? '360p' : selectedQuality
+                    )}${selectedAudioFormatId ? `&audioFormatId=${encodeURIComponent(selectedAudioFormatId)}` : ''}`}
+                    poster={media.thumbnail || undefined}
+                    controls
+                    playsInline
+                    autoPlay
+                    crossOrigin="anonymous"
+                    onLoadedMetadata={() => {
+                      if (videoRef.current && resumeTimeRef.current > 0) {
+                        try {
+                          videoRef.current.currentTime = resumeTimeRef.current;
+                        } catch {}
+                        resumeTimeRef.current = 0;
+                      }
+                      if (videoRef.current && selectedSubtitle && videoRef.current.textTracks[0]) {
+                        videoRef.current.textTracks[0].mode = 'showing';
+                      }
+                    }}
+                    onError={() => setPlayerError(t.downloadFailed)}
+                    className="w-full aspect-video bg-black"
+                  >
+                    {selectedSubtitle && (
+                      <track
+                        key={`${selectedSubtitle.lang}-${selectedSubtitle.isAuto ? 'a' : 'm'}`}
+                        kind="subtitles"
+                        srcLang={selectedSubtitle.lang}
+                        label={selectedSubtitle.label}
+                        src={`${apiBase}/api/media/subtitle?url=${encodeURIComponent(
+                          media.url
+                        )}&lang=${encodeURIComponent(selectedSubtitle.lang)}&auto=${
+                          selectedSubtitle.isAuto ? '1' : '0'
+                        }`}
+                        default
+                      />
+                    )}
+                  </video>
+                  {playerError && (
+                    <div className="px-3 py-2 text-xs text-red-400 bg-red-950/50 border-t border-red-900/50">
+                      {playerError}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Quality Selection (Video Resolutions Only) */}
               <div className="space-y-2.5">
                 <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
                   {t.selectQuality}
                 </div>
-                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                   {availableQualities.map((q) => {
                     const meta = t.qualityLabels[q] || { label: q, sub: '' };
-                    const active = selectedQuality === q;
+                    const active = !audioOnlyMode && selectedQuality === q;
                     return (
                       <button
                         key={q}
@@ -564,8 +736,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                             : 'bg-white dark:bg-black text-black dark:text-white border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/40'
                         }`}
                       >
-                        <span className="text-xs font-bold font-mono tabular-nums whitespace-nowrap flex items-center gap-1">
-                          {q === 'audio' && <Music className="w-3 h-3" />}
+                        <span className="text-xs font-bold font-mono tabular-nums whitespace-nowrap">
                           {meta.label}
                         </span>
                         <span
@@ -580,6 +751,272 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                   })}
                 </div>
               </div>
+
+              {/* Sectioned Audio Tracks & Audio-Only (MP3) Mode */}
+              <div className="space-y-2.5 pt-1 border-t border-black/10 dark:border-white/10">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                  <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
+                    <Volume2 className="w-3.5 h-3.5" />
+                    <span>{t.audioTracksSection}</span>
+                    {media.audioTracks && media.audioTracks.length > 0 && (
+                      <span className="text-[11px] font-mono tabular-nums text-zinc-400">
+                        ({media.audioTracks.length})
+                      </span>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={() => {
+                      setAudioOnlyMode((prev) => !prev);
+                      if (readyJob) {
+                        setJobStage('idle');
+                        setReadyJob(null);
+                        setSavedConfirmed(false);
+                      }
+                    }}
+                    className={`min-h-[38px] px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition active:scale-[0.98] disabled:opacity-60 ${
+                      audioOnlyMode
+                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                        : 'bg-white dark:bg-black text-black dark:text-white border-black/15 dark:border-white/20 hover:border-black/40 dark:hover:border-white/40'
+                    }`}
+                  >
+                    <Music className="w-3.5 h-3.5" />
+                    <span>{t.audioOnlyLabel}</span>
+                  </button>
+                </div>
+
+                {audioOnlyMode && (
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {t.audioOnlyDesc}
+                  </p>
+                )}
+
+                {media.audioTracks && media.audioTracks.length > 0 && (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {media.audioTracks.map((track) => {
+                      const active = selectedAudioFormatId === track.formatId;
+                      return (
+                        <button
+                          key={track.formatId}
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleAudioTrackSelect(track.formatId)}
+                          className={`min-h-[44px] px-3 py-2 rounded-xl border text-start flex flex-col justify-center gap-0.5 transition active:scale-[0.98] disabled:opacity-60 ${
+                            active
+                              ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                              : 'bg-white dark:bg-black text-black dark:text-white border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/40'
+                          }`}
+                        >
+                          <span className="text-xs font-semibold truncate w-full">{track.label}</span>
+                          <span
+                            className={`text-[10px] font-mono tabular-nums ${
+                              active ? 'opacity-80' : 'text-zinc-500 dark:text-zinc-400'
+                            }`}
+                          >
+                            {track.language.toUpperCase()}
+                            {track.abr ? ` · ${track.abr}k` : ` · ${track.ext.toUpperCase()}`}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Sectioned Subtitles (Manual Subtitles & Auto-Generated Captions) */}
+              {((media.manualSubtitles && media.manualSubtitles.length > 0) ||
+                (media.autoSubtitles && media.autoSubtitles.length > 0)) && (() => {
+                const manualList = media.manualSubtitles || [];
+                const autoList = media.autoSubtitles || [];
+                const qFilter = subFilter.trim().toLowerCase();
+                const filteredManual = qFilter
+                  ? manualList.filter(
+                      (s) => s.label.toLowerCase().includes(qFilter) || s.lang.toLowerCase().includes(qFilter)
+                    )
+                  : manualList;
+                const filteredAuto = qFilter
+                  ? autoList.filter(
+                      (s) => s.label.toLowerCase().includes(qFilter) || s.lang.toLowerCase().includes(qFilter)
+                    )
+                  : autoList;
+                const totalSubs = manualList.length + autoList.length;
+
+                return (
+                  <div className="space-y-3 pt-1 border-t border-black/10 dark:border-white/10">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                      <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-1.5">
+                        <Captions className="w-3.5 h-3.5" />
+                        <span>
+                          {t.subtitlesSection} ({totalSubs})
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSubtitle(null)}
+                        className={`min-h-[36px] px-3 rounded-lg border text-xs font-semibold transition ${
+                          selectedSubtitle === null
+                            ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                            : 'bg-white dark:bg-black text-zinc-600 dark:text-zinc-300 border-black/10 dark:border-white/15'
+                        }`}
+                      >
+                        {t.subtitlesOff}
+                      </button>
+                    </div>
+
+                    {totalSubs > 8 && (
+                      <input
+                        type="search"
+                        value={subFilter}
+                        onChange={(e) => setSubFilter(e.target.value)}
+                        placeholder={t.filterLanguagesPlaceholder}
+                        className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 text-xs text-black dark:text-white placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                      />
+                    )}
+
+                    {/* Manual / Official Subtitles Sub-section */}
+                    {manualList.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                          {t.manualSubtitlesLabel} ({filteredManual.length})
+                        </div>
+                        {filteredManual.length === 0 ? (
+                          <p className="text-xs text-zinc-400">{t.noSubtitlesFound}</p>
+                        ) : (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {filteredManual.map((sub) => {
+                              const active =
+                                selectedSubtitle?.lang === sub.lang && !selectedSubtitle.isAuto;
+                              const subDownloadUrl = `${apiBase}/api/media/subtitle?url=${encodeURIComponent(
+                                media.url
+                              )}&lang=${encodeURIComponent(sub.lang)}&auto=0&download=1`;
+                              return (
+                                <div
+                                  key={`m-${sub.lang}`}
+                                  className={`flex items-center rounded-xl border overflow-hidden transition ${
+                                    active
+                                      ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                                      : 'bg-white dark:bg-black text-black dark:text-white border-black/10 dark:border-white/15'
+                                  }`}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedSubtitle(sub);
+                                      if (!showPlayer) setShowPlayer(true);
+                                    }}
+                                    className="flex-1 min-w-0 min-h-[44px] px-3 text-start flex items-center justify-between gap-2"
+                                  >
+                                    <span className="text-xs font-medium truncate">{sub.label}</span>
+                                    <span
+                                      className={`text-[10px] font-mono uppercase shrink-0 ${
+                                        active ? 'opacity-80' : 'text-zinc-400'
+                                      }`}
+                                    >
+                                      {sub.lang}
+                                    </span>
+                                  </button>
+                                  <a
+                                    href={subDownloadUrl}
+                                    download={`subtitle_${sub.lang}.vtt`}
+                                    aria-label={`${t.downloadSubtitle} (${sub.label})`}
+                                    title={t.downloadSubtitle}
+                                    className={`min-h-[44px] min-w-[44px] flex items-center justify-center border-s transition ${
+                                      active
+                                        ? 'border-white/20 dark:border-black/20 hover:bg-white/10 dark:hover:bg-black/10'
+                                        : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/10'
+                                    }`}
+                                  >
+                                    <ArrowDownToLine className="w-3.5 h-3.5" />
+                                  </a>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Auto-Generated Captions Sub-section */}
+                    {autoList.length > 0 && (
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowAutoSubs((v) => !v)}
+                          className="w-full min-h-[40px] px-2 rounded-lg flex items-center justify-between text-[11px] font-semibold text-zinc-500 dark:text-zinc-400 hover:bg-black/5 dark:hover:bg-white/5 transition"
+                        >
+                          <span>
+                            {t.autoSubtitlesLabel} ({filteredAuto.length})
+                          </span>
+                          <ChevronDown
+                            className={`w-4 h-4 transition-transform ${
+                              showAutoSubs || qFilter.length > 0 ? 'rotate-180' : ''
+                            }`}
+                          />
+                        </button>
+
+                        {(showAutoSubs || qFilter.length > 0) && (
+                          filteredAuto.length === 0 ? (
+                            <p className="text-xs text-zinc-400 px-2">{t.noSubtitlesFound}</p>
+                          ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto pe-1">
+                              {filteredAuto.map((sub) => {
+                                const active =
+                                  selectedSubtitle?.lang === sub.lang && selectedSubtitle.isAuto;
+                                const subDownloadUrl = `${apiBase}/api/media/subtitle?url=${encodeURIComponent(
+                                  media.url
+                                )}&lang=${encodeURIComponent(sub.lang)}&auto=1&download=1`;
+                                return (
+                                  <div
+                                    key={`a-${sub.lang}`}
+                                    className={`flex items-center rounded-xl border overflow-hidden transition ${
+                                      active
+                                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                                        : 'bg-white dark:bg-black text-black dark:text-white border-black/10 dark:border-white/15'
+                                    }`}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedSubtitle(sub);
+                                        if (!showPlayer) setShowPlayer(true);
+                                      }}
+                                      className="flex-1 min-w-0 min-h-[44px] px-3 text-start flex items-center justify-between gap-2"
+                                    >
+                                      <span className="text-xs font-medium truncate">{sub.label}</span>
+                                      <span
+                                        className={`text-[10px] font-mono uppercase shrink-0 ${
+                                          active ? 'opacity-80' : 'text-zinc-400'
+                                        }`}
+                                      >
+                                        {sub.lang}
+                                      </span>
+                                    </button>
+                                    <a
+                                      href={subDownloadUrl}
+                                      download={`subtitle_${sub.lang}.vtt`}
+                                      aria-label={`${t.downloadSubtitle} (${sub.label})`}
+                                      title={t.downloadSubtitle}
+                                      className={`min-h-[44px] min-w-[44px] flex items-center justify-center border-s transition ${
+                                        active
+                                          ? 'border-white/20 dark:border-black/20 hover:bg-white/10 dark:hover:bg-black/10'
+                                          : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/10'
+                                      }`}
+                                    >
+                                      <ArrowDownToLine className="w-3.5 h-3.5" />
+                                    </a>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Step 1 -> Step 2 Action Area */}
               <div className="space-y-2.5">
@@ -611,9 +1048,10 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       startAppDownload(
                         media.url,
                         media.title,
-                        selectedQuality,
+                        effectiveDownloadQuality,
                         media.thumbnail,
-                        media.author
+                        media.author,
+                        selectedAudioFormatId || undefined
                       )
                     }
                     className={`w-full min-h-[54px] px-6 rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2.5 transition active:scale-[0.98] disabled:opacity-80 ${

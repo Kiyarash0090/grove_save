@@ -3,8 +3,8 @@
 
 @layer base {
   :root {
-    --font-display: 'Anton', 'Vazirmatn', sans-serif;
-    --font-sans: 'Plus Jakarta Sans', 'Vazirmatn', system-ui, -apple-system, sans-serif;
+    --font-display: 'Syne', 'Vazirmatn', sans-serif;
+    --font-sans: 'Outfit', 'Vazirmatn', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
   }
 
@@ -58,27 +58,8 @@
 
 .grove-wordmark {
   font-family: var(--font-display);
-  letter-spacing: 0.03em;
-  text-transform: lowercase;
-  line-height: 0.95;
-  text-shadow:
-    -2px -2px 0 #000000,
-     2px -2px 0 #000000,
-    -2px  2px 0 #000000,
-     2px  2px 0 #000000,
-     0px  4px 0 #000000,
-     0px  0px 18px rgba(255, 255, 255, 0.35);
-}
-
-html:not(.dark) .grove-wordmark {
-  color: #ffffff;
-  text-shadow:
-    -2px -2px 0 #000000,
-     2px -2px 0 #000000,
-    -2px  2px 0 #000000,
-     2px  2px 0 #000000,
-     0px  4px 0 #000000,
-     0px  6px 14px rgba(0, 0, 0, 0.22);
+  letter-spacing: -0.03em;
+  line-height: 1;
 }
 
 .neon-white-box {

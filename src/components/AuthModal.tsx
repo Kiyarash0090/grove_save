@@ -8,6 +8,7 @@ export interface AuthUser {
   email: string;
   displayName: string;
   provider: 'email' | 'google';
+  role?: 'user' | 'admin';
   preferences?: {
     theme?: 'dark' | 'light';
     language?: 'en' | 'fa' | 'ru' | 'zh';
@@ -93,7 +94,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           try {
             const res = await fetch(`${apiBase}/api/auth/google`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'GroveSave',
+              },
               body: JSON.stringify({ credential: resp.credential }),
             });
             const data = await res.json();
@@ -145,7 +150,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const endpoint = mode === 'login' ? '/api/auth/login' : '/api/auth/register';
       const res = await fetch(`${apiBase}${endpoint}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'GroveSave',
+        },
         body: JSON.stringify({
           email: trimmedEmail,
           password,

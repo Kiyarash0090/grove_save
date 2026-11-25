@@ -23,6 +23,18 @@ export interface TranslationDict {
   downloading: string;
   savedToDevice: string;
   readyToSave: string;
+  watchOnline: string;
+  hidePlayer: string;
+  audioTracksSection: string;
+  audioOnlyLabel: string;
+  audioOnlyDesc: string;
+  subtitlesSection: string;
+  manualSubtitlesLabel: string;
+  autoSubtitlesLabel: string;
+  subtitlesOff: string;
+  filterLanguagesPlaceholder: string;
+  downloadSubtitle: string;
+  noSubtitlesFound: string;
   recentSaves: string;
   emptySavesTitle: string;
   emptySavesDesc: string;
@@ -90,6 +102,56 @@ export interface TranslationDict {
   youtubeTestFailed: string;
   adminOnly: string;
   sectionAdmin: string;
+  // Xray VPN Settings
+  sectionXray: string;
+  xrayEnableLabel: string;
+  xrayEnableDesc: string;
+  xrayConfigLabel: string;
+  xrayConfigPlaceholder: string;
+  xrayConfigDesc: string;
+  xraySaveBtn: string;
+  xrayTestBtn: string;
+  xrayInstallBtn: string;
+  xrayStatusConnected: string;
+  xrayStatusStopped: string;
+  xrayStatusNotInstalled: string;
+  xraySavedMsg: string;
+  xrayInstalledMsg: string;
+  xrayTestSuccess: string;
+  xrayTestFailed: string;
+  xrayTestUrlLabel: string;
+  xrayTestUrlDesc: string;
+  xrayImportBtn: string;
+  xrayImportMsg: string;
+  xrayProfilesTitle: string;
+  xrayTestAllBtn: string;
+  xrayTestProfileBtn: string;
+  xrayActivateBtn: string;
+  xrayActiveLabel: string;
+  xrayDeleteBtn: string;
+  xrayProfilesEmpty: string;
+  xrayTestedPass: string;
+  xrayTestedFail: string;
+  // bgutil PO Token Server Settings
+  sectionPotProvider: string;
+  potEnableLabel: string;
+  potEnableDesc: string;
+  potModeLabel: string;
+  potModeManaged: string;
+  potModeExternal: string;
+  potBaseUrlLabel: string;
+  potPortLabel: string;
+  potStatusRunning: string;
+  potStatusStopped: string;
+  potStatusNotInstalled: string;
+  potPluginMissing: string;
+  potInstallBtn: string;
+  potSaveBtn: string;
+  potTestBtn: string;
+  potSavedMsg: string;
+  potInstalledMsg: string;
+  potTestSuccess: string;
+  potTestFailed: string;
 }
 
 export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
@@ -122,6 +184,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     downloading: 'Saving file...',
     savedToDevice: 'Saved to device storage',
     readyToSave: 'Ready to save',
+    watchOnline: 'Watch Online',
+    hidePlayer: 'Hide Player',
+    audioTracksSection: 'Audio Tracks',
+    audioOnlyLabel: 'Audio Only (MP3)',
+    audioOnlyDesc: 'Save MP3 audio from selected track',
+    subtitlesSection: 'Subtitles & Captions',
+    manualSubtitlesLabel: 'Subtitles',
+    autoSubtitlesLabel: 'Auto-generated Captions',
+    subtitlesOff: 'Off',
+    filterLanguagesPlaceholder: 'Filter languages...',
+    downloadSubtitle: 'Download VTT',
+    noSubtitlesFound: 'No matching languages',
     recentSaves: 'Saved History',
     emptySavesTitle: 'No saved files yet',
     emptySavesDesc: 'Fetched media and downloaded files will appear here for quick access.',
@@ -189,6 +263,54 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeTestFailed: 'YouTube authentication failed',
     adminOnly: 'Admin only',
     sectionAdmin: 'Admin Panel',
+    sectionXray: 'Xray VPN Proxy',
+    xrayEnableLabel: 'Route downloads via Xray VPN',
+    xrayEnableDesc: 'All inspect and download requests route through local Xray tunnel when enabled.',
+    xrayConfigLabel: 'Server Link or Xray JSON Config',
+    xrayConfigPlaceholder: 'vless://... or vmess://... or trojan://... or ss://... or { "outbounds": [...] }',
+    xrayConfigDesc: 'Supports vless://, vmess://, trojan://, ss:// share links or full Xray JSON.',
+    xraySaveBtn: 'Save & Apply',
+    xrayTestBtn: 'Test VPN',
+    xrayInstallBtn: 'Install Xray Core',
+    xrayStatusConnected: 'Connected',
+    xrayStatusStopped: 'Disconnected',
+    xrayStatusNotInstalled: 'Xray core not installed',
+    xraySavedMsg: 'Xray VPN settings applied',
+    xrayInstalledMsg: 'Xray core installed successfully',
+    xrayTestSuccess: 'YouTube test download succeeded',
+    xrayTestFailed: 'YouTube test download failed',
+    xrayTestUrlLabel: 'Default Short YouTube Test Video',
+    xrayTestUrlDesc: 'Each config test downloads this video at lowest quality through the config tunnel.',
+    xrayImportBtn: 'Import Configs to List',
+    xrayImportMsg: 'Configs imported',
+    xrayProfilesTitle: 'Saved Server Configs',
+    xrayTestAllBtn: 'Test All on YouTube',
+    xrayTestProfileBtn: 'Test YouTube',
+    xrayActivateBtn: 'Use',
+    xrayActiveLabel: 'Active',
+    xrayDeleteBtn: 'Remove',
+    xrayProfilesEmpty: 'No server configs imported yet. Paste one or multiple links above and click Import.',
+    xrayTestedPass: 'Downloaded',
+    xrayTestedFail: 'Failed',
+    sectionPotProvider: 'PO Token Server (bgutil-ytdlp-pot-provider)',
+    potEnableLabel: 'Auto-generate YouTube PO Tokens',
+    potEnableDesc: 'Runs bgutil-ytdlp-pot-provider HTTP server and supplies fresh PO Tokens to yt-dlp.',
+    potModeLabel: 'Server Mode',
+    potModeManaged: 'Built-in Server',
+    potModeExternal: 'External URL',
+    potBaseUrlLabel: 'Provider Base URL',
+    potPortLabel: 'Local Server Port',
+    potStatusRunning: 'Running',
+    potStatusStopped: 'Stopped',
+    potStatusNotInstalled: 'Server not installed',
+    potPluginMissing: 'yt-dlp bgutil plugin missing',
+    potInstallBtn: 'Install Server & Plugin',
+    potSaveBtn: 'Save & Apply',
+    potTestBtn: 'Test PO Token Server',
+    potSavedMsg: 'PO Token server settings applied',
+    potInstalledMsg: 'bgutil server & yt-dlp plugin installed',
+    potTestSuccess: 'PO Token minted',
+    potTestFailed: 'PO Token test failed',
   },
   fa: {
     dir: 'rtl',
@@ -219,6 +341,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     downloading: 'در حال ذخیره فایل...',
     savedToDevice: 'در حافظه دستگاه ذخیره شد',
     readyToSave: 'آماده برای ذخیره',
+    watchOnline: 'پخش آنلاین',
+    hidePlayer: 'بستن پخش‌کننده',
+    audioTracksSection: 'زبان‌های صدا',
+    audioOnlyLabel: 'فقط صوت (MP3)',
+    audioOnlyDesc: 'دانلود فایل صوتی MP3 از صدای انتخاب‌شده',
+    subtitlesSection: 'زیرنویس‌ها',
+    manualSubtitlesLabel: 'زیرنویس‌های اصلی',
+    autoSubtitlesLabel: 'زیرنویس خودکار یوتیوب',
+    subtitlesOff: 'خاموش',
+    filterLanguagesPlaceholder: 'جستجوی زبان...',
+    downloadSubtitle: 'دانلود زیرنویس VTT',
+    noSubtitlesFound: 'زبانی با این عنوان پیدا نشد',
     recentSaves: 'تاریخچه دانلودها',
     emptySavesTitle: 'هنوز فایلی ذخیره نشده',
     emptySavesDesc: 'رسانه‌های بررسی‌شده و دانلودهای شما برای دسترسی سریع اینجا نمایش داده می‌شوند.',
@@ -286,6 +420,54 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeTestFailed: 'احراز هویت یوتیوب ناموفق بود',
     adminOnly: 'فقط ادمین',
     sectionAdmin: 'پنل مدیریت',
+    sectionXray: 'وی‌پی‌ان Xray',
+    xrayEnableLabel: 'استفاده از وی‌پی‌ان Xray هنگام دانلود',
+    xrayEnableDesc: 'در صورت فعال بودن، بررسی لینک و دانلودها از طریق تونل Xray انجام می‌شود.',
+    xrayConfigLabel: 'لینک کانفیگ یا JSON کامل Xray',
+    xrayConfigPlaceholder: 'vless://... یا vmess://... یا trojan://... یا ss://... یا کانفیگ JSON',
+    xrayConfigDesc: 'پشتیبانی از لینک‌های vless://، vmess://، trojan://، ss:// و فایل کانفیگ JSON.',
+    xraySaveBtn: 'ذخیره و اعمال',
+    xrayTestBtn: 'تست وی‌پی‌ان',
+    xrayInstallBtn: 'نصب هسته Xray',
+    xrayStatusConnected: 'متصل',
+    xrayStatusStopped: 'متوقف',
+    xrayStatusNotInstalled: 'هسته Xray نصب نیست',
+    xraySavedMsg: 'تنظیمات وی‌پی‌ان Xray اعمال شد',
+    xrayInstalledMsg: 'هسته Xray با موفقیت نصب شد',
+    xrayTestSuccess: 'دانلود تستی از یوتیوب با موفقیت انجام شد',
+    xrayTestFailed: 'تست دانلود یوتیوب ناموفق بود',
+    xrayTestUrlLabel: 'لینک ویدیوی کوتاه پیش‌فرض یوتیوب برای تست',
+    xrayTestUrlDesc: 'تست هر کانفیگ این ویدیو را با پایین‌ترین کیفیت از طریق همان کانفیگ دانلود می‌کند.',
+    xrayImportBtn: 'افزودن به لیست کانفیگ‌ها',
+    xrayImportMsg: 'کانفیگ‌ها به لیست اضافه شدند',
+    xrayProfilesTitle: 'لیست کانفیگ‌های ذخیره‌شده',
+    xrayTestAllBtn: 'تست همه روی یوتیوب',
+    xrayTestProfileBtn: 'تست یوتیوب',
+    xrayActivateBtn: 'فعال‌سازی',
+    xrayActiveLabel: 'فعال',
+    xrayDeleteBtn: 'حذف',
+    xrayProfilesEmpty: 'هنوز کانفیگی اضافه نشده است. لینک‌ها را خط‌به‌خط بالا وارد کنید و دکمه افزودن را بزنید.',
+    xrayTestedPass: 'دانلود موفق',
+    xrayTestedFail: 'ناموفق',
+    sectionPotProvider: 'سرور PO Token (bgutil-ytdlp-pot-provider)',
+    potEnableLabel: 'تولید خودکار PO Token برای یوتیوب',
+    potEnableDesc: 'سرور bgutil-ytdlp-pot-provider را اجرا کرده و هنگام دانلود به yt-dlp متصل می‌کند.',
+    potModeLabel: 'حالت سرور',
+    potModeManaged: 'سرور داخلی برنامه',
+    potModeExternal: 'آدرس سرور خارجی',
+    potBaseUrlLabel: 'آدرس پایه سرور (Base URL)',
+    potPortLabel: 'پورت لوکال سرور',
+    potStatusRunning: 'در حال اجرا',
+    potStatusStopped: 'متوقف',
+    potStatusNotInstalled: 'سرور نصب نیست',
+    potPluginMissing: 'افزونه bgutil برای yt-dlp نصب نیست',
+    potInstallBtn: 'نصب سرور و افزونه',
+    potSaveBtn: 'ذخیره و اعمال',
+    potTestBtn: 'تست سرور PO Token',
+    potSavedMsg: 'تنظیمات سرور PO Token اعمال شد',
+    potInstalledMsg: 'سرور bgutil و افزونه yt-dlp نصب شد',
+    potTestSuccess: 'توکن PO با موفقیت تولید شد',
+    potTestFailed: 'تست سرور PO Token ناموفق بود',
   },
   ru: {
     dir: 'ltr',
@@ -316,6 +498,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     downloading: 'Сохранение файла...',
     savedToDevice: 'Сохранено в память устройства',
     readyToSave: 'Готово к сохранению',
+    watchOnline: 'Смотреть онлайн',
+    hidePlayer: 'Скрыть плеер',
+    audioTracksSection: 'Аудиодорожки',
+    audioOnlyLabel: 'Только аудио (MP3)',
+    audioOnlyDesc: 'Сохранить MP3 с выбранной дорожкой',
+    subtitlesSection: 'Субтитры',
+    manualSubtitlesLabel: 'Оригинальные субтитры',
+    autoSubtitlesLabel: 'Автосубтитры',
+    subtitlesOff: 'Выкл',
+    filterLanguagesPlaceholder: 'Поиск языка...',
+    downloadSubtitle: 'Скачать VTT',
+    noSubtitlesFound: 'Языки не найдены',
     recentSaves: 'История загрузок',
     emptySavesTitle: 'Загрузок пока нет',
     emptySavesDesc: 'Проверенные и сохранённые медиафайлы появятся здесь.',
@@ -383,6 +577,54 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeTestFailed: 'YouTube аутентификация не удалась',
     adminOnly: 'Только для админа',
     sectionAdmin: 'Панель админа',
+    sectionXray: 'Xray VPN прокси',
+    xrayEnableLabel: 'Загружать через Xray VPN',
+    xrayEnableDesc: 'При включении весь трафик анализа и скачивания идёт через туннель Xray.',
+    xrayConfigLabel: 'Ссылка сервера или Xray JSON',
+    xrayConfigPlaceholder: 'vless://... или vmess://... или trojan://... или ss://... или JSON',
+    xrayConfigDesc: 'Поддерживаются ссылки vless://, vmess://, trojan://, ss:// и полный Xray JSON.',
+    xraySaveBtn: 'Сохранить и применить',
+    xrayTestBtn: 'Тест VPN',
+    xrayInstallBtn: 'Установить Xray Core',
+    xrayStatusConnected: 'Подключено',
+    xrayStatusStopped: 'Отключено',
+    xrayStatusNotInstalled: 'Xray Core не установлен',
+    xraySavedMsg: 'Настройки Xray VPN применены',
+    xrayInstalledMsg: 'Xray Core успешно установлен',
+    xrayTestSuccess: 'Тестовое скачивание с YouTube успешно',
+    xrayTestFailed: 'Ошибка тестового скачивания с YouTube',
+    xrayTestUrlLabel: 'Короткое YouTube видео для теста',
+    xrayTestUrlDesc: 'Проверка скачивает это видео в минимальном качестве через выбранный конфиг.',
+    xrayImportBtn: 'Добавить в список',
+    xrayImportMsg: 'Конфиги добавлены',
+    xrayProfilesTitle: 'Сохранённые конфиги серверов',
+    xrayTestAllBtn: 'Проверить все на YouTube',
+    xrayTestProfileBtn: 'Тест YouTube',
+    xrayActivateBtn: 'Выбрать',
+    xrayActiveLabel: 'Активен',
+    xrayDeleteBtn: 'Удалить',
+    xrayProfilesEmpty: 'Список конфигов пуст. Вставьте ссылки построчно выше и нажмите «Добавить в список».',
+    xrayTestedPass: 'Скачано',
+    xrayTestedFail: 'Ошибка',
+    sectionPotProvider: 'Сервер PO Token (bgutil-ytdlp-pot-provider)',
+    potEnableLabel: 'Автогенерация YouTube PO Token',
+    potEnableDesc: 'Запускает HTTP-сервер bgutil-ytdlp-pot-provider и передаёт токены в yt-dlp.',
+    potModeLabel: 'Режим сервера',
+    potModeManaged: 'Встроенный сервер',
+    potModeExternal: 'Внешний URL',
+    potBaseUrlLabel: 'Базовый URL провайдера',
+    potPortLabel: 'Локальный порт сервера',
+    potStatusRunning: 'Запущен',
+    potStatusStopped: 'Остановлен',
+    potStatusNotInstalled: 'Сервер не установлен',
+    potPluginMissing: 'Отсутствует плагин yt-dlp bgutil',
+    potInstallBtn: 'Установить сервер и плагин',
+    potSaveBtn: 'Сохранить и применить',
+    potTestBtn: 'Тест PO Token',
+    potSavedMsg: 'Настройки сервера PO Token применены',
+    potInstalledMsg: 'Сервер bgutil и плагин yt-dlp установлены',
+    potTestSuccess: 'PO Token получен',
+    potTestFailed: 'Ошибка теста PO Token',
   },
   zh: {
     dir: 'ltr',
@@ -413,6 +655,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     downloading: '正在保存文件...',
     savedToDevice: '已保存至设备存储',
     readyToSave: '准备就绪',
+    watchOnline: '在线观看',
+    hidePlayer: '收起播放器',
+    audioTracksSection: '音轨语言',
+    audioOnlyLabel: '仅音频 (MP3)',
+    audioOnlyDesc: '保存所选音轨的 MP3 音频文件',
+    subtitlesSection: '字幕列表',
+    manualSubtitlesLabel: '人工字幕',
+    autoSubtitlesLabel: '自动生成字幕',
+    subtitlesOff: '关闭',
+    filterLanguagesPlaceholder: '搜索语言...',
+    downloadSubtitle: '下载 VTT 字幕',
+    noSubtitlesFound: '未找到匹配语言',
     recentSaves: '下载记录',
     emptySavesTitle: '暂无保存记录',
     emptySavesDesc: '解析后的媒体和已下载的文件将显示在这里，方便再次保存。',
@@ -480,5 +734,53 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     youtubeTestFailed: 'YouTube 认证失败',
     adminOnly: '仅管理员',
     sectionAdmin: '管理员面板',
+    sectionXray: 'Xray VPN 代理',
+    xrayEnableLabel: '下载时启用 Xray VPN',
+    xrayEnableDesc: '开启后，所有解析与下载流量将通过本地 Xray 隧道转发。',
+    xrayConfigLabel: '节点链接或 Xray JSON 配置',
+    xrayConfigPlaceholder: 'vless://... 或 vmess://... 或 trojan://... 或 ss://... 或 JSON',
+    xrayConfigDesc: '支持 vless://、vmess://、trojan://、ss:// 分享链接或完整 Xray JSON。',
+    xraySaveBtn: '保存并应用',
+    xrayTestBtn: '测试 VPN',
+    xrayInstallBtn: '安装 Xray 内核',
+    xrayStatusConnected: '已连接',
+    xrayStatusStopped: '未连接',
+    xrayStatusNotInstalled: '未安装 Xray 内核',
+    xraySavedMsg: 'Xray VPN 设置已生效',
+    xrayInstalledMsg: 'Xray 内核安装成功',
+    xrayTestSuccess: 'YouTube 测试下载成功',
+    xrayTestFailed: 'YouTube 测试下载失败',
+    xrayTestUrlLabel: '默认测试短视频链接 (YouTube)',
+    xrayTestUrlDesc: '测试配置时会通过该节点以最低画质实际下载此 YouTube 短视频。',
+    xrayImportBtn: '导入到配置列表',
+    xrayImportMsg: '已导入配置',
+    xrayProfilesTitle: '已保存的节点配置',
+    xrayTestAllBtn: '全部测试 YouTube',
+    xrayTestProfileBtn: '测试 YouTube',
+    xrayActivateBtn: '启用',
+    xrayActiveLabel: '当前启用',
+    xrayDeleteBtn: '删除',
+    xrayProfilesEmpty: '暂无已保存的节点配置。请在上方粘贴单条或多条链接并点击导入。',
+    xrayTestedPass: '已下载',
+    xrayTestedFail: '失败',
+    sectionPotProvider: 'PO Token 服务器 (bgutil-ytdlp-pot-provider)',
+    potEnableLabel: '自动生成 YouTube PO Token',
+    potEnableDesc: '运行 bgutil-ytdlp-pot-provider 服务并在下载时为 yt-dlp 提供 PO Token。',
+    potModeLabel: '服务模式',
+    potModeManaged: '内置服务器',
+    potModeExternal: '外部 URL',
+    potBaseUrlLabel: '服务器基础 URL',
+    potPortLabel: '本地服务端口',
+    potStatusRunning: '运行中',
+    potStatusStopped: '已停止',
+    potStatusNotInstalled: '服务器未安装',
+    potPluginMissing: '缺少 yt-dlp bgutil 插件',
+    potInstallBtn: '安装服务器与插件',
+    potSaveBtn: '保存并应用',
+    potTestBtn: '测试 PO Token 服务器',
+    potSavedMsg: 'PO Token 服务器设置已应用',
+    potInstalledMsg: 'bgutil 服务器与 yt-dlp 插件安装完成',
+    potTestSuccess: 'PO Token 生成成功',
+    potTestFailed: 'PO Token 测试失败',
   },
 };

@@ -2,26 +2,30 @@ import 'dotenv/config';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import { execFile, spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { pipeline } from 'node:stream/promises';
+import tls from 'node:tls';
 import { promisify } from 'node:util';
 import { Ytdl, chooseFormat, Quality } from '@distube/ytdl-core';
 import type { VideoFormat } from '@distube/ytdl-core';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { createServer as createViteServer } from 'vite';
 
 const ytdl = new Ytdl();
 const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT || 3000);
 const IS_PROD = process.env.NODE_ENV === 'production';
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const SESSION_COOKIE_NAME = 'grove_session';
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface StoredUser {
   id: string;
@@ -42,7 +46,11 @@ interface StoredUser {
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const CACHE_DIR = path.resolve(DATA_DIR, 'cache');
+const BIN_DIR = path.resolve(DATA_DIR, 'bin');
 const USERS_FILE = path.resolve(DATA_DIR, 'users.json');
+const ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
+const YT_COOKIES_FILE = path.resolve(DATA_DIR, 'yt-cookies.txt');
+const XRAY_CONFIG_FILE = path.resolve(DATA_DIR, 'xray-runtime.json');
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -58,6 +66,7 @@ interface DownloadJob {
   url: string;
   title: string;
   quality: string;
+  audioFormatId?: string;
   ext: 'mp4' | 'mp3';
   mimeType: string;
   status: 'downloading' | 'processing' | 'ready' | 'error';
@@ -68,6 +77,21 @@ interface DownloadJob {
   contentDisposition: string;
   error?: string;
   createdAt: number;
+}
+
+interface MediaAudioTrack {
+  formatId: string;
+  language: string;
+  label: string;
+  ext: string;
+  abr: number | null;
+  isDefault: boolean;
+}
+
+interface MediaSubtitleTrack {
+  lang: string;
+  label: string;
+  isAuto: boolean;
 }
 
 const downloadJobs = new Map<string, DownloadJob>();
@@ -97,43 +121,219 @@ function verifyPassword(password: string, expectedHash: string, salt: string): b
   return crypto.timingSafeEqual(actual, expected);
 }
 
-function loadUsers(): Map<string, StoredUser> {
-  try {
-    ensureDataDir();
-    if (!fs.existsSync(USERS_FILE)) {
-      return new Map();
-    }
-    const raw = fs.readFileSync(USERS_FILE, 'utf8');
-    const arr = JSON.parse(raw) as StoredUser[];
-    const map = new Map<string, StoredUser>();
-    for (const u of arr) {
-      map.set(u.email.toLowerCase(), u);
-    }
-    return map;
-  } catch {
-    return new Map();
-  }
-}
-
-function saveUsers(map: Map<string, StoredUser>): void {
-  ensureDataDir();
-  const arr = Array.from(map.values());
-  fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), 'utf8');
-}
-
-const usersByEmail = loadUsers();
-
-// Sync admin account from environment variables if configured
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.ADMIN_USERNAME;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ADMIN_EMAIL_NORMALIZED = ADMIN_EMAIL ? ADMIN_EMAIL.trim().toLowerCase() : '';
+const DB_FILE = path.resolve(DATA_DIR, 'grove.db');
 
-if (ADMIN_EMAIL && ADMIN_PASSWORD) {
-  const adminEmailClean = ADMIN_EMAIL.trim().toLowerCase();
+interface UserHistoryItem {
+  id: string;
+  jobId?: string;
+  url: string;
+  title: string;
+  author: string;
+  quality: string;
+  sizeBytes: number;
+  thumbnail: string | null;
+  savedAt: string;
+}
+
+ensureDataDir();
+const db = new DatabaseSync(DB_FILE);
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA foreign_keys = ON;
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    password_hash TEXT,
+    password_salt TEXT,
+    provider TEXT NOT NULL DEFAULT 'email',
+    role TEXT NOT NULL DEFAULT 'user',
+    theme TEXT NOT NULL DEFAULT 'dark',
+    language TEXT NOT NULL DEFAULT 'en',
+    default_quality TEXT NOT NULL DEFAULT '1080p',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+  CREATE TABLE IF NOT EXISTS download_history (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_id TEXT,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    author TEXT NOT NULL,
+    quality TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    thumbnail TEXT,
+    saved_at TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(user_id, url)
+  );
+  CREATE INDEX IF NOT EXISTS idx_history_user_created ON download_history(user_id, created_at DESC);
+`);
+
+function normalizeQualityValue(raw: unknown): string {
+  if (typeof raw === 'string' && ['2160p', '1080p', '720p', '480p', '360p'].includes(raw)) {
+    return raw;
+  }
+  return '1080p';
+}
+
+function dbRowToUser(row: Record<string, unknown>): StoredUser {
+  const emailLower = String(row.email || '').toLowerCase();
+  const role: 'user' | 'admin' =
+    row.role === 'admin' || (ADMIN_EMAIL_NORMALIZED && emailLower === ADMIN_EMAIL_NORMALIZED)
+      ? 'admin'
+      : 'user';
+  const lang = row.language;
+  return {
+    id: String(row.id),
+    email: emailLower,
+    displayName: String(row.display_name || emailLower.split('@')[0] || 'User'),
+    passwordHash: typeof row.password_hash === 'string' ? row.password_hash : undefined,
+    passwordSalt: typeof row.password_salt === 'string' ? row.password_salt : undefined,
+    provider: row.provider === 'google' ? 'google' : 'email',
+    role,
+    preferences: {
+      theme: row.theme === 'light' ? 'light' : 'dark',
+      language: lang === 'fa' || lang === 'ru' || lang === 'zh' ? lang : 'en',
+      defaultQuality: normalizeQualityValue(row.default_quality),
+    },
+  };
+}
+
+function getUserByEmail(email: string): StoredUser | null {
+  const row = db
+    .prepare('SELECT * FROM users WHERE email = ? LIMIT 1')
+    .get(email.trim().toLowerCase()) as Record<string, unknown> | undefined;
+  return row ? dbRowToUser(row) : null;
+}
+
+function getUserById(id: string): StoredUser | null {
+  const row = db
+    .prepare('SELECT * FROM users WHERE id = ? LIMIT 1')
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? dbRowToUser(row) : null;
+}
+
+function insertUser(user: StoredUser): void {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO users (
+      id, email, display_name, password_hash, password_salt,
+      provider, role, theme, language, default_quality, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(email) DO UPDATE SET
+      display_name = excluded.display_name,
+      password_hash = COALESCE(excluded.password_hash, users.password_hash),
+      password_salt = COALESCE(excluded.password_salt, users.password_salt),
+      role = excluded.role,
+      updated_at = excluded.updated_at
+  `).run(
+    user.id,
+    user.email.toLowerCase(),
+    user.displayName,
+    user.passwordHash ?? null,
+    user.passwordSalt ?? null,
+    user.provider,
+    user.role,
+    user.preferences.theme,
+    user.preferences.language,
+    normalizeQualityValue(user.preferences.defaultQuality),
+    now,
+    now
+  );
+}
+
+function updateUserPreferencesInDb(
+  userId: string,
+  prefs: { theme: 'dark' | 'light'; language: 'en' | 'fa' | 'ru' | 'zh'; defaultQuality: string }
+): void {
+  db.prepare(`
+    UPDATE users
+    SET theme = ?, language = ?, default_quality = ?, updated_at = ?
+    WHERE id = ?
+  `).run(prefs.theme, prefs.language, normalizeQualityValue(prefs.defaultQuality), Date.now(), userId);
+}
+
+function getFirstAdminPreferences(): { youtubeCookies?: string; youtubePoToken?: string } {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const arr = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')) as StoredUser[];
+      for (const u of arr) {
+        if (u.role === 'admin' && (u.preferences?.youtubeCookies || u.preferences?.youtubePoToken)) {
+          return {
+            youtubeCookies: u.preferences.youtubeCookies,
+            youtubePoToken: u.preferences.youtubePoToken,
+          };
+        }
+      }
+    }
+  } catch {
+    // Ignore
+  }
+  return {};
+}
+
+// Migrate legacy users.json into SQLite database once if needed
+try {
+  if (fs.existsSync(USERS_FILE)) {
+    const raw = fs.readFileSync(USERS_FILE, 'utf8');
+    const arr = JSON.parse(raw) as StoredUser[];
+    for (const u of arr) {
+      if (!u.email) continue;
+      const emailLower = u.email.trim().toLowerCase();
+      if (!getUserByEmail(emailLower)) {
+        const role: 'user' | 'admin' =
+          u.role === 'admin' || (ADMIN_EMAIL_NORMALIZED && emailLower === ADMIN_EMAIL_NORMALIZED)
+            ? 'admin'
+            : 'user';
+        insertUser({
+          id: u.id || crypto.randomUUID(),
+          email: emailLower,
+          displayName: u.displayName || emailLower.split('@')[0] || 'User',
+          passwordHash: u.passwordHash,
+          passwordSalt: u.passwordSalt,
+          provider: u.provider === 'google' ? 'google' : 'email',
+          role,
+          preferences: {
+            theme: u.preferences?.theme === 'light' ? 'light' : 'dark',
+            language:
+              u.preferences?.language === 'fa' ||
+              u.preferences?.language === 'ru' ||
+              u.preferences?.language === 'zh'
+                ? u.preferences.language
+                : 'en',
+            defaultQuality: normalizeQualityValue(u.preferences?.defaultQuality),
+          },
+        });
+      }
+    }
+  }
+} catch {
+  // Ignore malformed legacy file
+}
+
+if (ADMIN_EMAIL_NORMALIZED && ADMIN_PASSWORD) {
   const { hash, salt } = hashPassword(ADMIN_PASSWORD);
-  const existing = usersByEmail.get(adminEmailClean);
+  const existing = getUserByEmail(ADMIN_EMAIL_NORMALIZED);
   const adminUser: StoredUser = {
     id: existing?.id || crypto.randomUUID(),
-    email: adminEmailClean,
+    email: ADMIN_EMAIL_NORMALIZED,
     displayName: existing?.displayName || 'Administrator',
     passwordHash: hash,
     passwordSalt: salt,
@@ -145,39 +345,372 @@ if (ADMIN_EMAIL && ADMIN_PASSWORD) {
       defaultQuality: '1080p',
     },
   };
-  usersByEmail.set(adminEmailClean, adminUser);
-  saveUsers(usersByEmail);
+  insertUser(adminUser);
 }
 
-function signToken(userId: string, email: string): string {
-  const payload = Buffer.from(
-    JSON.stringify({ sub: userId, email, exp: Date.now() + 7 * 24 * 60 * 60 * 1000 })
-  ).toString('base64url');
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-  return `${payload}.${sig}`;
+function hashSessionToken(rawToken: string): string {
+  return crypto.createHash('sha256').update(rawToken).digest('hex');
 }
 
-function verifyToken(token: string): { sub: string; email: string } | null {
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [payload, sig] = parts;
-  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-  const sigBuf = Buffer.from(sig);
-  const expBuf = Buffer.from(expectedSig);
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-    return null;
-  }
+function createUserSession(userId: string): string {
+  const rawToken = crypto.randomBytes(32).toString('base64url');
+  const tokenHash = hashSessionToken(rawToken);
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO sessions (id, token_hash, user_id, expires_at, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(crypto.randomUUID(), tokenHash, userId, now + SESSION_TTL_MS, now);
+  return rawToken;
+}
+
+function verifySessionToken(rawToken: string): StoredUser | null {
+  if (!rawToken || rawToken.length < 16) return null;
+  const tokenHash = hashSessionToken(rawToken);
+  const row = db
+    .prepare(`
+      SELECT u.*
+      FROM sessions s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ? AND s.expires_at > ?
+      LIMIT 1
+    `)
+    .get(tokenHash, Date.now()) as Record<string, unknown> | undefined;
+  return row ? dbRowToUser(row) : null;
+}
+
+function revokeSessionToken(rawToken: string): void {
+  if (!rawToken) return;
+  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashSessionToken(rawToken));
+}
+
+function cleanupExpiredSessions(): void {
   try {
-    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
-      sub: string;
-      email: string;
-      exp: number;
-    };
-    if (!parsed.exp || parsed.exp < Date.now()) return null;
-    return { sub: parsed.sub, email: parsed.email };
+    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
   } catch {
-    return null;
+    // Ignore cleanup error
   }
+}
+
+cleanupExpiredSessions();
+setInterval(cleanupExpiredSessions, 60 * 60 * 1000).unref();
+
+function getUserHistory(userId: string): UserHistoryItem[] {
+  const rows = db
+    .prepare(`
+      SELECT id, job_id, url, title, author, quality, size_bytes, thumbnail, saved_at
+      FROM download_history
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT 50
+    `)
+    .all(userId) as Array<Record<string, unknown>>;
+
+  return rows.map((r) => ({
+    id: String(r.id),
+    ...(typeof r.job_id === 'string' && r.job_id ? { jobId: r.job_id } : {}),
+    url: String(r.url),
+    title: String(r.title),
+    author: String(r.author),
+    quality: String(r.quality),
+    sizeBytes: Number(r.size_bytes || 0),
+    thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : null,
+    savedAt: String(r.saved_at),
+  }));
+}
+
+function upsertUserHistoryItem(userId: string, item: UserHistoryItem): UserHistoryItem[] {
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO download_history (
+      id, user_id, job_id, url, title, author, quality, size_bytes, thumbnail, saved_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, url) DO UPDATE SET
+      id = excluded.id,
+      job_id = excluded.job_id,
+      title = excluded.title,
+      author = excluded.author,
+      quality = excluded.quality,
+      size_bytes = excluded.size_bytes,
+      thumbnail = excluded.thumbnail,
+      saved_at = excluded.saved_at,
+      created_at = excluded.created_at
+  `).run(
+    item.id,
+    userId,
+    item.jobId ?? null,
+    item.url,
+    item.title,
+    item.author,
+    item.quality,
+    Math.max(0, Math.floor(item.sizeBytes || 0)),
+    item.thumbnail ?? null,
+    item.savedAt,
+    now
+  );
+  // Keep latest 50 items per user
+  db.prepare(`
+    DELETE FROM download_history
+    WHERE user_id = ? AND id NOT IN (
+      SELECT id FROM download_history WHERE user_id = ? ORDER BY created_at DESC LIMIT 50
+    )
+  `).run(userId, userId);
+  return getUserHistory(userId);
+}
+
+function clearUserHistoryInDb(userId: string): void {
+  db.prepare('DELETE FROM download_history WHERE user_id = ?').run(userId);
+}
+
+interface XrayProfileTestResult {
+  ok: boolean;
+  testedAt: number;
+  latencyMs?: number;
+  downloadedBytes?: number;
+  title?: string;
+  exitIp?: string | null;
+  error?: string;
+}
+
+interface XrayProfile {
+  id: string;
+  name: string;
+  protocol: string;
+  address: string;
+  configInput: string;
+  lastTest?: XrayProfileTestResult;
+}
+
+interface AdminXrayConfig {
+  enabled: boolean;
+  configInput: string;
+  activeProfileId: string | null;
+  profiles: XrayProfile[];
+  testYoutubeUrl: string;
+  socksPort: number;
+  httpPort: number;
+}
+
+interface AdminPotProviderConfig {
+  enabled: boolean;
+  mode: 'managed' | 'external';
+  baseUrl: string;
+  port: number;
+}
+
+interface AdminConfig {
+  youtubeCookies: string;
+  youtubePoToken: string;
+  xray: AdminXrayConfig;
+  potProvider: AdminPotProviderConfig;
+}
+
+const DEFAULT_XRAY_TEST_YOUTUBE_URL = 'https://www.youtube.com/watch?v=jNQXAC9IVRw';
+
+function defaultAdminConfig(): AdminConfig {
+  return {
+    youtubeCookies: '',
+    youtubePoToken: '',
+    xray: {
+      enabled: false,
+      configInput: '',
+      activeProfileId: null,
+      profiles: [],
+      testYoutubeUrl: DEFAULT_XRAY_TEST_YOUTUBE_URL,
+      socksPort: 10808,
+      httpPort: 10809,
+    },
+    potProvider: {
+      enabled: true,
+      mode: 'managed',
+      baseUrl: 'http://127.0.0.1:4416',
+      port: 4416,
+    },
+  };
+}
+
+function loadAdminConfig(): AdminConfig {
+  ensureDataDir();
+  try {
+    if (fs.existsSync(ADMIN_CONFIG_FILE)) {
+      const raw = fs.readFileSync(ADMIN_CONFIG_FILE, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<AdminConfig>;
+      const rawProfiles = Array.isArray(parsed.xray?.profiles) ? parsed.xray.profiles : [];
+      const profiles: XrayProfile[] = rawProfiles
+        .filter(
+          (p): p is XrayProfile =>
+            Boolean(p) &&
+            typeof p.id === 'string' &&
+            typeof p.configInput === 'string' &&
+            p.configInput.trim().length > 0
+        )
+        .map((p) => ({
+          id: p.id,
+          name: typeof p.name === 'string' && p.name.trim() ? p.name.trim() : 'Xray Server',
+          protocol: typeof p.protocol === 'string' ? p.protocol : 'xray',
+          address: typeof p.address === 'string' ? p.address : '',
+          configInput: p.configInput.trim(),
+          ...(p.lastTest && typeof p.lastTest.ok === 'boolean' ? { lastTest: p.lastTest } : {}),
+        }));
+      const legacyConfigInput = typeof parsed.xray?.configInput === 'string' ? parsed.xray.configInput.trim() : '';
+      let activeProfileId =
+        typeof parsed.xray?.activeProfileId === 'string' ? parsed.xray.activeProfileId : null;
+      if (!profiles.length && legacyConfigInput) {
+        try {
+          const extracted = extractXrayProfileMeta(legacyConfigInput);
+          const migratedProfile: XrayProfile = {
+            id: crypto.randomUUID(),
+            ...extracted,
+            configInput: legacyConfigInput,
+          };
+          profiles.push(migratedProfile);
+          activeProfileId = migratedProfile.id;
+        } catch {
+          // Keep raw legacy configInput even if unparsed
+        }
+      }
+      return {
+        youtubeCookies: typeof parsed.youtubeCookies === 'string' ? parsed.youtubeCookies : '',
+        youtubePoToken: typeof parsed.youtubePoToken === 'string' ? parsed.youtubePoToken : '',
+        xray: {
+          enabled: Boolean(parsed.xray?.enabled),
+          configInput: legacyConfigInput,
+          activeProfileId,
+          profiles,
+          testYoutubeUrl:
+            typeof parsed.xray?.testYoutubeUrl === 'string' && parsed.xray.testYoutubeUrl.trim()
+              ? parsed.xray.testYoutubeUrl.trim()
+              : DEFAULT_XRAY_TEST_YOUTUBE_URL,
+          socksPort:
+            typeof parsed.xray?.socksPort === 'number' && parsed.xray.socksPort > 1024 && parsed.xray.socksPort < 65535
+              ? parsed.xray.socksPort
+              : 10808,
+          httpPort:
+            typeof parsed.xray?.httpPort === 'number' && parsed.xray.httpPort > 1024 && parsed.xray.httpPort < 65535
+              ? parsed.xray.httpPort
+              : 10809,
+        },
+        potProvider: {
+          enabled: parsed.potProvider?.enabled !== undefined ? Boolean(parsed.potProvider.enabled) : true,
+          mode: parsed.potProvider?.mode === 'external' ? 'external' : 'managed',
+          baseUrl:
+            typeof parsed.potProvider?.baseUrl === 'string' && parsed.potProvider.baseUrl.trim()
+              ? parsed.potProvider.baseUrl.trim()
+              : 'http://127.0.0.1:4416',
+          port:
+            typeof parsed.potProvider?.port === 'number' && parsed.potProvider.port > 1024 && parsed.potProvider.port < 65535
+              ? parsed.potProvider.port
+              : 4416,
+        },
+      };
+    }
+  } catch {
+    // Fall back to migration/default
+  }
+  const migrated = defaultAdminConfig();
+  const legacyAdminPrefs = getFirstAdminPreferences();
+  if (legacyAdminPrefs.youtubeCookies) migrated.youtubeCookies = legacyAdminPrefs.youtubeCookies;
+  if (legacyAdminPrefs.youtubePoToken) migrated.youtubePoToken = legacyAdminPrefs.youtubePoToken;
+  saveAdminConfig(migrated);
+  return migrated;
+}
+
+function saveAdminConfig(cfg: AdminConfig): void {
+  ensureDataDir();
+  fs.writeFileSync(ADMIN_CONFIG_FILE, JSON.stringify(cfg, null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+const adminConfig: AdminConfig = loadAdminConfig();
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = part.slice(0, eqIdx).trim();
+    const val = part.slice(eqIdx + 1).trim();
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(val);
+    } catch {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
+function isRequestHttps(req: Request): boolean {
+  const protoHeader = req.headers['x-forwarded-proto'];
+  const proto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
+  if (req.secure || (typeof proto === 'string' && proto.split(',')[0].trim().toLowerCase() === 'https')) {
+    return true;
+  }
+  const sslHeader = req.headers['x-forwarded-ssl'];
+  if (typeof sslHeader === 'string' && sslHeader.trim().toLowerCase() === 'on') {
+    return true;
+  }
+  const forwarded = req.headers.forwarded;
+  if (typeof forwarded === 'string' && /proto=https/i.test(forwarded)) {
+    return true;
+  }
+  const origin = req.headers.origin;
+  if (typeof origin === 'string' && origin.toLowerCase().startsWith('https://')) {
+    return true;
+  }
+  const referer = req.headers.referer;
+  if (typeof referer === 'string' && referer.toLowerCase().startsWith('https://')) {
+    return true;
+  }
+  return false;
+}
+
+function setSessionCookie(req: Request, res: Response, rawToken: string): void {
+  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}`,
+    'Path=/',
+    'HttpOnly',
+    `Max-Age=${maxAgeSec}`,
+  ];
+  if (isRequestHttps(req)) {
+    attrs.push('Secure', 'SameSite=None', 'Partitioned');
+  } else {
+    attrs.push('SameSite=Lax');
+  }
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+function clearSessionCookie(req: Request, res: Response): void {
+  const attrs = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'Max-Age=0',
+  ];
+  if (isRequestHttps(req)) {
+    attrs.push('Secure', 'SameSite=None', 'Partitioned');
+  } else {
+    attrs.push('SameSite=Lax');
+  }
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+function isCsrfValid(req: Request): boolean {
+  if (typeof req.headers['x-requested-with'] === 'string' && req.headers['x-requested-with'].trim()) {
+    return true;
+  }
+  const origin = req.headers.origin;
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host;
+  const host = Array.isArray(hostHeader) ? hostHeader[0] : hostHeader;
+  if (typeof origin === 'string' && host) {
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      return originHost === host.split(',')[0].trim().toLowerCase();
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function isPrivateIp(ip: string): boolean {
@@ -270,44 +803,1265 @@ function extractYouTubeId(parsed: URL): string | null {
   return null;
 }
 
-let cachedYtDlpPath: string | null | undefined;
+let cachedYtDlpRunner: { cmd: string; baseArgs: string[] } | null | undefined;
 let cachedYtDlpVersion: string | null | undefined;
 
-// Use python -m yt_dlp for cross-platform compatibility (Windows .exe issue)
-const YTDLP_CMD = process.platform === 'win32' ? 'python' : 'yt-dlp';
-const YTDLP_ARGS = process.platform === 'win32' ? ['-m', 'yt_dlp'] : [];
+async function getYtDlpRunner(): Promise<{ cmd: string; baseArgs: string[] } | null> {
+  if (cachedYtDlpRunner) return cachedYtDlpRunner;
+  const candidates: { cmd: string; baseArgs: string[] }[] =
+    process.platform === 'win32'
+      ? [
+          { cmd: 'python', baseArgs: ['-m', 'yt_dlp'] },
+          { cmd: 'yt-dlp', baseArgs: [] },
+        ]
+      : [
+          { cmd: 'yt-dlp', baseArgs: [] },
+          { cmd: 'python3', baseArgs: ['-m', 'yt_dlp'] },
+        ];
+  for (const c of candidates) {
+    try {
+      const { stdout } = await execFileAsync(c.cmd, [...c.baseArgs, '--version'], { timeout: 5000 });
+      if (stdout.trim()) {
+        cachedYtDlpRunner = c;
+        cachedYtDlpVersion = stdout.trim();
+        return cachedYtDlpRunner;
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+  return null;
+}
 
 async function getYtDlpPath(): Promise<string | null> {
-  if (cachedYtDlpPath !== undefined) return cachedYtDlpPath;
-  try {
-    // Just verify yt-dlp is available via python module
-    const { stdout } = await execFileAsync(YTDLP_CMD, [...YTDLP_ARGS, '--version'], { timeout: 5000 });
-    cachedYtDlpPath = stdout.trim() ? 'available' : null;
-  } catch {
-    cachedYtDlpPath = null;
-  }
-  return cachedYtDlpPath;
+  const runner = await getYtDlpRunner();
+  return runner ? 'available' : null;
 }
 
 async function getYtDlpVersion(): Promise<string | null> {
-  if (cachedYtDlpVersion !== undefined) return cachedYtDlpVersion;
-  const ytdlp = await getYtDlpPath();
-  if (!ytdlp) return null;
-  try {
-    const { stdout } = await execFileAsync(YTDLP_CMD, [...YTDLP_ARGS, '--version'], { timeout: 5000 });
-    cachedYtDlpVersion = stdout.trim();
-  } catch {
-    cachedYtDlpVersion = null;
-  }
-  return cachedYtDlpVersion;
+  if (cachedYtDlpVersion) return cachedYtDlpVersion;
+  await getYtDlpRunner();
+  return cachedYtDlpVersion || null;
 }
 
 function buildYtDlpArgs(baseArgs: string[]): string[] {
-  // Ensure yt-dlp uses Node.js as JavaScript runtime for YouTube extraction
-  // This is needed because newer YouTube player requires JS execution
-  // Also add --no-check-certificate for container environments
-  // Add --remote-components ejs:github for YouTube challenge solving
   return ['--js-runtimes', 'node', '--no-check-certificate', '--remote-components', 'ejs:github', ...baseArgs];
+}
+
+// --- Xray VPN Core Manager (Admin Only) ---
+
+interface XrayRuntimeState {
+  process: ChildProcess | null;
+  running: boolean;
+  binaryPath: string | null;
+  lastError: string | null;
+  logs: string[];
+}
+
+const xrayState: XrayRuntimeState = {
+  process: null,
+  running: false,
+  binaryPath: null,
+  lastError: null,
+  logs: [],
+};
+
+async function findXrayBinary(): Promise<string | null> {
+  const candidates = [
+    path.join(BIN_DIR, process.platform === 'win32' ? 'xray.exe' : 'xray'),
+    '/usr/local/bin/xray',
+    '/usr/bin/xray',
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      xrayState.binaryPath = candidate;
+      return candidate;
+    }
+  }
+  try {
+    const cmd = process.platform === 'win32' ? 'where' : 'which';
+    const { stdout } = await execFileAsync(cmd, ['xray'], { timeout: 2500 });
+    const found = stdout.trim().split(/\r?\n/)[0]?.trim();
+    if (found && fs.existsSync(found)) {
+      xrayState.binaryPath = found;
+      return found;
+    }
+  } catch {
+    // Not in PATH
+  }
+  xrayState.binaryPath = null;
+  return null;
+}
+
+function decodeBase64Safe(input: string): string {
+  const normalized = input.trim().replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(padded, 'base64').toString('utf8');
+}
+
+function buildStreamSettings(params: {
+  network?: string;
+  security?: string;
+  sni?: string;
+  fp?: string;
+  alpn?: string;
+  host?: string;
+  path?: string;
+  serviceName?: string;
+  mode?: string;
+  pbk?: string;
+  sid?: string;
+  spx?: string;
+  headerType?: string;
+  allowInsecure?: boolean;
+}): Record<string, unknown> {
+  const netType = (params.network || 'tcp').toLowerCase();
+  const secType = (params.security || 'none').toLowerCase();
+  const stream: Record<string, unknown> = {
+    network: netType === 'splithttp' ? 'xhttp' : netType,
+  };
+
+  if (netType === 'ws') {
+    stream.wsSettings = {
+      path: params.path || '/',
+      ...(params.host ? { headers: { Host: params.host } } : {}),
+    };
+  } else if (netType === 'httpupgrade') {
+    stream.httpupgradeSettings = {
+      path: params.path || '/',
+      ...(params.host ? { host: params.host } : {}),
+    };
+  } else if (netType === 'xhttp' || netType === 'splithttp') {
+    stream.xhttpSettings = {
+      path: params.path || '/',
+      ...(params.host ? { host: params.host } : {}),
+      ...(params.mode ? { mode: params.mode } : {}),
+    };
+  } else if (netType === 'grpc') {
+    stream.grpcSettings = {
+      serviceName: params.serviceName || '',
+      multiMode: params.mode === 'multi',
+    };
+  } else if (netType === 'tcp' && params.headerType === 'http') {
+    stream.tcpSettings = {
+      header: {
+        type: 'http',
+        request: {
+          path: [params.path || '/'],
+          headers: params.host ? { Host: params.host.split(',').map((s) => s.trim()) } : {},
+        },
+      },
+    };
+  }
+
+  if (secType === 'tls') {
+    stream.security = 'tls';
+    stream.tlsSettings = {
+      ...(params.sni ? { serverName: params.sni } : {}),
+      ...(params.fp ? { fingerprint: params.fp } : {}),
+      ...(params.alpn ? { alpn: params.alpn.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
+      allowInsecure: Boolean(params.allowInsecure),
+    };
+  } else if (secType === 'reality') {
+    stream.security = 'reality';
+    stream.realitySettings = {
+      show: false,
+      fingerprint: params.fp || 'chrome',
+      serverName: params.sni || '',
+      publicKey: params.pbk || '',
+      shortId: params.sid || '',
+      spiderX: params.spx || '/',
+    };
+  } else {
+    stream.security = 'none';
+  }
+
+  return stream;
+}
+
+function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: number): Record<string, unknown> {
+  const input = rawInput.trim();
+  if (!input) {
+    throw new Error('Xray configuration is empty.');
+  }
+
+  const localInbounds = [
+    {
+      tag: 'socks-in',
+      port: socksPort,
+      listen: '127.0.0.1',
+      protocol: 'socks',
+      settings: { auth: 'noauth', udp: true },
+      sniffing: { enabled: true, destOverride: ['http', 'tls'] },
+    },
+    {
+      tag: 'http-in',
+      port: httpPort,
+      listen: '127.0.0.1',
+      protocol: 'http',
+      settings: {},
+    },
+  ];
+
+  // Full Xray JSON configuration
+  if (input.startsWith('{')) {
+    const parsed = JSON.parse(input) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.outbounds) || parsed.outbounds.length === 0) {
+      throw new Error('JSON config must include a non-empty "outbounds" array.');
+    }
+    const existingInbounds = Array.isArray(parsed.inbounds) ? (parsed.inbounds as Record<string, unknown>[]) : [];
+    const filteredInbounds = existingInbounds.filter(
+      (ib) => ib && ib.port !== socksPort && ib.port !== httpPort && ib.tag !== 'socks-in' && ib.tag !== 'http-in'
+    );
+    return {
+      ...parsed,
+      log: { loglevel: 'warning' },
+      inbounds: [...localInbounds, ...filteredInbounds],
+    };
+  }
+
+  // Share link parsing (take first non-empty line if multiple lines pasted)
+  const linkLine = input
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => Boolean(l));
+  if (!linkLine) {
+    throw new Error('Invalid Xray link or JSON configuration.');
+  }
+
+  let outbound: Record<string, unknown>;
+
+  if (linkLine.startsWith('vless://')) {
+    const u = new URL(linkLine);
+    const q = u.searchParams;
+    const uuid = decodeURIComponent(u.username);
+    const address = u.hostname;
+    const port = Number(u.port || 443);
+    if (!uuid || !address || !port) throw new Error('Invalid VLESS link.');
+    const flow = q.get('flow') || '';
+    const encryption = q.get('encryption') || 'none';
+    outbound = {
+      tag: 'proxy',
+      protocol: 'vless',
+      settings: {
+        vnext: [
+          {
+            address,
+            port,
+            users: [
+              {
+                id: uuid,
+                encryption,
+                ...(flow ? { flow } : {}),
+              },
+            ],
+          },
+        ],
+      },
+      streamSettings: buildStreamSettings({
+        network: q.get('type') || 'tcp',
+        security: q.get('security') || 'none',
+        sni: q.get('sni') || undefined,
+        fp: q.get('fp') || undefined,
+        alpn: q.get('alpn') || undefined,
+        host: q.get('host') || undefined,
+        path: q.get('path') || undefined,
+        serviceName: q.get('serviceName') || undefined,
+        mode: q.get('mode') || undefined,
+        pbk: q.get('pbk') || undefined,
+        sid: q.get('sid') || undefined,
+        spx: q.get('spx') || undefined,
+        headerType: q.get('headerType') || undefined,
+        allowInsecure: q.get('allowInsecure') === '1' || q.get('allowInsecure') === 'true',
+      }),
+    };
+  } else if (linkLine.startsWith('vmess://')) {
+    const payloadStr = decodeBase64Safe(linkLine.slice('vmess://'.length));
+    const v = JSON.parse(payloadStr) as Record<string, unknown>;
+    const address = String(v.add || '');
+    const port = Number(v.port || 443);
+    const id = String(v.id || '');
+    if (!address || !port || !id) throw new Error('Invalid VMess link.');
+    outbound = {
+      tag: 'proxy',
+      protocol: 'vmess',
+      settings: {
+        vnext: [
+          {
+            address,
+            port,
+            users: [
+              {
+                id,
+                alterId: Number(v.aid || 0),
+                security: String(v.scy || 'auto'),
+              },
+            ],
+          },
+        ],
+      },
+      streamSettings: buildStreamSettings({
+        network: String(v.net || 'tcp'),
+        security: String(v.tls || 'none'),
+        sni: v.sni ? String(v.sni) : v.host ? String(v.host) : undefined,
+        fp: v.fp ? String(v.fp) : undefined,
+        alpn: v.alpn ? String(v.alpn) : undefined,
+        host: v.host ? String(v.host) : undefined,
+        path: v.path ? String(v.path) : undefined,
+        headerType: v.type ? String(v.type) : undefined,
+        allowInsecure: v.insecure === '1' || v.insecure === 1 || v.insecure === true,
+      }),
+    };
+  } else if (linkLine.startsWith('trojan://')) {
+    const u = new URL(linkLine);
+    const q = u.searchParams;
+    const password = decodeURIComponent(u.username);
+    const address = u.hostname;
+    const port = Number(u.port || 443);
+    if (!password || !address || !port) throw new Error('Invalid Trojan link.');
+    outbound = {
+      tag: 'proxy',
+      protocol: 'trojan',
+      settings: {
+        servers: [{ address, port, password }],
+      },
+      streamSettings: buildStreamSettings({
+        network: q.get('type') || 'tcp',
+        security: q.get('security') || 'tls',
+        sni: q.get('sni') || address,
+        fp: q.get('fp') || undefined,
+        alpn: q.get('alpn') || undefined,
+        host: q.get('host') || undefined,
+        path: q.get('path') || undefined,
+        serviceName: q.get('serviceName') || undefined,
+        mode: q.get('mode') || undefined,
+        pbk: q.get('pbk') || undefined,
+        sid: q.get('sid') || undefined,
+        spx: q.get('spx') || undefined,
+      }),
+    };
+  } else if (linkLine.startsWith('ss://')) {
+    const withoutScheme = linkLine.slice('ss://'.length).split('#')[0];
+    let method = '';
+    let password = '';
+    let address = '';
+    let port = 0;
+
+    if (withoutScheme.includes('@')) {
+      const [userInfo, hostPart] = withoutScheme.split('@');
+      const hostClean = hostPart.split('?')[0];
+      const lastColon = hostClean.lastIndexOf(':');
+      address = hostClean.slice(0, lastColon).replace(/^\[|\]$/g, '');
+      port = Number(hostClean.slice(lastColon + 1));
+      const decodedUser = userInfo.includes(':') ? decodeURIComponent(userInfo) : decodeBase64Safe(userInfo);
+      const sep = decodedUser.indexOf(':');
+      method = decodedUser.slice(0, sep);
+      password = decodedUser.slice(sep + 1);
+    } else {
+      const decoded = decodeBase64Safe(withoutScheme.split('?')[0]);
+      const atIdx = decoded.lastIndexOf('@');
+      const userInfo = decoded.slice(0, atIdx);
+      const hostClean = decoded.slice(atIdx + 1);
+      const lastColon = hostClean.lastIndexOf(':');
+      address = hostClean.slice(0, lastColon).replace(/^\[|\]$/g, '');
+      port = Number(hostClean.slice(lastColon + 1));
+      const sep = userInfo.indexOf(':');
+      method = userInfo.slice(0, sep);
+      password = userInfo.slice(sep + 1);
+    }
+
+    if (!method || !password || !address || !port) throw new Error('Invalid Shadowsocks link.');
+    outbound = {
+      tag: 'proxy',
+      protocol: 'shadowsocks',
+      settings: {
+        servers: [{ address, port, method, password }],
+      },
+    };
+  } else {
+    throw new Error('Unsupported config format. Use vless://, vmess://, trojan://, ss://, or Xray JSON.');
+  }
+
+  return {
+    log: { loglevel: 'warning' },
+    inbounds: localInbounds,
+    outbounds: [
+      outbound,
+      { tag: 'direct', protocol: 'freedom' },
+      { tag: 'block', protocol: 'blackhole' },
+    ],
+  };
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function extractXrayProfileMeta(rawConfig: string): { name: string; protocol: string; address: string } {
+  const trimmed = rawConfig.trim();
+  if (trimmed.startsWith('{')) {
+    const parsed = JSON.parse(trimmed) as {
+      outbounds?: Array<{ protocol?: string; settings?: { vnext?: Array<{ address?: string; port?: number }>; servers?: Array<{ address?: string; port?: number }> } }>;
+    };
+    const first = parsed.outbounds?.[0];
+    const proto = (first?.protocol || 'json').toLowerCase();
+    const ep = first?.settings?.vnext?.[0] || first?.settings?.servers?.[0];
+    const address = ep?.address ? `${ep.address}:${ep.port || ''}`.replace(/:$/, '') : 'custom-json';
+    return { name: `Xray JSON (${address})`, protocol: proto, address };
+  }
+
+  if (trimmed.startsWith('vmess://')) {
+    const payloadStr = decodeBase64Safe(trimmed.slice('vmess://'.length));
+    const v = JSON.parse(payloadStr) as { ps?: string; add?: string; port?: string | number };
+    const address = `${v.add || ''}:${v.port || ''}`.replace(/:$/, '');
+    const name = (typeof v.ps === 'string' && v.ps.trim()) || `VMess (${address})`;
+    return { name, protocol: 'vmess', address };
+  }
+
+  const hashIdx = trimmed.indexOf('#');
+  const fragment = hashIdx !== -1 ? safeDecodeURIComponent(trimmed.slice(hashIdx + 1).trim()) : '';
+
+  if (trimmed.startsWith('ss://')) {
+    const withoutScheme = trimmed.slice('ss://'.length).split('#')[0];
+    let address = '';
+    if (withoutScheme.includes('@')) {
+      address = withoutScheme.split('@')[1]?.split('?')[0] || '';
+    } else {
+      const decoded = decodeBase64Safe(withoutScheme.split('?')[0]);
+      address = decoded.slice(decoded.lastIndexOf('@') + 1);
+    }
+    return { name: fragment || `SS (${address})`, protocol: 'ss', address };
+  }
+
+  const u = new URL(trimmed);
+  const protocol = u.protocol.replace(/:$/, '').toLowerCase();
+  const address = `${u.hostname}:${u.port || 443}`;
+  return { name: fragment || `${protocol.toUpperCase()} (${address})`, protocol, address };
+}
+
+function parseXrayProfilesInput(rawInput: string): {
+  profiles: Array<{ name: string; protocol: string; address: string; configInput: string }>;
+  errors: string[];
+} {
+  const trimmed = rawInput.trim();
+  if (!trimmed) {
+    return { profiles: [], errors: ['Empty configuration input.'] };
+  }
+
+  if (trimmed.startsWith('{')) {
+    try {
+      buildXrayRuntimeConfig(trimmed, 10808, 10809);
+      const meta = extractXrayProfileMeta(trimmed);
+      return { profiles: [{ ...meta, configInput: trimmed }], errors: [] };
+    } catch (err) {
+      return { profiles: [], errors: [err instanceof Error ? err.message : 'Invalid Xray JSON config.'] };
+    }
+  }
+
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const profiles: Array<{ name: string; protocol: string; address: string; configInput: string }> = [];
+  const errors: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    try {
+      buildXrayRuntimeConfig(line, 10808, 10809);
+      const meta = extractXrayProfileMeta(line);
+      profiles.push({ ...meta, configInput: line });
+    } catch (err) {
+      errors.push(`Line ${i + 1}: ${err instanceof Error ? err.message : 'Invalid config'}`);
+    }
+  }
+
+  return { profiles, errors };
+}
+
+function getFreeLocalPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close(() => {
+        if (port > 0) resolve(port);
+        else reject(new Error('Failed to allocate local port'));
+      });
+    });
+  });
+}
+
+function waitForLocalPort(port: number, timeoutMs = 3000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const attempt = () => {
+      const socket = net.connect({ host: '127.0.0.1', port });
+      socket.once('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once('error', () => {
+        socket.destroy();
+        if (Date.now() < deadline) {
+          setTimeout(attempt, 120);
+        } else {
+          resolve(false);
+        }
+      });
+    };
+    attempt();
+  });
+}
+
+async function stopXrayProcess(): Promise<void> {
+  const proc = xrayState.process;
+  xrayState.process = null;
+  xrayState.running = false;
+  if (!proc || proc.killed) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {}
+      resolve();
+    }, 1500);
+    proc.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    try {
+      proc.kill('SIGTERM');
+    } catch {
+      clearTimeout(timer);
+      resolve();
+    }
+  });
+}
+
+async function startXrayProcess(): Promise<void> {
+  await stopXrayProcess();
+  xrayState.lastError = null;
+  xrayState.logs = [];
+
+  if (!adminConfig.xray.enabled || !adminConfig.xray.configInput.trim()) {
+    return;
+  }
+
+  const bin = await findXrayBinary();
+  if (!bin) {
+    xrayState.lastError = 'Xray binary is not installed on this server.';
+    return;
+  }
+
+  let runtimeConfig: Record<string, unknown>;
+  try {
+    runtimeConfig = buildXrayRuntimeConfig(
+      adminConfig.xray.configInput,
+      adminConfig.xray.socksPort,
+      adminConfig.xray.httpPort
+    );
+  } catch (err) {
+    xrayState.lastError = err instanceof Error ? err.message : 'Invalid Xray configuration.';
+    return;
+  }
+
+  ensureDataDir();
+  fs.writeFileSync(XRAY_CONFIG_FILE, JSON.stringify(runtimeConfig, null, 2), { encoding: 'utf8', mode: 0o600 });
+
+  const child = spawn(bin, ['run', '-config', XRAY_CONFIG_FILE], { shell: false });
+  xrayState.process = child;
+
+  const pushLog = (chunk: Buffer) => {
+    const lines = chunk
+      .toString()
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      xrayState.logs.push(line);
+      if (xrayState.logs.length > 30) xrayState.logs.shift();
+    }
+  };
+
+  child.stdout.on('data', pushLog);
+  child.stderr.on('data', pushLog);
+  child.on('exit', (code) => {
+    if (xrayState.process === child) {
+      xrayState.process = null;
+      xrayState.running = false;
+      if (code !== 0 && code !== null) {
+        xrayState.lastError = xrayState.logs[xrayState.logs.length - 1] || `Xray exited with code ${code}`;
+      }
+    }
+  });
+  child.on('error', (err) => {
+    if (xrayState.process === child) {
+      xrayState.process = null;
+      xrayState.running = false;
+      xrayState.lastError = err.message;
+    }
+  });
+
+  const ready = await waitForLocalPort(adminConfig.xray.socksPort, 3000);
+  if (xrayState.process === child && ready) {
+    xrayState.running = true;
+    xrayState.lastError = null;
+  } else if (xrayState.process === child && !xrayState.lastError) {
+    xrayState.lastError = xrayState.logs[xrayState.logs.length - 1] || 'Xray proxy port did not open in time.';
+  }
+}
+
+async function installXrayBinary(): Promise<string> {
+  if (process.platform !== 'linux') {
+    throw new Error('Automatic Xray installation is supported on Linux hosts only. Install xray in PATH.');
+  }
+  const archMap: Record<string, string> = {
+    x64: '64',
+    arm64: 'arm64-v8a',
+  };
+  const xrayArch = archMap[process.arch];
+  if (!xrayArch) {
+    throw new Error(`Unsupported CPU architecture: ${process.arch}`);
+  }
+
+  ensureDataDir();
+  if (!fs.existsSync(BIN_DIR)) {
+    fs.mkdirSync(BIN_DIR, { recursive: true });
+  }
+
+  const downloadUrl = `https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xrayArch}.zip`;
+  const zipPath = path.join(BIN_DIR, 'xray.zip');
+  const res = await fetch(downloadUrl, { signal: AbortSignal.timeout(45000) });
+  if (!res.ok || !res.body) {
+    throw new Error(`Failed to download Xray-core (HTTP ${res.status}).`);
+  }
+  const arrayBuf = await res.arrayBuffer();
+  await fs.promises.writeFile(zipPath, Buffer.from(arrayBuf));
+
+  try {
+    await execFileAsync('unzip', ['-o', zipPath, 'xray', '-d', BIN_DIR], { timeout: 15000 });
+  } finally {
+    await fs.promises.rm(zipPath, { force: true }).catch(() => {});
+  }
+
+  const binPath = path.join(BIN_DIR, 'xray');
+  await fs.promises.chmod(binPath, 0o755);
+  xrayState.binaryPath = binPath;
+  return binPath;
+}
+
+async function proxyHttpGet(
+  targetUrl: string,
+  httpPort: number,
+  timeoutMs = 10000
+): Promise<{ statusCode: number; body: string }> {
+  const parsed = new URL(targetUrl);
+  const targetPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('Proxy request timed out'));
+    }, timeoutMs);
+
+    const connectReq = http.request({
+      host: '127.0.0.1',
+      port: httpPort,
+      method: 'CONNECT',
+      path: `${parsed.hostname}:${targetPort}`,
+    });
+
+    connectReq.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(new Error(`Proxy CONNECT failed (${res.statusCode})`));
+        return;
+      }
+
+      if (parsed.protocol === 'https:') {
+        const tlsSocket = tls.connect({
+          socket,
+          servername: parsed.hostname,
+        });
+        const req = https.request(
+          {
+            hostname: parsed.hostname,
+            port: targetPort,
+            path: parsed.pathname + parsed.search,
+            method: 'GET',
+            createConnection: () => tlsSocket,
+            headers: {
+              Host: parsed.host,
+              'User-Agent': 'GroveSave/1.0',
+              Connection: 'close',
+            },
+          },
+          (resp) => {
+            let body = '';
+            resp.on('data', (d) => {
+              if (body.length < 16384) body += d.toString();
+            });
+            resp.on('end', () => {
+              clearTimeout(timer);
+              resolve({ statusCode: resp.statusCode || 0, body });
+            });
+          }
+        );
+        req.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        req.end();
+      } else {
+        const req = http.request(
+          {
+            hostname: parsed.hostname,
+            port: targetPort,
+            path: parsed.pathname + parsed.search,
+            method: 'GET',
+            createConnection: () => socket,
+            headers: {
+              Host: parsed.host,
+              'User-Agent': 'GroveSave/1.0',
+              Connection: 'close',
+            },
+          },
+          (resp) => {
+            let body = '';
+            resp.on('data', (d) => {
+              if (body.length < 16384) body += d.toString();
+            });
+            resp.on('end', () => {
+              clearTimeout(timer);
+              resolve({ statusCode: resp.statusCode || 0, body });
+            });
+          }
+        );
+        req.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        req.end();
+      }
+    });
+
+    connectReq.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    connectReq.end();
+  });
+}
+
+async function testXrayConfigWithYouTubeDownload(
+  configInput: string,
+  rawYoutubeUrl?: string
+): Promise<{
+  success: boolean;
+  latencyMs: number;
+  downloadedBytes?: number;
+  title?: string;
+  exitIp?: string | null;
+  youtubeUrl: string;
+  error?: string;
+}> {
+  const started = Date.now();
+  const targetUrl =
+    (rawYoutubeUrl && rawYoutubeUrl.trim()) ||
+    adminConfig.xray.testYoutubeUrl ||
+    DEFAULT_XRAY_TEST_YOUTUBE_URL;
+
+  const parsedUrl = await validatePublicUrl(targetUrl);
+  if (!parsedUrl) {
+    return {
+      success: false,
+      latencyMs: Date.now() - started,
+      youtubeUrl: targetUrl,
+      error: 'Invalid or disallowed YouTube test URL.',
+    };
+  }
+
+  let bin = await findXrayBinary();
+  if (!bin && process.platform === 'linux') {
+    try {
+      bin = await installXrayBinary();
+    } catch (err) {
+      return {
+        success: false,
+        latencyMs: Date.now() - started,
+        youtubeUrl: parsedUrl.toString(),
+        error: err instanceof Error ? err.message : 'Xray binary is not installed.',
+      };
+    }
+  }
+  if (!bin) {
+    return {
+      success: false,
+      latencyMs: Date.now() - started,
+      youtubeUrl: parsedUrl.toString(),
+      error: 'Xray binary is not installed on this server.',
+    };
+  }
+
+  const runner = await getYtDlpRunner();
+  if (!runner) {
+    return {
+      success: false,
+      latencyMs: Date.now() - started,
+      youtubeUrl: parsedUrl.toString(),
+      error: 'yt-dlp is not available on this host to run YouTube download tests.',
+    };
+  }
+
+  const socksPort = await getFreeLocalPort();
+  let httpPort = await getFreeLocalPort();
+  if (httpPort === socksPort) httpPort = await getFreeLocalPort();
+
+  let runtimeConfig: Record<string, unknown>;
+  try {
+    runtimeConfig = buildXrayRuntimeConfig(configInput, socksPort, httpPort);
+  } catch (err) {
+    return {
+      success: false,
+      latencyMs: Date.now() - started,
+      youtubeUrl: parsedUrl.toString(),
+      error: err instanceof Error ? err.message : 'Invalid Xray configuration.',
+    };
+  }
+
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-xtest-'));
+  const tempXrayCfgPath = path.join(tempDir, 'xray-test.json');
+  await fs.promises.writeFile(tempXrayCfgPath, JSON.stringify(runtimeConfig, null, 2), {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
+
+  const logs: string[] = [];
+  const child = spawn(bin, ['run', '-config', tempXrayCfgPath], { shell: false });
+  const pushLog = (chunk: Buffer) => {
+    const lines = chunk
+      .toString()
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      logs.push(line);
+      if (logs.length > 25) logs.shift();
+    }
+  };
+  child.stdout.on('data', pushLog);
+  child.stderr.on('data', pushLog);
+
+  try {
+    const portReady = await waitForLocalPort(socksPort, 3500);
+    if (!portReady || child.killed || child.exitCode !== null) {
+      return {
+        success: false,
+        latencyMs: Date.now() - started,
+        youtubeUrl: parsedUrl.toString(),
+        error: logs[logs.length - 1] || 'Xray test tunnel failed to start on local port.',
+      };
+    }
+
+    let exitIp: string | null = null;
+    try {
+      const ipRes = await proxyHttpGet('https://api.ipify.org?format=json', httpPort, 6000);
+      if (ipRes.statusCode === 200) {
+        const parsedIp = JSON.parse(ipRes.body) as { ip?: string };
+        exitIp = parsedIp.ip || null;
+      }
+    } catch {
+      // Optional IP lookup; proceed directly to actual YouTube download test
+    }
+
+    const { extraArgs, env } = await getYtDlpAuthAndProxy({ skipProxy: true });
+    const socksProxy = `socks5h://127.0.0.1:${socksPort}`;
+    const httpProxy = `http://127.0.0.1:${httpPort}`;
+    const testEnv: NodeJS.ProcessEnv = {
+      ...env,
+      ALL_PROXY: socksProxy,
+      HTTP_PROXY: httpProxy,
+      HTTPS_PROXY: httpProxy,
+      NO_PROXY: '127.0.0.1,localhost',
+      no_proxy: '127.0.0.1,localhost',
+    };
+
+    const outputTemplate = path.join(tempDir, 'video.%(ext)s');
+    const ytdlpArgs = insertBeforeDoubleDash(
+      buildYtDlpArgs([
+        '-f',
+        'worst[ext=mp4]/worst[vcodec!=none][acodec!=none]/worstvideo+worstaudio/worst',
+        '--no-playlist',
+        '--no-part',
+        '--max-filesize',
+        '40M',
+        '--socket-timeout',
+        '15',
+        '--retries',
+        '2',
+        '--print',
+        'before_dl:title',
+        '--no-simulate',
+        '-o',
+        outputTemplate,
+        '--',
+        parsedUrl.toString(),
+      ]),
+      [...extraArgs, '--proxy', socksProxy]
+    );
+
+    const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...ytdlpArgs], {
+      timeout: 45000,
+      maxBuffer: 4 * 1024 * 1024,
+      env: testEnv,
+    });
+
+    const files = await fs.promises.readdir(tempDir);
+    const mediaFiles = files.filter((f) => f !== 'xray-test.json' && !f.endsWith('.part'));
+    let downloadedBytes = 0;
+    for (const f of mediaFiles) {
+      const st = await fs.promises.stat(path.join(tempDir, f));
+      if (st.isFile() && st.size > downloadedBytes) {
+        downloadedBytes = st.size;
+      }
+    }
+
+    if (downloadedBytes <= 0) {
+      return {
+        success: false,
+        latencyMs: Date.now() - started,
+        exitIp,
+        youtubeUrl: parsedUrl.toString(),
+        error: 'yt-dlp completed but no media bytes were saved.',
+      };
+    }
+
+    const titleLine = stdout
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => Boolean(l) && !l.startsWith('['));
+
+    return {
+      success: true,
+      latencyMs: Date.now() - started,
+      downloadedBytes,
+      title: titleLine || undefined,
+      exitIp,
+      youtubeUrl: parsedUrl.toString(),
+    };
+  } catch (err: unknown) {
+    const errObj = err as { stderr?: string; message?: string };
+    const stderrLines = (errObj.stderr || '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const reason = stderrLines[stderrLines.length - 1] || errObj.message || 'YouTube download test failed';
+    return {
+      success: false,
+      latencyMs: Date.now() - started,
+      youtubeUrl: parsedUrl.toString(),
+      error: reason.slice(0, 260),
+    };
+  } finally {
+    try {
+      if (!child.killed && child.exitCode === null) {
+        child.kill('SIGTERM');
+        await new Promise((r) => setTimeout(r, 200));
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }
+    } catch {}
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// --- bgutil-ytdlp-pot-provider Server Manager (Admin Only) ---
+
+interface BgutilRuntimeState {
+  process: ChildProcess | null;
+  running: boolean;
+  entryPath: string | null;
+  lastError: string | null;
+  logs: string[];
+}
+
+const bgutilState: BgutilRuntimeState = {
+  process: null,
+  running: false,
+  entryPath: null,
+  lastError: null,
+  logs: [],
+};
+
+function findBgutilPotEntry(): string | null {
+  const candidates = [
+    '/opt/bgutil-pot/server/build/main.js',
+    path.join(DATA_DIR, 'bgutil-pot', 'server', 'build', 'main.js'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      bgutilState.entryPath = p;
+      return p;
+    }
+  }
+  bgutilState.entryPath = null;
+  return null;
+}
+
+async function isBgutilPipPluginInstalled(): Promise<boolean> {
+  const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+  try {
+    await execFileAsync(pyCmd, ['-m', 'pip', 'show', 'bgutil-ytdlp-pot-provider'], { timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getEffectivePotBaseUrl(): string {
+  if (adminConfig.potProvider.mode === 'external') {
+    return adminConfig.potProvider.baseUrl.replace(/\/+$/, '');
+  }
+  return `http://127.0.0.1:${adminConfig.potProvider.port}`;
+}
+
+async function pingBgutilServer(
+  baseUrl: string
+): Promise<{ ok: boolean; version?: string; serverUptime?: number; error?: string }> {
+  try {
+    const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/ping`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const data = (await res.json()) as { version?: string; server_uptime?: number };
+    return { ok: true, version: data.version, serverUptime: data.server_uptime };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Unreachable' };
+  }
+}
+
+async function stopBgutilPotServer(): Promise<void> {
+  const proc = bgutilState.process;
+  bgutilState.process = null;
+  bgutilState.running = false;
+  if (!proc || proc.killed) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL');
+      } catch {}
+      resolve();
+    }, 1500);
+    proc.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    try {
+      proc.kill('SIGTERM');
+    } catch {
+      clearTimeout(timer);
+      resolve();
+    }
+  });
+}
+
+async function startBgutilPotServer(): Promise<void> {
+  await stopBgutilPotServer();
+  bgutilState.lastError = null;
+  bgutilState.logs = [];
+
+  if (!adminConfig.potProvider.enabled || adminConfig.potProvider.mode !== 'managed') {
+    return;
+  }
+
+  const entryPath = findBgutilPotEntry();
+  if (!entryPath) {
+    bgutilState.lastError = 'bgutil-ytdlp-pot-provider server is not installed on this host.';
+    return;
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOST: '127.0.0.1',
+    PORT: String(adminConfig.potProvider.port),
+  };
+  if (adminConfig.xray.enabled && xrayState.running) {
+    const httpProxy = `http://127.0.0.1:${adminConfig.xray.httpPort}`;
+    const socksProxy = `socks5h://127.0.0.1:${adminConfig.xray.socksPort}`;
+    env.HTTP_PROXY = httpProxy;
+    env.HTTPS_PROXY = httpProxy;
+    env.ALL_PROXY = socksProxy;
+  }
+
+  const child = spawn(process.execPath, [entryPath, '--port', String(adminConfig.potProvider.port)], {
+    shell: false,
+    cwd: path.dirname(path.dirname(entryPath)),
+    env,
+  });
+  bgutilState.process = child;
+
+  const pushLog = (chunk: Buffer) => {
+    const lines = chunk
+      .toString()
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      bgutilState.logs.push(line);
+      if (bgutilState.logs.length > 30) bgutilState.logs.shift();
+    }
+  };
+
+  child.stdout.on('data', pushLog);
+  child.stderr.on('data', pushLog);
+  child.on('exit', (code) => {
+    if (bgutilState.process === child) {
+      bgutilState.process = null;
+      bgutilState.running = false;
+      if (code !== 0 && code !== null) {
+        bgutilState.lastError = bgutilState.logs[bgutilState.logs.length - 1] || `bgutil exited with code ${code}`;
+      }
+    }
+  });
+  child.on('error', (err) => {
+    if (bgutilState.process === child) {
+      bgutilState.process = null;
+      bgutilState.running = false;
+      bgutilState.lastError = err.message;
+    }
+  });
+
+  const ready = await waitForLocalPort(adminConfig.potProvider.port, 4000);
+  if (bgutilState.process === child && ready) {
+    bgutilState.running = true;
+    bgutilState.lastError = null;
+  } else if (bgutilState.process === child && !bgutilState.lastError) {
+    bgutilState.lastError = bgutilState.logs[bgutilState.logs.length - 1] || 'bgutil server did not open port in time.';
+  }
+}
+
+async function installBgutilPotServer(): Promise<{ entryPath: string; pluginInstalled: boolean }> {
+  ensureDataDir();
+  const targetDir = path.join(DATA_DIR, 'bgutil-pot');
+  const serverDir = path.join(targetDir, 'server');
+  const entryPath = path.join(serverDir, 'build', 'main.js');
+
+  if (!fs.existsSync(entryPath)) {
+    const tarballUrl = 'https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/heads/master.tar.gz';
+    const tarPath = path.join(DATA_DIR, 'bgutil-pot.tar.gz');
+    const res = await fetch(tarballUrl, { signal: AbortSignal.timeout(45000) });
+    if (!res.ok) {
+      throw new Error(`Failed to download bgutil-ytdlp-pot-provider (HTTP ${res.status}).`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    await fs.promises.writeFile(tarPath, buf);
+
+    try {
+      await fs.promises.rm(targetDir, { recursive: true, force: true });
+      await fs.promises.mkdir(targetDir, { recursive: true });
+      await execFileAsync('tar', ['-xzf', tarPath, '--strip-components=1', '-C', targetDir], {
+        timeout: 20000,
+      });
+    } finally {
+      await fs.promises.rm(tarPath, { force: true }).catch(() => {});
+    }
+
+    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+    await execFileAsync(npmCmd, ['ci'], { cwd: serverDir, timeout: 180000 });
+    await execFileAsync(npxCmd, ['tsc'], { cwd: serverDir, timeout: 60000 });
+  }
+
+  let pluginInstalled = await isBgutilPipPluginInstalled();
+  if (!pluginInstalled) {
+    const pyCmd = process.platform === 'win32' ? 'python' : 'python3';
+    try {
+      await execFileAsync(
+        pyCmd,
+        ['-m', 'pip', 'install', '--break-system-packages', '-U', 'bgutil-ytdlp-pot-provider'],
+        { timeout: 60000 }
+      );
+      pluginInstalled = await isBgutilPipPluginInstalled();
+    } catch {
+      try {
+        await execFileAsync(pyCmd, ['-m', 'pip', 'install', '-U', 'bgutil-ytdlp-pot-provider'], { timeout: 60000 });
+        pluginInstalled = await isBgutilPipPluginInstalled();
+      } catch {
+        pluginInstalled = false;
+      }
+    }
+  }
+
+  bgutilState.entryPath = entryPath;
+  return { entryPath, pluginInstalled };
+}
+
+function formatPoTokenArg(rawToken: string): string {
+  const cleaned = rawToken.trim();
+  if (!cleaned) return '';
+  return cleaned.includes('+') ? cleaned : `web.gvs+${cleaned}`;
+}
+
+async function getYtDlpAuthAndProxy(overrides?: {
+  cookies?: string;
+  poToken?: string;
+  skipProxy?: boolean;
+}): Promise<{ extraArgs: string[]; env: NodeJS.ProcessEnv }> {
+  const extraArgs: string[] = [];
+  const env: NodeJS.ProcessEnv = { ...process.env };
+
+  const cookies = overrides?.cookies !== undefined ? overrides.cookies.trim() : adminConfig.youtubeCookies.trim();
+  const poToken = overrides?.poToken !== undefined ? overrides.poToken.trim() : adminConfig.youtubePoToken.trim();
+
+  if (cookies) {
+    ensureDataDir();
+    await fs.promises.writeFile(YT_COOKIES_FILE, cookies, { encoding: 'utf8', mode: 0o600 });
+    extraArgs.push('--cookies', YT_COOKIES_FILE);
+  }
+  if (poToken) {
+    extraArgs.push('--extractor-args', `youtube:po_token=${formatPoTokenArg(poToken)}`);
+  }
+  if (adminConfig.potProvider.enabled) {
+    const shouldAttach =
+      adminConfig.potProvider.mode === 'external' || bgutilState.running;
+    if (shouldAttach) {
+      extraArgs.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${getEffectivePotBaseUrl()}`);
+    }
+  }
+  if (!overrides?.skipProxy && adminConfig.xray.enabled && xrayState.running) {
+    const socksProxy = `socks5h://127.0.0.1:${adminConfig.xray.socksPort}`;
+    const httpProxy = `http://127.0.0.1:${adminConfig.xray.httpPort}`;
+    extraArgs.push('--proxy', socksProxy);
+    env.ALL_PROXY = socksProxy;
+    env.HTTP_PROXY = httpProxy;
+    env.HTTPS_PROXY = httpProxy;
+    env.NO_PROXY = '127.0.0.1,localhost';
+    env.no_proxy = '127.0.0.1,localhost';
+  }
+
+  return { extraArgs, env };
+}
+
+function insertBeforeDoubleDash(args: string[], extraArgs: string[]): string[] {
+  if (!extraArgs.length) return args;
+  const copy = [...args];
+  const idx = copy.indexOf('--');
+  if (idx !== -1) {
+    copy.splice(idx, 0, ...extraArgs);
+  } else {
+    copy.push(...extraArgs);
+  }
+  return copy;
 }
 
 function sanitizeFilename(name: string): string {
@@ -340,18 +2094,31 @@ function buildContentDisposition(rawTitle: string, quality: string, ext: string)
 
 interface AuthenticatedRequest extends Request {
   authUser?: StoredUser;
+  authMethod?: 'bearer' | 'cookie';
+  sessionToken?: string;
 }
 
 function optionalAuth(req: AuthenticatedRequest, _res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization || '';
   if (authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7).trim();
-    const claims = verifyToken(token);
-    if (claims) {
-      const user = usersByEmail.get(claims.email.toLowerCase());
-      if (user) {
-        req.authUser = user;
-      }
+    const user = verifySessionToken(token);
+    if (user) {
+      req.authUser = user;
+      req.authMethod = 'bearer';
+      req.sessionToken = token;
+      next();
+      return;
+    }
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieToken = cookies[SESSION_COOKIE_NAME];
+  if (cookieToken) {
+    const user = verifySessionToken(cookieToken);
+    if (user) {
+      req.authUser = user;
+      req.authMethod = 'cookie';
+      req.sessionToken = cookieToken;
     }
   }
   next();
@@ -361,6 +2128,14 @@ function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunctio
   optionalAuth(req, res, () => {
     if (!req.authUser) {
       res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    if (
+      req.authMethod === 'cookie' &&
+      ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase()) &&
+      !isCsrfValid(req)
+    ) {
+      res.status(403).json({ error: 'CSRF validation failed' });
       return;
     }
     next();
@@ -373,7 +2148,12 @@ function publicUserView(u: StoredUser) {
     email: u.email,
     displayName: u.displayName,
     provider: u.provider,
-    preferences: u.preferences,
+    role: u.role === 'admin' ? ('admin' as const) : ('user' as const),
+    preferences: {
+      theme: u.preferences.theme,
+      language: u.preferences.language,
+      defaultQuality: normalizeQualityValue(u.preferences.defaultQuality),
+    },
   };
 }
 
@@ -396,6 +2176,7 @@ function selectTargetHeight(quality: string): number {
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', async (_req: Request, res: Response) => {
@@ -429,7 +2210,7 @@ async function startServer() {
       res.status(400).json({ error: 'Valid email and password (6+ chars) required.' });
       return;
     }
-    if (usersByEmail.has(email)) {
+    if (getUserByEmail(email)) {
       res.status(409).json({ error: 'An account with this email already exists.' });
       return;
     }
@@ -441,7 +2222,7 @@ async function startServer() {
       displayName,
       passwordHash: hash,
       passwordSalt: salt,
-      role: 'user',
+      role: ADMIN_EMAIL_NORMALIZED && email === ADMIN_EMAIL_NORMALIZED ? 'admin' : 'user',
       provider: 'email',
       preferences: {
         theme: 'dark',
@@ -449,10 +2230,10 @@ async function startServer() {
         defaultQuality: '1080p',
       },
     };
-    usersByEmail.set(email, user);
-    saveUsers(usersByEmail);
+    insertUser(user);
 
-    const token = signToken(user.id, user.email);
+    const token = createUserSession(user.id);
+    setSessionCookie(req, res, token);
     res.status(201).json({ token, user: publicUserView(user) });
   });
 
@@ -461,7 +2242,7 @@ async function startServer() {
     const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
     const password = typeof body.password === 'string' ? body.password : '';
 
-    const user = usersByEmail.get(email);
+    const user = getUserByEmail(email);
     if (!user || !user.passwordHash || !user.passwordSalt) {
       res.status(401).json({ error: 'Invalid email or password.' });
       return;
@@ -471,7 +2252,8 @@ async function startServer() {
       return;
     }
 
-    const token = signToken(user.id, user.email);
+    const token = createUserSession(user.id);
+    setSessionCookie(req, res, token);
     res.json({ token, user: publicUserView(user) });
   });
 
@@ -508,36 +2290,49 @@ async function startServer() {
         return;
       }
       const email = data.email.toLowerCase();
-      let user = usersByEmail.get(email);
+      let user = getUserByEmail(email);
       if (!user) {
         user = {
           id: crypto.randomUUID(),
           email,
           displayName: data.name || email.split('@')[0],
           provider: 'google',
-          role: 'user',
+          role: ADMIN_EMAIL_NORMALIZED && email === ADMIN_EMAIL_NORMALIZED ? 'admin' : 'user',
           preferences: {
             theme: 'dark',
             language: 'en',
             defaultQuality: '1080p',
           },
         };
-        usersByEmail.set(email, user);
-        saveUsers(usersByEmail);
+        insertUser(user);
       }
-      const token = signToken(user.id, user.email);
+      const token = createUserSession(user.id);
+      setSessionCookie(req, res, token);
       res.json({ token, user: publicUserView(user) });
     } catch {
       res.status(502).json({ error: 'Failed to verify Google credential.' });
     }
   });
 
+  app.post('/api/auth/logout', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+    if (req.authMethod === 'cookie' && !isCsrfValid(req)) {
+      res.status(403).json({ error: 'CSRF validation failed' });
+      return;
+    }
+    if (req.sessionToken) {
+      revokeSessionToken(req.sessionToken);
+    }
+    clearSessionCookie(req, res);
+    res.json({ success: true });
+  });
+
   app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-    res.json({ user: publicUserView(req.authUser!) });
+    const freshUser = getUserById(req.authUser!.id) || req.authUser!;
+    res.json({ user: publicUserView(freshUser) });
   });
 
   app.put('/api/user/preferences', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-    const user = req.authUser!;
+    const user = getUserById(req.authUser!.id) || req.authUser!;
     const body = req.body as {
       theme?: unknown;
       language?: unknown;
@@ -556,13 +2351,77 @@ async function startServer() {
     }
     if (
       typeof body.defaultQuality === 'string' &&
-      ['2160p', '1080p', '720p', '480p', '360p', 'audio'].includes(body.defaultQuality)
+      ['2160p', '1080p', '720p', '480p', '360p'].includes(body.defaultQuality)
     ) {
       user.preferences.defaultQuality = body.defaultQuality;
     }
-    usersByEmail.set(user.email, user);
-    saveUsers(usersByEmail);
+    updateUserPreferencesInDb(user.id, user.preferences);
     res.json({ user: publicUserView(user) });
+  });
+
+  app.get('/api/user/history', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const items = getUserHistory(req.authUser!.id);
+    res.json({ items });
+  });
+
+  app.post('/api/user/history', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
+    const parsedUrl = await validatePublicUrl(rawUrl);
+    if (!parsedUrl) {
+      res.status(400).json({ error: 'Invalid history media URL.' });
+      return;
+    }
+    const title =
+      typeof body.title === 'string' && body.title.trim()
+        ? body.title.trim().slice(0, 240)
+        : 'Media Stream';
+    const author =
+      typeof body.author === 'string' && body.author.trim()
+        ? body.author.trim().slice(0, 120)
+        : parsedUrl.hostname;
+    const quality =
+      typeof body.quality === 'string' &&
+      ['2160p', '1080p', '720p', '480p', '360p', 'audio'].includes(body.quality.trim())
+        ? body.quality.trim()
+        : '1080p';
+    const sizeBytes =
+      typeof body.sizeBytes === 'number' && Number.isFinite(body.sizeBytes)
+        ? Math.max(0, Math.floor(body.sizeBytes))
+        : 0;
+    const rawThumb = typeof body.thumbnail === 'string' ? body.thumbnail.trim() : '';
+    const thumbnail = /^https?:\/\//i.test(rawThumb) ? rawThumb.slice(0, 1000) : null;
+    const savedAt =
+      typeof body.savedAt === 'string' && body.savedAt.trim()
+        ? body.savedAt.trim().slice(0, 32)
+        : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const jobId =
+      typeof body.jobId === 'string' && /^[a-zA-Z0-9_-]{4,80}$/.test(body.jobId.trim())
+        ? body.jobId.trim()
+        : undefined;
+    const itemId =
+      typeof body.id === 'string' && body.id.trim()
+        ? body.id.trim().slice(0, 80)
+        : crypto.randomUUID();
+
+    const item: UserHistoryItem = {
+      id: itemId,
+      ...(jobId ? { jobId } : {}),
+      url: parsedUrl.toString(),
+      title,
+      author,
+      quality,
+      sizeBytes,
+      thumbnail,
+      savedAt,
+    };
+    const items = upsertUserHistoryItem(req.authUser!.id, item);
+    res.status(201).json({ item, items });
+  });
+
+  app.delete('/api/user/history', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    clearUserHistoryInDb(req.authUser!.id);
+    res.json({ success: true });
   });
 
   // YouTube Authentication endpoints (admin only)
@@ -573,8 +2432,8 @@ async function startServer() {
       return;
     }
     res.json({
-      youtubeCookies: user.preferences.youtubeCookies || '',
-      youtubePoToken: user.preferences.youtubePoToken || '',
+      youtubeCookies: adminConfig.youtubeCookies,
+      youtubePoToken: adminConfig.youtubePoToken,
     });
   });
 
@@ -586,13 +2445,15 @@ async function startServer() {
     }
     const body = req.body as { youtubeCookies?: unknown; youtubePoToken?: unknown };
     if (typeof body.youtubeCookies === 'string') {
-      user.preferences.youtubeCookies = body.youtubeCookies.trim();
+      adminConfig.youtubeCookies = body.youtubeCookies.trim();
+      if (!adminConfig.youtubeCookies) {
+        fs.promises.rm(YT_COOKIES_FILE, { force: true }).catch(() => {});
+      }
     }
     if (typeof body.youtubePoToken === 'string') {
-      user.preferences.youtubePoToken = body.youtubePoToken.trim();
+      adminConfig.youtubePoToken = body.youtubePoToken.trim();
     }
-    usersByEmail.set(user.email, user);
-    saveUsers(usersByEmail);
+    saveAdminConfig(adminConfig);
     res.json({ success: true });
   });
 
@@ -602,36 +2463,828 @@ async function startServer() {
       res.status(403).json({ error: 'Admin access required' });
       return;
     }
+    const body = (req.body || {}) as { youtubeCookies?: unknown; youtubePoToken?: unknown };
+    const cookiesOverride = typeof body.youtubeCookies === 'string' ? body.youtubeCookies : undefined;
+    const poTokenOverride = typeof body.youtubePoToken === 'string' ? body.youtubePoToken : undefined;
+
     const testUrl = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
-    const available = await getYtDlpPath();
-    if (!available) {
+    const runner = await getYtDlpRunner();
+    if (!runner) {
       res.status(500).json({ error: 'yt-dlp not available' });
       return;
     }
     try {
-      const args = buildYtDlpArgs([
-        '--dump-single-json',
-        '--no-playlist',
-        '--no-warnings',
-        '--',
-        testUrl,
-      ]);
-      // Add cookies and PO token if configured
-      if (user.preferences.youtubeCookies) {
-        const cookieFile = path.join(CACHE_DIR, `cookies-${user.id}.txt`);
-        await fs.promises.writeFile(cookieFile, user.preferences.youtubeCookies);
-        args.splice(args.indexOf('--'), 0, '--cookies', cookieFile);
-      }
-      if (user.preferences.youtubePoToken) {
-        args.splice(args.indexOf('--'), 0, '--extractor-args', `youtube:po_token=${user.preferences.youtubePoToken}`);
-      }
-      const { stdout } = await execFileAsync(YTDLP_CMD, [...YTDLP_ARGS, ...args], { timeout: 15000, maxBuffer: 4 * 1024 * 1024 });
-      const info = JSON.parse(stdout);
+      const { extraArgs, env } = await getYtDlpAuthAndProxy({
+        cookies: cookiesOverride,
+        poToken: poTokenOverride,
+      });
+      const args = insertBeforeDoubleDash(
+        buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', testUrl]),
+        extraArgs
+      );
+      const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
+        timeout: 20000,
+        maxBuffer: 4 * 1024 * 1024,
+        env,
+      });
+      const info = JSON.parse(stdout) as { title?: string };
       res.json({ success: true, title: info.title || 'Test video' });
     } catch (err) {
       res.json({ success: false, error: err instanceof Error ? err.message : 'Test failed' });
     }
   });
+
+  // Xray VPN Proxy endpoints (admin only)
+  app.get('/api/admin/xray', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const bin = await findXrayBinary();
+    res.json({
+      enabled: adminConfig.xray.enabled,
+      configInput: adminConfig.xray.configInput,
+      activeProfileId: adminConfig.xray.activeProfileId,
+      profiles: adminConfig.xray.profiles,
+      testYoutubeUrl: adminConfig.xray.testYoutubeUrl,
+      socksPort: adminConfig.xray.socksPort,
+      httpPort: adminConfig.xray.httpPort,
+      running: xrayState.running,
+      binaryInstalled: Boolean(bin),
+      binaryPath: bin,
+      lastError: xrayState.lastError,
+    });
+  });
+
+  app.put('/api/admin/xray', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = req.body as {
+      enabled?: unknown;
+      configInput?: unknown;
+      testYoutubeUrl?: unknown;
+    };
+    const nextEnabled = typeof body.enabled === 'boolean' ? body.enabled : adminConfig.xray.enabled;
+    const nextConfigInput =
+      typeof body.configInput === 'string' ? body.configInput.trim() : adminConfig.xray.configInput;
+
+    if (typeof body.testYoutubeUrl === 'string' && body.testYoutubeUrl.trim()) {
+      const validTestUrl = await validatePublicUrl(body.testYoutubeUrl.trim());
+      if (!validTestUrl) {
+        res.status(400).json({ error: 'Invalid YouTube test URL.' });
+        return;
+      }
+      adminConfig.xray.testYoutubeUrl = validTestUrl.toString();
+    }
+
+    // If multi-line share links were pasted directly in Save & Apply, import all into profiles and activate the first
+    if (nextConfigInput) {
+      const parsedBatch = parseXrayProfilesInput(nextConfigInput);
+      if (!parsedBatch.profiles.length) {
+        res.status(400).json({ error: parsedBatch.errors[0] || 'Invalid Xray configuration.' });
+        return;
+      }
+      if (parsedBatch.profiles.length > 1) {
+        for (const item of parsedBatch.profiles) {
+          if (!adminConfig.xray.profiles.some((p) => p.configInput === item.configInput)) {
+            adminConfig.xray.profiles.push({
+              id: crypto.randomUUID(),
+              ...item,
+            });
+          }
+        }
+        const firstMatch = adminConfig.xray.profiles.find(
+          (p) => p.configInput === parsedBatch.profiles[0].configInput
+        );
+        adminConfig.xray.configInput = parsedBatch.profiles[0].configInput;
+        adminConfig.xray.activeProfileId = firstMatch?.id || null;
+      } else {
+        const single = parsedBatch.profiles[0];
+        let existing = adminConfig.xray.profiles.find((p) => p.configInput === single.configInput);
+        if (!existing) {
+          existing = { id: crypto.randomUUID(), ...single };
+          adminConfig.xray.profiles.push(existing);
+        }
+        adminConfig.xray.configInput = single.configInput;
+        adminConfig.xray.activeProfileId = existing.id;
+      }
+    } else {
+      adminConfig.xray.configInput = '';
+      adminConfig.xray.activeProfileId = null;
+    }
+
+    if (nextEnabled && !adminConfig.xray.configInput) {
+      res.status(400).json({ error: 'Please provide or select a valid Xray config before enabling VPN.' });
+      return;
+    }
+
+    adminConfig.xray.enabled = nextEnabled;
+    saveAdminConfig(adminConfig);
+
+    if (adminConfig.xray.enabled) {
+      let bin = await findXrayBinary();
+      if (!bin && process.platform === 'linux') {
+        try {
+          bin = await installXrayBinary();
+        } catch (err) {
+          xrayState.lastError = err instanceof Error ? err.message : 'Failed to install Xray binary.';
+        }
+      }
+      await startXrayProcess();
+    } else {
+      await stopXrayProcess();
+    }
+
+    // Restart managed bgutil POT server so it picks up / drops Xray proxy env
+    if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed' && findBgutilPotEntry()) {
+      await startBgutilPotServer();
+    }
+
+    const bin = await findXrayBinary();
+    res.json({
+      success: true,
+      enabled: adminConfig.xray.enabled,
+      configInput: adminConfig.xray.configInput,
+      activeProfileId: adminConfig.xray.activeProfileId,
+      profiles: adminConfig.xray.profiles,
+      testYoutubeUrl: adminConfig.xray.testYoutubeUrl,
+      socksPort: adminConfig.xray.socksPort,
+      httpPort: adminConfig.xray.httpPort,
+      running: xrayState.running,
+      binaryInstalled: Boolean(bin),
+      lastError: xrayState.lastError,
+    });
+  });
+
+  app.post('/api/admin/xray/profiles/import', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = req.body as { rawConfigs?: unknown; replaceAll?: unknown };
+    const rawConfigs = typeof body.rawConfigs === 'string' ? body.rawConfigs : '';
+    const replaceAll = Boolean(body.replaceAll);
+
+    const parsed = parseXrayProfilesInput(rawConfigs);
+    if (!parsed.profiles.length) {
+      res.status(400).json({
+        success: false,
+        error: parsed.errors[0] || 'No valid Xray configs found.',
+        errors: parsed.errors,
+      });
+      return;
+    }
+
+    if (replaceAll) {
+      adminConfig.xray.profiles = [];
+      adminConfig.xray.activeProfileId = null;
+    }
+
+    let addedCount = 0;
+    for (const item of parsed.profiles) {
+      const dup = adminConfig.xray.profiles.some((p) => p.configInput === item.configInput);
+      if (!dup) {
+        adminConfig.xray.profiles.push({
+          id: crypto.randomUUID(),
+          ...item,
+        });
+        addedCount += 1;
+      }
+    }
+
+    if (!adminConfig.xray.activeProfileId && adminConfig.xray.profiles.length > 0) {
+      adminConfig.xray.activeProfileId = adminConfig.xray.profiles[0].id;
+      adminConfig.xray.configInput = adminConfig.xray.profiles[0].configInput;
+    }
+
+    saveAdminConfig(adminConfig);
+    res.json({
+      success: true,
+      addedCount,
+      errors: parsed.errors,
+      activeProfileId: adminConfig.xray.activeProfileId,
+      profiles: adminConfig.xray.profiles,
+      configInput: adminConfig.xray.configInput,
+    });
+  });
+
+  app.post('/api/admin/xray/profiles/:id/activate', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const profile = adminConfig.xray.profiles.find((p) => p.id === req.params.id);
+    if (!profile) {
+      res.status(404).json({ error: 'Xray config profile not found.' });
+      return;
+    }
+
+    adminConfig.xray.activeProfileId = profile.id;
+    adminConfig.xray.configInput = profile.configInput;
+    adminConfig.xray.enabled = true;
+    saveAdminConfig(adminConfig);
+
+    let bin = await findXrayBinary();
+    if (!bin && process.platform === 'linux') {
+      try {
+        bin = await installXrayBinary();
+      } catch (err) {
+        xrayState.lastError = err instanceof Error ? err.message : 'Failed to install Xray binary.';
+      }
+    }
+    await startXrayProcess();
+
+    if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed' && findBgutilPotEntry()) {
+      await startBgutilPotServer();
+    }
+
+    res.json({
+      success: true,
+      enabled: adminConfig.xray.enabled,
+      configInput: adminConfig.xray.configInput,
+      activeProfileId: adminConfig.xray.activeProfileId,
+      profiles: adminConfig.xray.profiles,
+      running: xrayState.running,
+      binaryInstalled: Boolean(await findXrayBinary()),
+      lastError: xrayState.lastError,
+    });
+  });
+
+  app.delete('/api/admin/xray/profiles/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const idx = adminConfig.xray.profiles.findIndex((p) => p.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Profile not found.' });
+      return;
+    }
+    const removed = adminConfig.xray.profiles[idx];
+    adminConfig.xray.profiles.splice(idx, 1);
+
+    if (adminConfig.xray.activeProfileId === removed.id) {
+      const nextProfile = adminConfig.xray.profiles[0] || null;
+      adminConfig.xray.activeProfileId = nextProfile ? nextProfile.id : null;
+      adminConfig.xray.configInput = nextProfile ? nextProfile.configInput : '';
+      if (!nextProfile) {
+        adminConfig.xray.enabled = false;
+        await stopXrayProcess();
+      } else if (adminConfig.xray.enabled) {
+        await startXrayProcess();
+      }
+      if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed' && findBgutilPotEntry()) {
+        await startBgutilPotServer();
+      }
+    }
+
+    saveAdminConfig(adminConfig);
+    res.json({
+      success: true,
+      enabled: adminConfig.xray.enabled,
+      activeProfileId: adminConfig.xray.activeProfileId,
+      configInput: adminConfig.xray.configInput,
+      profiles: adminConfig.xray.profiles,
+      running: xrayState.running,
+    });
+  });
+
+  // bgutil-ytdlp-pot-provider endpoints (admin only)
+  app.get('/api/admin/pot-provider', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const entryPath = findBgutilPotEntry();
+    const pluginInstalled = await isBgutilPipPluginInstalled();
+    const effectiveUrl = getEffectivePotBaseUrl();
+    const ping =
+      adminConfig.potProvider.enabled && (adminConfig.potProvider.mode === 'external' || bgutilState.running)
+        ? await pingBgutilServer(effectiveUrl)
+        : { ok: false };
+
+    res.json({
+      enabled: adminConfig.potProvider.enabled,
+      mode: adminConfig.potProvider.mode,
+      baseUrl: adminConfig.potProvider.baseUrl,
+      port: adminConfig.potProvider.port,
+      installed: Boolean(entryPath),
+      pluginInstalled,
+      running: adminConfig.potProvider.mode === 'external' ? ping.ok : bgutilState.running,
+      pingVersion: ping.version || null,
+      lastError: bgutilState.lastError,
+    });
+  });
+
+  app.put('/api/admin/pot-provider', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = req.body as {
+      enabled?: unknown;
+      mode?: unknown;
+      baseUrl?: unknown;
+      port?: unknown;
+    };
+    const nextEnabled =
+      typeof body.enabled === 'boolean' ? body.enabled : adminConfig.potProvider.enabled;
+    const nextMode: 'managed' | 'external' =
+      body.mode === 'external' ? 'external' : body.mode === 'managed' ? 'managed' : adminConfig.potProvider.mode;
+    const nextPort =
+      typeof body.port === 'number' && body.port > 1024 && body.port < 65535
+        ? Math.floor(body.port)
+        : adminConfig.potProvider.port;
+    let nextBaseUrl = adminConfig.potProvider.baseUrl;
+
+    if (typeof body.baseUrl === 'string' && body.baseUrl.trim()) {
+      try {
+        const parsed = new URL(body.baseUrl.trim());
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          res.status(400).json({ error: 'Provider URL must use http:// or https://.' });
+          return;
+        }
+        nextBaseUrl = parsed.toString().replace(/\/+$/, '');
+      } catch {
+        res.status(400).json({ error: 'Invalid provider base URL.' });
+        return;
+      }
+    }
+
+    adminConfig.potProvider = {
+      enabled: nextEnabled,
+      mode: nextMode,
+      baseUrl: nextBaseUrl,
+      port: nextPort,
+    };
+    saveAdminConfig(adminConfig);
+
+    if (nextEnabled && nextMode === 'managed') {
+      await startBgutilPotServer();
+    } else {
+      await stopBgutilPotServer();
+    }
+
+    const entryPath = findBgutilPotEntry();
+    const pluginInstalled = await isBgutilPipPluginInstalled();
+    const ping =
+      nextEnabled && (nextMode === 'external' || bgutilState.running)
+        ? await pingBgutilServer(getEffectivePotBaseUrl())
+        : { ok: false };
+
+    res.json({
+      success: true,
+      enabled: adminConfig.potProvider.enabled,
+      mode: adminConfig.potProvider.mode,
+      baseUrl: adminConfig.potProvider.baseUrl,
+      port: adminConfig.potProvider.port,
+      installed: Boolean(entryPath),
+      pluginInstalled,
+      running: nextMode === 'external' ? ping.ok : bgutilState.running,
+      pingVersion: ping.version || null,
+      lastError: bgutilState.lastError,
+    });
+  });
+
+  app.post('/api/admin/pot-provider/install', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    try {
+      const result = await installBgutilPotServer();
+      if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed') {
+        await startBgutilPotServer();
+      }
+      res.json({
+        success: true,
+        installed: true,
+        pluginInstalled: result.pluginInstalled,
+        running: bgutilState.running,
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        error: err instanceof Error ? err.message : 'bgutil POT server installation failed',
+      });
+    }
+  });
+
+  app.post('/api/admin/pot-provider/test', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const effectiveUrl = getEffectivePotBaseUrl();
+    const started = Date.now();
+    const ping = await pingBgutilServer(effectiveUrl);
+    if (!ping.ok) {
+      res.json({
+        success: false,
+        error: ping.error || bgutilState.lastError || 'bgutil POT server is not reachable.',
+      });
+      return;
+    }
+
+    try {
+      const potRes = await fetch(`${effectiveUrl}/get_pot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content_binding: 'dQw4w9WgXcQ' }),
+        signal: AbortSignal.timeout(20000),
+      });
+      const latencyMs = Date.now() - started;
+      const potData = (await potRes.json()) as { poToken?: string; po_token?: string; error?: string };
+      const token = potData.poToken || potData.po_token || '';
+      if (!potRes.ok || !token) {
+        res.json({
+          success: false,
+          error: potData.error || `HTTP ${potRes.status} from /get_pot`,
+        });
+        return;
+      }
+      res.json({
+        success: true,
+        version: ping.version || null,
+        latencyMs,
+        tokenLength: token.length,
+        tokenPreview: `${token.slice(0, 12)}...`,
+      });
+    } catch (err) {
+      res.json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Failed to mint PO Token',
+      });
+    }
+  });
+
+  app.post('/api/admin/xray/install', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    try {
+      const binPath = await installXrayBinary();
+      if (adminConfig.xray.enabled && adminConfig.xray.configInput.trim()) {
+        await startXrayProcess();
+      }
+      res.json({ success: true, binaryPath: binPath, running: xrayState.running });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Xray installation failed',
+      });
+    }
+  });
+
+  app.post('/api/admin/xray/test', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      profileId?: unknown;
+      configInput?: unknown;
+      youtubeUrl?: unknown;
+    };
+    const profileId = typeof body.profileId === 'string' ? body.profileId : '';
+    const youtubeUrl = typeof body.youtubeUrl === 'string' ? body.youtubeUrl.trim() : undefined;
+    if (youtubeUrl) {
+      const valid = await validatePublicUrl(youtubeUrl);
+      if (valid) {
+        adminConfig.xray.testYoutubeUrl = valid.toString();
+        saveAdminConfig(adminConfig);
+      }
+    }
+
+    const targetProfile = profileId
+      ? adminConfig.xray.profiles.find((p) => p.id === profileId)
+      : undefined;
+    const rawConfigToTest =
+      (typeof body.configInput === 'string' && body.configInput.trim()) ||
+      targetProfile?.configInput ||
+      adminConfig.xray.configInput;
+
+    if (!rawConfigToTest) {
+      res.status(400).json({
+        success: false,
+        error: 'No Xray configuration selected to test.',
+      });
+      return;
+    }
+
+    const testResult = await testXrayConfigWithYouTubeDownload(rawConfigToTest, youtubeUrl);
+
+    if (targetProfile) {
+      targetProfile.lastTest = {
+        ok: testResult.success,
+        testedAt: Date.now(),
+        latencyMs: testResult.latencyMs,
+        downloadedBytes: testResult.downloadedBytes,
+        title: testResult.title,
+        exitIp: testResult.exitIp,
+        error: testResult.error,
+      };
+      saveAdminConfig(adminConfig);
+    }
+
+    res.json({
+      ...testResult,
+      profileId: targetProfile?.id || null,
+      lastTest: targetProfile?.lastTest || null,
+    });
+  });
+
+  const PREFERRED_LANG_ORDER = ['fa', 'en', 'en-US', 'en-GB', 'ar', 'ru', 'zh-Hans', 'zh', 'tr', 'de', 'fr', 'es'];
+
+  function formatLanguageLabel(code: string, rawName?: string): string {
+    const cleanedCode = (code || '').trim();
+    if (rawName && rawName.trim()) {
+      return rawName.trim();
+    }
+    if (!cleanedCode || cleanedCode === 'und') return 'Original';
+    try {
+      const dn = new Intl.DisplayNames(['en'], { type: 'language' });
+      const baseCode = cleanedCode.split(/[-_]/)[0];
+      return dn.of(cleanedCode) || dn.of(baseCode) || cleanedCode.toUpperCase();
+    } catch {
+      return cleanedCode.toUpperCase();
+    }
+  }
+
+  function sortSubtitlesList(items: MediaSubtitleTrack[]): MediaSubtitleTrack[] {
+    return [...items].sort((a, b) => {
+      const idxA = PREFERRED_LANG_ORDER.indexOf(a.lang);
+      const idxB = PREFERRED_LANG_ORDER.indexOf(b.lang);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return a.label.localeCompare(b.label);
+    });
+  }
+
+  function extractYtDlpTracks(info: Record<string, unknown>): {
+    audioTracks: MediaAudioTrack[];
+    manualSubtitles: MediaSubtitleTrack[];
+    autoSubtitles: MediaSubtitleTrack[];
+  } {
+    const formats = Array.isArray(info.formats) ? (info.formats as Array<Record<string, unknown>>) : [];
+    const byLangKey = new Map<string, MediaAudioTrack & { score: number }>();
+
+    for (const f of formats) {
+      const acodec = typeof f.acodec === 'string' ? f.acodec : 'none';
+      const vcodec = typeof f.vcodec === 'string' ? f.vcodec : 'none';
+      const formatId = typeof f.format_id === 'string' ? f.format_id : '';
+      if (!formatId || acodec === 'none' || vcodec !== 'none') continue;
+
+      const lang = typeof f.language === 'string' && f.language.trim() ? f.language.trim() : 'und';
+      const note = typeof f.format_note === 'string' ? f.format_note.trim() : '';
+      const langPref = typeof f.language_preference === 'number' ? f.language_preference : 0;
+      const isDefault = langPref > 0 || /original|default/i.test(note);
+      const ext = typeof f.ext === 'string' ? f.ext : 'm4a';
+      const abr = typeof f.abr === 'number' && Number.isFinite(f.abr) ? Math.round(f.abr) : null;
+      const baseLabel = formatLanguageLabel(lang);
+      const label = note && !note.toLowerCase().includes('audio only') && note.toLowerCase() !== baseLabel.toLowerCase()
+        ? `${baseLabel} · ${note}`
+        : isDefault
+          ? `${baseLabel} · Original`
+          : baseLabel;
+
+      // Prefer m4a/mp4a slightly for native MP4 compatibility, then higher abr
+      const score = (ext === 'm4a' || acodec.includes('mp4a') ? 1000 : 0) + (abr || 0) + (isDefault ? 50 : 0);
+      const key = `${lang.toLowerCase()}::${isDefault ? 'def' : 'alt'}`;
+      const prev = byLangKey.get(key);
+      if (!prev || score > prev.score) {
+        byLangKey.set(key, { formatId, language: lang, label, ext, abr, isDefault, score });
+      }
+    }
+
+    const audioTracks: MediaAudioTrack[] = Array.from(byLangKey.values())
+      .sort((a, b) => {
+        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+        return a.label.localeCompare(b.label);
+      })
+      .map(({ score: _s, ...rest }) => rest);
+
+    const parseSubsMap = (rawMap: unknown, isAuto: boolean): MediaSubtitleTrack[] => {
+      if (!rawMap || typeof rawMap !== 'object') return [];
+      const list: MediaSubtitleTrack[] = [];
+      for (const [lang, entries] of Object.entries(rawMap as Record<string, unknown>)) {
+        if (!lang || lang === 'live_chat' || !Array.isArray(entries) || entries.length === 0) continue;
+        const first = entries[0] as { name?: string } | undefined;
+        list.push({
+          lang,
+          label: formatLanguageLabel(lang, typeof first?.name === 'string' ? first.name : undefined),
+          isAuto,
+        });
+      }
+      return sortSubtitlesList(list);
+    };
+
+    return {
+      audioTracks,
+      manualSubtitles: parseSubsMap(info.subtitles, false),
+      autoSubtitles: parseSubsMap(info.automatic_captions, true),
+    };
+  }
+
+  function extractYtdlTracks(info: Awaited<ReturnType<typeof ytdl.getInfo>>): {
+    audioTracks: MediaAudioTrack[];
+    manualSubtitles: MediaSubtitleTrack[];
+    autoSubtitles: MediaSubtitleTrack[];
+  } {
+    const byTrack = new Map<string, MediaAudioTrack & { score: number }>();
+    for (const f of info.formats) {
+      if (f.hasVideo || !f.hasAudio) continue;
+      const rawFmt = f as VideoFormat & {
+        audioTrack?: { id?: string; displayName?: string; audioIsDefault?: boolean };
+      };
+      const trackInfo = rawFmt.audioTrack;
+      const lang = trackInfo?.id?.split('.')[0] || 'und';
+      const isDefault = Boolean(trackInfo?.audioIsDefault);
+      const abr = typeof f.audioBitrate === 'number' ? f.audioBitrate : null;
+      const ext = f.container || 'm4a';
+      const label = trackInfo?.displayName || (lang !== 'und' ? formatLanguageLabel(lang) : 'Original');
+      const score = (ext === 'mp4' || ext === 'm4a' ? 1000 : 0) + (abr || 0) + (isDefault ? 50 : 0);
+      const key = `${trackInfo?.id || lang}`;
+      const prev = byTrack.get(key);
+      if (!prev || score > prev.score) {
+        byTrack.set(key, {
+          formatId: String(f.itag),
+          language: lang,
+          label,
+          ext,
+          abr,
+          isDefault,
+          score,
+        });
+      }
+    }
+
+    const audioTracks: MediaAudioTrack[] = Array.from(byTrack.values())
+      .sort((a, b) => {
+        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+        return a.label.localeCompare(b.label);
+      })
+      .map(({ score: _s, ...rest }) => rest);
+
+    type CaptionTrackEntry = {
+      baseUrl?: string;
+      languageCode?: string;
+      kind?: string;
+      name?: { simpleText?: string; runs?: Array<{ text?: string }> };
+    };
+    type PlayerRespCaptions = {
+      captions?: {
+        playerCaptionsTracklistRenderer?: {
+          captionTracks?: CaptionTrackEntry[];
+        };
+      };
+    };
+    const rawInfo = info as unknown as {
+      playerResponse?: PlayerRespCaptions;
+      player_response?: PlayerRespCaptions;
+    };
+    const playerResp = rawInfo.playerResponse || rawInfo.player_response;
+    const captionTracks = playerResp?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+
+    const manualSubtitles: MediaSubtitleTrack[] = [];
+    const autoSubtitles: MediaSubtitleTrack[] = [];
+    for (const c of captionTracks) {
+      if (!c.languageCode || !c.baseUrl) continue;
+      const isAuto = c.kind === 'asr';
+      const rawName = c.name?.simpleText || c.name?.runs?.map((r) => r.text || '').join('');
+      const item: MediaSubtitleTrack = {
+        lang: c.languageCode,
+        label: formatLanguageLabel(c.languageCode, rawName),
+        isAuto,
+      };
+      if (isAuto) autoSubtitles.push(item);
+      else manualSubtitles.push(item);
+    }
+
+    return {
+      audioTracks,
+      manualSubtitles: sortSubtitlesList(manualSubtitles),
+      autoSubtitles: sortSubtitlesList(autoSubtitles),
+    };
+  }
+
+  function validateAudioFormatId(raw: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const cleaned = raw.trim();
+    if (!cleaned) return undefined;
+    return /^[a-zA-Z0-9_+.-]{1,32}$/.test(cleaned) ? cleaned : undefined;
+  }
+
+  async function proxyRemoteMediaWithRange(mediaUrl: string, req: Request, res: Response): Promise<void> {
+    const parsed = new URL(mediaUrl);
+    const targetPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+    const reqHeaders: Record<string, string> = {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    };
+    if (typeof req.headers.range === 'string' && req.headers.range) {
+      reqHeaders.Range = req.headers.range;
+    }
+
+    const forwardUpstream = (upstreamRes: http.IncomingMessage) => {
+      const status = upstreamRes.statusCode || 200;
+      res.status(status);
+      const copyHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+      for (const h of copyHeaders) {
+        const v = upstreamRes.headers[h];
+        if (v) res.setHeader(h, v);
+      }
+      if (!upstreamRes.headers['accept-ranges']) {
+        res.setHeader('Accept-Ranges', 'bytes');
+      }
+      if (!upstreamRes.headers['content-type']) {
+        res.setHeader('Content-Type', 'video/mp4');
+      }
+      upstreamRes.pipe(res);
+      req.on('close', () => {
+        upstreamRes.destroy();
+      });
+    };
+
+    if (adminConfig.xray.enabled && xrayState.running) {
+      await new Promise<void>((resolve, reject) => {
+        const connectReq = http.request({
+          host: '127.0.0.1',
+          port: adminConfig.xray.httpPort,
+          method: 'CONNECT',
+          path: `${parsed.hostname}:${targetPort}`,
+        });
+        connectReq.on('connect', (cRes, socket) => {
+          if (cRes.statusCode !== 200) {
+            socket.destroy();
+            reject(new Error(`Proxy CONNECT ${cRes.statusCode}`));
+            return;
+          }
+          const mod = parsed.protocol === 'https:' ? https : http;
+          const createConnection = () =>
+            parsed.protocol === 'https:'
+              ? tls.connect({ socket, servername: parsed.hostname })
+              : socket;
+          const upstreamReq = mod.request(
+            {
+              hostname: parsed.hostname,
+              port: targetPort,
+              path: parsed.pathname + parsed.search,
+              method: 'GET',
+              createConnection,
+              headers: { ...reqHeaders, Host: parsed.host },
+            },
+            (upstreamRes) => {
+              forwardUpstream(upstreamRes);
+              upstreamRes.on('end', resolve);
+            }
+          );
+          upstreamReq.on('error', reject);
+          req.on('close', () => upstreamReq.destroy());
+          upstreamReq.end();
+        });
+        connectReq.on('error', reject);
+        connectReq.end();
+      });
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const upstreamReq = mod.request(
+        {
+          hostname: parsed.hostname,
+          port: targetPort,
+          path: parsed.pathname + parsed.search,
+          method: 'GET',
+          headers: reqHeaders,
+        },
+        (upstreamRes) => {
+          forwardUpstream(upstreamRes);
+          upstreamRes.on('end', resolve);
+        }
+      );
+      upstreamReq.on('error', reject);
+      req.on('close', () => upstreamReq.destroy());
+      upstreamReq.end();
+    });
+  }
 
   app.post('/api/media/inspect', async (req: Request, res: Response) => {
     const body = req.body as { url?: unknown };
@@ -643,30 +3296,39 @@ async function startServer() {
     }
 
     const ytId = extractYouTubeId(parsed);
-    const available = await getYtDlpPath();
+    const runner = await getYtDlpRunner();
 
-    if (available) {
+    if (runner) {
       try {
-        const { stdout } = await execFileAsync(
-          YTDLP_CMD,
-          [...YTDLP_ARGS, ...buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', parsed.toString()])],
-          { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }
+        const { extraArgs, env } = await getYtDlpAuthAndProxy();
+        const args = insertBeforeDoubleDash(
+          buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', parsed.toString()]),
+          extraArgs
         );
-        const info = JSON.parse(stdout) as {
+        const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
+          timeout: 20000,
+          maxBuffer: 4 * 1024 * 1024,
+          env,
+        });
+        const info = JSON.parse(stdout) as Record<string, unknown> & {
           title?: string;
           uploader?: string;
           channel?: string;
           duration?: number;
           thumbnail?: string;
         };
+        const tracks = extractYtDlpTracks(info);
         res.json({
           title: info.title || 'Media Stream',
           author: info.uploader || info.channel || parsed.hostname,
           durationSeconds: typeof info.duration === 'number' ? info.duration : null,
           thumbnail: info.thumbnail || (ytId ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg` : null),
           providerGlow: ytId ? 'red' : 'default',
-          qualities: ['2160p', '1080p', '720p', '480p', '360p', 'audio'],
+          qualities: ['2160p', '1080p', '720p', '480p', '360p'],
           engineMode: 'live',
+          audioTracks: tracks.audioTracks,
+          manualSubtitles: tracks.manualSubtitles,
+          autoSubtitles: tracks.autoSubtitles,
         });
         return;
       } catch {
@@ -687,10 +3349,10 @@ async function startServer() {
           const h = selectTargetHeight(q);
           return maxHeight === 0 || h <= maxHeight || h <= 720;
         });
-        qualities.push('audio');
 
         const thumbs = details.thumbnails || [];
         const bestThumb = thumbs[thumbs.length - 1]?.url || `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
+        const tracks = extractYtdlTracks(info);
 
         res.json({
           title: details.title || `Media Clip (${ytId})`,
@@ -700,6 +3362,9 @@ async function startServer() {
           providerGlow: 'red',
           qualities,
           engineMode: 'live',
+          audioTracks: tracks.audioTracks,
+          manualSubtitles: tracks.manualSubtitles,
+          autoSubtitles: tracks.autoSubtitles,
         });
         return;
       } catch {
@@ -731,8 +3396,11 @@ async function startServer() {
           durationSeconds: null,
           thumbnail,
           providerGlow: 'red',
-          qualities: ['2160p', '1080p', '720p', '480p', '360p', 'audio'],
+          qualities: ['2160p', '1080p', '720p', '480p', '360p'],
           engineMode: 'preview',
+          audioTracks: [],
+          manualSubtitles: [],
+          autoSubtitles: [],
         });
         return;
       }
@@ -766,8 +3434,11 @@ async function startServer() {
       durationSeconds: null,
       thumbnail,
       providerGlow: 'default',
-      qualities: ['1080p', '720p', '480p', '360p', 'audio'],
+      qualities: ['1080p', '720p', '480p', '360p'],
       engineMode: 'preview',
+      audioTracks: [],
+      manualSubtitles: [],
+      autoSubtitles: [],
     });
   });
 
@@ -784,61 +3455,48 @@ async function startServer() {
     const isAudio = job.quality === 'audio';
     const ytId = extractYouTubeId(parsed);
 
-    // Get admin user for YouTube auth (first admin found)
-    let adminUser: StoredUser | undefined;
-    for (const u of usersByEmail.values()) {
-      if (u.role === 'admin') {
-        adminUser = u;
-        break;
-      }
-    }
-
     try {
-      const available = await getYtDlpPath();
-      if (available) {
+      const runner = await getYtDlpRunner();
+      if (runner) {
         const targetH = String(selectTargetHeight(job.quality));
+        const audioFid = job.audioFormatId;
+        const videoFmtSelector = audioFid
+          ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFid}/bestvideo[height<=${targetH}]+${audioFid}/best[height<=${targetH}]/best`
+          : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`;
+        const audioFmtSelector = audioFid ? `${audioFid}/bestaudio/best` : undefined;
         const baseArgs = isAudio
-          ? ['-x', '--audio-format', 'mp3', '-o', job.filePath, '--', parsed.toString()]
-          : [
-              '-f',
-              // Flexible format selection with fallback chain
-              `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`,
-              '--merge-output-format',
-              'mp4',
-              '--recode-video', 'mp4',  // Force recode to mp4 if needed
+          ? [
+              ...(audioFmtSelector ? ['-f', audioFmtSelector] : []),
+              '-x',
+              '--audio-format',
+              'mp3',
               '-o',
               job.filePath,
-              '--newline',  // Output progress on new lines for parsing
+              '--newline',
+              '--',
+              parsed.toString(),
+            ]
+          : [
+              '-f',
+              videoFmtSelector,
+              '--merge-output-format',
+              'mp4',
+              '--recode-video',
+              'mp4',
+              '-o',
+              job.filePath,
+              '--newline',
               '--',
               parsed.toString(),
             ];
-        // Build yt-dlp args with YouTube auth if available
-        let finalArgs = buildYtDlpArgs(baseArgs);
-        if (adminUser) {
-          if (adminUser.preferences.youtubeCookies) {
-            const cookieFile = path.join(CACHE_DIR, `cookies-${adminUser.id}.txt`);
-            await fs.promises.writeFile(cookieFile, adminUser.preferences.youtubeCookies);
-            // Insert before '--'
-            const dashIndex = finalArgs.indexOf('--');
-            if (dashIndex !== -1) {
-              finalArgs.splice(dashIndex, 0, '--cookies', cookieFile);
-            }
-          }
-          if (adminUser.preferences.youtubePoToken) {
-            const dashIndex = finalArgs.indexOf('--');
-            if (dashIndex !== -1) {
-              finalArgs.splice(dashIndex, 0, '--extractor-args', `youtube:po_token=${adminUser.preferences.youtubePoToken}`);
-            }
-          }
-        }
+        const { extraArgs, env } = await getYtDlpAuthAndProxy();
+        const finalArgs = insertBeforeDoubleDash(buildYtDlpArgs(baseArgs), extraArgs);
 
-        // Use spawn to capture progress output
         await new Promise<void>((resolve, reject) => {
-          const child = spawn(YTDLP_CMD, [...YTDLP_ARGS, ...finalArgs], { shell: false });
+          const child = spawn(runner.cmd, [...runner.baseArgs, ...finalArgs], { shell: false, env });
           let stderr = '';
           child.stdout.on('data', (data) => {
             const output = data.toString();
-            // Parse progress from yt-dlp output like "[download]  45.2% of 12.34MiB at 1.23MiB/s ETA 00:05"
             const progressMatch = output.match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
             if (progressMatch) {
               const pct = Math.min(95, Math.max(5, Math.floor(parseFloat(progressMatch[1]))));
@@ -868,10 +3526,16 @@ async function startServer() {
           const info = await ytdl.getInfo(watchUrl);
 
           if (isAudio) {
-            const audioFormat = chooseFormat(info.formats, {
-              quality: Quality.HighestAudio,
-              filter: { hasAudio: true, hasVideo: false },
-            });
+            const customAudioItag = job.audioFormatId ? Number(job.audioFormatId) : NaN;
+            const customAudioFormat = Number.isFinite(customAudioItag)
+              ? info.formats.find((f: VideoFormat) => f.itag === customAudioItag && f.hasAudio)
+              : undefined;
+            const audioFormat =
+              customAudioFormat ||
+              chooseFormat(info.formats, {
+                quality: Quality.HighestAudio,
+                filter: { hasAudio: true, hasVideo: false },
+              });
             const totalHint = Number(audioFormat.contentLength) || null;
             job.totalBytes = totalHint;
 
@@ -915,12 +3579,16 @@ async function startServer() {
           }
 
           const targetH = selectTargetHeight(job.quality);
+          const customAudioItag = job.audioFormatId ? Number(job.audioFormatId) : NaN;
+          const customAudioFormat = Number.isFinite(customAudioItag)
+            ? info.formats.find((f: VideoFormat) => f.itag === customAudioItag && f.hasAudio)
+            : undefined;
           const muxedFormats = info.formats
             .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
             .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
 
           const bestMuxed = muxedFormats[0];
-          if (bestMuxed && (bestMuxed.height || 0) >= targetH && bestMuxed.container === 'mp4') {
+          if (!customAudioFormat && bestMuxed && (bestMuxed.height || 0) >= targetH && bestMuxed.container === 'mp4') {
             const totalHint = Number(bestMuxed.contentLength) || null;
             job.totalBytes = totalHint;
             const stream = ytdl.download(info, { format: bestMuxed });
@@ -941,10 +3609,12 @@ async function startServer() {
             .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && (f.height || 0) <= targetH)
             .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
           const videoFormat = videoCandidates[0] || bestMuxed;
-          const audioFormat = chooseFormat(info.formats, {
-            quality: Quality.HighestAudio,
-            filter: { hasAudio: true, hasVideo: false },
-          });
+          const audioFormat =
+            customAudioFormat ||
+            chooseFormat(info.formats, {
+              quality: Quality.HighestAudio,
+              filter: { hasAudio: true, hasVideo: false },
+            });
 
           if (videoFormat && audioFormat && !videoFormat.hasAudio) {
             tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-'));
@@ -1106,7 +3776,7 @@ async function startServer() {
   }
 
   app.post('/api/media/prepare', async (req: Request, res: Response) => {
-    const body = req.body as { url?: unknown; quality?: unknown; title?: unknown };
+    const body = req.body as { url?: unknown; quality?: unknown; title?: unknown; audioFormatId?: unknown };
     const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
     const quality =
       typeof body.quality === 'string' &&
@@ -1114,6 +3784,7 @@ async function startServer() {
         ? body.quality.trim()
         : '1080p';
     const rawTitle = typeof body.title === 'string' ? body.title : 'grove-save-media';
+    const audioFormatId = validateAudioFormatId(body.audioFormatId);
 
     const parsed = await validatePublicUrl(rawUrl);
     if (!parsed) {
@@ -1135,6 +3806,7 @@ async function startServer() {
       url: parsed.toString(),
       title: rawTitle,
       quality,
+      audioFormatId,
       ext,
       mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
       status: 'downloading',
@@ -1201,6 +3873,309 @@ async function startServer() {
     res.sendFile(resolved);
   });
 
+  // Online inline player streaming endpoint (supports Range requests, audio track switching, and Xray VPN proxy)
+  app.get('/api/media/stream', async (req: Request, res: Response) => {
+    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    const quality = typeof req.query.quality === 'string' ? req.query.quality.trim() : '720p';
+    const audioFormatId = validateAudioFormatId(req.query.audioFormatId);
+
+    const parsed = await validatePublicUrl(rawUrl);
+    if (!parsed) {
+      res.status(400).json({ error: 'Invalid or disallowed media URL.' });
+      return;
+    }
+
+    const targetH = selectTargetHeight(quality === 'audio' ? '360p' : quality);
+    const ytId = extractYouTubeId(parsed);
+    const runner = await getYtDlpRunner();
+
+    if (runner) {
+      try {
+        const { extraArgs, env } = await getYtDlpAuthAndProxy();
+
+        // 1. If no custom audio track is selected, prefer a single progressive MP4 for instant Range seeking
+        if (!audioFormatId) {
+          const singleArgs = insertBeforeDoubleDash(
+            buildYtDlpArgs([
+              '-g',
+              '-f',
+              `best[height<=${targetH}][ext=mp4][vcodec!=none][acodec!=none]/best[height<=${targetH}][vcodec!=none][acodec!=none]`,
+              '--no-playlist',
+              '--no-warnings',
+              '--',
+              parsed.toString(),
+            ]),
+            extraArgs
+          );
+          try {
+            const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...singleArgs], {
+              timeout: 15000,
+              env,
+            });
+            const directStreamUrl = stdout
+              .split(/\r?\n/)
+              .map((l) => l.trim())
+              .find((l) => /^https?:\/\//i.test(l));
+            if (directStreamUrl) {
+              await proxyRemoteMediaWithRange(directStreamUrl, req, res);
+              return;
+            }
+          } catch {
+            // Fall through to split video+audio ffmpeg muxing
+          }
+        }
+
+        // 2. Custom audio track OR HD separate video+audio: resolve URLs and mux fragmented MP4 live
+        const pairSelector = audioFormatId
+          ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFormatId}/bestvideo[height<=${targetH}]+${audioFormatId}/best[height<=${targetH}]`
+          : `bestvideo[height<=${targetH}][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=${targetH}]+bestaudio/best[height<=${targetH}]`;
+        const pairArgs = insertBeforeDoubleDash(
+          buildYtDlpArgs(['-g', '-f', pairSelector, '--no-playlist', '--no-warnings', '--', parsed.toString()]),
+          extraArgs
+        );
+        const { stdout: pairOut } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...pairArgs], {
+          timeout: 18000,
+          env,
+        });
+        const urls = pairOut
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => /^https?:\/\//i.test(l));
+
+        if (urls.length === 1) {
+          await proxyRemoteMediaWithRange(urls[0], req, res);
+          return;
+        }
+        if (urls.length >= 2) {
+          res.setHeader('Content-Type', 'video/mp4');
+          const ffArgs = [
+            '-i',
+            urls[0],
+            '-i',
+            urls[1],
+            '-c:v',
+            'copy',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '160k',
+            '-movflags',
+            'frag_keyframe+empty_moov',
+            '-f',
+            'mp4',
+            'pipe:1',
+          ];
+          const ffEnv: NodeJS.ProcessEnv = { ...env };
+          if (adminConfig.xray.enabled && xrayState.running) {
+            ffEnv.http_proxy = `http://127.0.0.1:${adminConfig.xray.httpPort}`;
+          }
+          const ff = spawn('ffmpeg', ffArgs, { shell: false, env: ffEnv });
+          ff.stdout.pipe(res);
+          req.on('close', () => {
+            if (!ff.killed) ff.kill('SIGTERM');
+          });
+          ff.on('error', () => {
+            if (!res.headersSent) res.status(502).json({ error: 'Online playback stream failed.' });
+          });
+          return;
+        }
+      } catch {
+        // Fall through to @distube/ytdl-core or direct stream
+      }
+    }
+
+    if (ytId) {
+      const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
+      try {
+        const info = await ytdl.getInfo(watchUrl);
+        const customItag = audioFormatId ? Number(audioFormatId) : NaN;
+        const customAudio = Number.isFinite(customItag)
+          ? info.formats.find((f: VideoFormat) => f.itag === customItag && f.hasAudio)
+          : undefined;
+        const muxed = info.formats
+          .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
+          .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0))[0];
+
+        if (!customAudio && muxed?.url) {
+          await proxyRemoteMediaWithRange(muxed.url, req, res);
+          return;
+        }
+
+        const videoFmt =
+          info.formats
+            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && (f.height || 0) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0))[0] || muxed;
+        const audioFmt =
+          customAudio ||
+          chooseFormat(info.formats, {
+            quality: Quality.HighestAudio,
+            filter: { hasAudio: true, hasVideo: false },
+          });
+
+        if (videoFmt?.url && audioFmt?.url) {
+          res.setHeader('Content-Type', 'video/mp4');
+          const ff = spawn(
+            'ffmpeg',
+            [
+              '-i',
+              videoFmt.url,
+              '-i',
+              audioFmt.url,
+              '-c:v',
+              'copy',
+              '-c:a',
+              'aac',
+              '-b:a',
+              '160k',
+              '-movflags',
+              'frag_keyframe+empty_moov',
+              '-f',
+              'mp4',
+              'pipe:1',
+            ],
+            { shell: false }
+          );
+          ff.stdout.pipe(res);
+          req.on('close', () => {
+            if (!ff.killed) ff.kill('SIGTERM');
+          });
+          ff.on('error', () => {
+            if (!res.headersSent) res.status(502).json({ error: 'Stream failed.' });
+          });
+          return;
+        }
+      } catch {
+        // Fall through
+      }
+    }
+
+    try {
+      await proxyRemoteMediaWithRange(parsed.toString(), req, res);
+    } catch {
+      if (!res.headersSent) res.status(502).json({ error: 'Unable to stream media online.' });
+    }
+  });
+
+  // WebVTT Subtitle proxy & download endpoint (supports manual and auto captions)
+  app.get('/api/media/subtitle', async (req: Request, res: Response) => {
+    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    const lang = typeof req.query.lang === 'string' ? req.query.lang.trim() : '';
+    const isAuto = req.query.auto === '1';
+    const asDownload = req.query.download === '1';
+
+    if (!/^[a-zA-Z0-9_-]{1,24}$/.test(lang)) {
+      res.status(400).json({ error: 'Invalid subtitle language code.' });
+      return;
+    }
+    const parsed = await validatePublicUrl(rawUrl);
+    if (!parsed) {
+      res.status(400).json({ error: 'Invalid or disallowed media URL.' });
+      return;
+    }
+
+    const sendVtt = (vttText: string) => {
+      res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+      if (asDownload) {
+        res.setHeader('Content-Disposition', `attachment; filename="subtitle_${lang}.vtt"`);
+      }
+      res.send(vttText);
+    };
+
+    const runner = await getYtDlpRunner();
+    if (runner) {
+      let tempDir: string | null = null;
+      try {
+        tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-sub-'));
+        const { extraArgs, env } = await getYtDlpAuthAndProxy();
+        const subArgs = insertBeforeDoubleDash(
+          buildYtDlpArgs([
+            '--skip-download',
+            isAuto ? '--write-auto-subs' : '--write-subs',
+            '--sub-langs',
+            lang,
+            '--sub-format',
+            'vtt/srt/best',
+            '--convert-subs',
+            'vtt',
+            '--no-playlist',
+            '-o',
+            path.join(tempDir, 'sub.%(ext)s'),
+            '--',
+            parsed.toString(),
+          ]),
+          extraArgs
+        );
+        await execFileAsync(runner.cmd, [...runner.baseArgs, ...subArgs], { timeout: 25000, env });
+        const files = await fs.promises.readdir(tempDir);
+        const vttFile = files.find((f) => f.endsWith('.vtt')) || files[0];
+        if (vttFile) {
+          const content = await fs.promises.readFile(path.join(tempDir, vttFile), 'utf8');
+          if (content.trim()) {
+            sendVtt(content);
+            return;
+          }
+        }
+      } catch {
+        // Fall through to ytdl-core timedtext fallback
+      } finally {
+        if (tempDir) {
+          await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    }
+
+    const ytId = extractYouTubeId(parsed);
+    if (ytId) {
+      try {
+        const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${ytId}`);
+        type SubtitlePlayerResp = {
+          captions?: {
+            playerCaptionsTracklistRenderer?: {
+              captionTracks?: Array<{ baseUrl?: string; languageCode?: string; kind?: string }>;
+            };
+          };
+        };
+        const rawInfo = info as unknown as {
+          playerResponse?: SubtitlePlayerResp;
+          player_response?: SubtitlePlayerResp;
+        };
+        const playerResp = rawInfo.playerResponse || rawInfo.player_response;
+        const captionTracks = playerResp?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+
+        const match =
+          captionTracks.find((c) => c.languageCode === lang && (isAuto ? c.kind === 'asr' : c.kind !== 'asr')) ||
+          captionTracks.find((c) => c.languageCode === lang);
+
+        if (match?.baseUrl) {
+          const vttUrl = match.baseUrl.includes('fmt=')
+            ? match.baseUrl.replace(/fmt=[^&]+/, 'fmt=vtt')
+            : `${match.baseUrl}&fmt=vtt`;
+
+          if (adminConfig.xray.enabled && xrayState.running) {
+            const resp = await proxyHttpGet(vttUrl, adminConfig.xray.httpPort, 10000);
+            if (resp.statusCode >= 200 && resp.statusCode < 300 && resp.body.trim()) {
+              sendVtt(resp.body);
+              return;
+            }
+          } else {
+            const resp = await fetch(vttUrl, { signal: AbortSignal.timeout(10000) });
+            if (resp.ok) {
+              const text = await resp.text();
+              if (text.trim()) {
+                sendVtt(text);
+                return;
+              }
+            }
+          }
+        }
+      } catch {
+        // Fall through to 404
+      }
+    }
+
+    res.status(404).json({ error: 'Subtitle track not found.' });
+  });
+
   app.get('/api/media/download', async (req: Request, res: Response) => {
     const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
     const quality = typeof req.query.quality === 'string' ? req.query.quality.trim() : '1080p';
@@ -1217,52 +4192,29 @@ async function startServer() {
     const contentDisposition = buildContentDisposition(rawTitle, quality, ext);
     const ytId = extractYouTubeId(parsed);
 
-    const available = await getYtDlpPath();
-    if (available) {
+    const runner = await getYtDlpRunner();
+    if (runner) {
       const targetH = String(selectTargetHeight(quality));
       const baseArgs = isAudio
         ? ['-x', '--audio-format', 'mp3', '-o', '-', '--', parsed.toString()]
         : [
             '-f',
-            // Flexible format selection with fallback chain
             `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`,
-            '--recode-video', 'mp4',  // Force recode to mp4 if needed
+            '--recode-video',
+            'mp4',
             '-o',
             '-',
             '--',
             parsed.toString(),
           ];
-      // Build yt-dlp args with YouTube auth if available
-      let adminUser: StoredUser | undefined;
-      for (const u of usersByEmail.values()) {
-        if (u.role === 'admin') {
-          adminUser = u;
-          break;
-        }
-      }
-      let finalArgs = buildYtDlpArgs(baseArgs);
-      if (adminUser) {
-        if (adminUser.preferences.youtubeCookies) {
-          const cookieFile = path.join(CACHE_DIR, `cookies-${adminUser.id}.txt`);
-          await fs.promises.writeFile(cookieFile, adminUser.preferences.youtubeCookies);
-          const dashIndex = finalArgs.indexOf('--');
-          if (dashIndex !== -1) {
-            finalArgs.splice(dashIndex, 0, '--cookies', cookieFile);
-          }
-        }
-        if (adminUser.preferences.youtubePoToken) {
-          const dashIndex = finalArgs.indexOf('--');
-          if (dashIndex !== -1) {
-            finalArgs.splice(dashIndex, 0, '--extractor-args', `youtube:po_token=${adminUser.preferences.youtubePoToken}`);
-          }
-        }
-      }
+      const { extraArgs, env } = await getYtDlpAuthAndProxy();
+      const finalArgs = insertBeforeDoubleDash(buildYtDlpArgs(baseArgs), extraArgs);
 
       res.setHeader('Content-Type', isAudio ? 'audio/mpeg' : 'video/mp4');
       res.setHeader('Content-Disposition', contentDisposition);
       res.setHeader('X-Grove-Stream-Mode', 'live');
 
-      const child = spawn(YTDLP_CMD, [...YTDLP_ARGS, ...finalArgs], { shell: false });
+      const child = spawn(runner.cmd, [...runner.baseArgs, ...finalArgs], { shell: false, env });
       child.stdout.pipe(res);
       req.on('close', () => {
         if (!child.killed) child.kill('SIGTERM');
@@ -1534,6 +4486,7 @@ export class ErrorOverlay {}
 `);
     });
 
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -1550,6 +4503,23 @@ export class ErrorOverlay {}
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
+
+  // Auto-start Xray VPN on boot if admin enabled it, then start managed bgutil POT server
+  const bootBackgroundServices = async () => {
+    if (adminConfig.xray.enabled && adminConfig.xray.configInput.trim()) {
+      await startXrayProcess();
+    }
+    if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed' && findBgutilPotEntry()) {
+      await startBgutilPotServer();
+    }
+  };
+  void bootBackgroundServices();
+
+  const handleShutdown = () => {
+    void Promise.allSettled([stopBgutilPotServer(), stopXrayProcess()]).finally(() => process.exit(0));
+  };
+  process.once('SIGINT', handleShutdown);
+  process.once('SIGTERM', handleShutdown);
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Grove Save server listening on http://0.0.0.0:${PORT}`);

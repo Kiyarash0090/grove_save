@@ -1,13 +1,23 @@
 import React, { useState } from 'react';
 import {
+  AlertCircle,
+  CheckCircle2,
   ChevronRight,
   ChevronLeft,
   Download,
+  Eye,
+  EyeOff,
   Globe,
   HardDrive,
+  KeyRound,
+  Loader2,
   LogIn,
   LogOut,
   Moon,
+  Play,
+  Plus,
+  Server,
+  Shield,
   ShieldCheck,
   Smartphone,
   Sun,
@@ -24,9 +34,12 @@ interface SettingsViewProps {
   onThemeChange: (next: AppTheme) => void;
   language: AppLanguage;
   onLanguageChange: (next: AppLanguage) => void;
+  defaultQuality: string;
+  onDefaultQualityChange: (next: string) => void;
   historyCount: number;
   onClearHistory: () => void;
   user: AuthUser | null;
+  authToken: string | null;
   onOpenAuth: () => void;
   onSignOut: () => void;
   apiBase: string;
@@ -39,15 +52,20 @@ const LANGUAGES: { code: AppLanguage; label: string }[] = [
   { code: 'zh', label: '中文' },
 ];
 
+const DEFAULT_QUALITIES = ['2160p', '1080p', '720p', '480p', '360p'] as const;
+
 export const SettingsView: React.FC<SettingsViewProps> = ({
   t,
   theme,
   onThemeChange,
   language,
   onLanguageChange,
+  defaultQuality,
+  onDefaultQualityChange,
   historyCount,
   onClearHistory,
   user,
+  authToken,
   onOpenAuth,
   onSignOut,
   apiBase,
@@ -55,40 +73,139 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const [clearedFeedback, setClearedFeedback] = useState(false);
+
+  // Admin-only YouTube Auth state
   const [youtubeCookies, setYoutubeCookies] = useState('');
   const [youtubePoToken, setYoutubePoToken] = useState('');
+  const [showPoToken, setShowPoToken] = useState(false);
   const [youtubeLoading, setYoutubeLoading] = useState(false);
   const [youtubeMessage, setYoutubeMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Admin-only Xray VPN state
+  interface XrayProfileItem {
+    id: string;
+    name: string;
+    protocol: string;
+    address: string;
+    configInput: string;
+    lastTest?: {
+      ok: boolean;
+      testedAt: number;
+      latencyMs?: number;
+      downloadedBytes?: number;
+      title?: string;
+      exitIp?: string | null;
+      error?: string;
+    };
+  }
+  const [xrayEnabled, setXrayEnabled] = useState(false);
+  const [xrayConfigInput, setXrayConfigInput] = useState('');
+  const [xrayProfiles, setXrayProfiles] = useState<XrayProfileItem[]>([]);
+  const [xrayActiveProfileId, setXrayActiveProfileId] = useState<string | null>(null);
+  const [xrayTestYoutubeUrl, setXrayTestYoutubeUrl] = useState('https://www.youtube.com/watch?v=jNQXAC9IVRw');
+  const [xrayTestingProfileId, setXrayTestingProfileId] = useState<string | null>(null);
+  const [xrayTestingAll, setXrayTestingAll] = useState(false);
+  const [xrayRunning, setXrayRunning] = useState(false);
+  const [xrayBinaryInstalled, setXrayBinaryInstalled] = useState(true);
+  const [xrayPorts, setXrayPorts] = useState<{ socks: number; http: number }>({ socks: 10808, http: 10809 });
+  const [xrayLoading, setXrayLoading] = useState(false);
+  const [xrayMessage, setXrayMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Admin-only bgutil-ytdlp-pot-provider state
+  const [potEnabled, setPotEnabled] = useState(true);
+  const [potMode, setPotMode] = useState<'managed' | 'external'>('managed');
+  const [potBaseUrl, setPotBaseUrl] = useState('http://127.0.0.1:4416');
+  const [potPort, setPotPort] = useState(4416);
+  const [potInstalled, setPotInstalled] = useState(true);
+  const [potPluginInstalled, setPotPluginInstalled] = useState(true);
+  const [potRunning, setPotRunning] = useState(false);
+  const [potVersion, setPotVersion] = useState<string | null>(null);
+  const [potLoading, setPotLoading] = useState(false);
+  const [potMessage, setPotMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const isAdmin = user?.role === 'admin';
+
+  const getAuthHeaders = (withJson = false): Record<string, string> => {
+    const headers: Record<string, string> = {
+      'X-Requested-With': 'GroveSave',
+    };
+    if (withJson) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`;
+    }
+    return headers;
+  };
+
   const fetchYouTubeAuth = async () => {
+    if (!isAdmin) return;
     try {
       const res = await fetch(`${apiBase}/api/admin/youtube-auth`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('grove_auth_token')}` },
+        credentials: 'include',
+        headers: getAuthHeaders(),
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as { youtubeCookies?: string; youtubePoToken?: string };
         setYoutubeCookies(data.youtubeCookies || '');
         setYoutubePoToken(data.youtubePoToken || '');
       }
     } catch {}
   };
 
+  const fetchXrayStatus = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${apiBase}/api/admin/xray`, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          enabled?: boolean;
+          configInput?: string;
+          activeProfileId?: string | null;
+          profiles?: typeof xrayProfiles;
+          testYoutubeUrl?: string;
+          running?: boolean;
+          binaryInstalled?: boolean;
+          socksPort?: number;
+          httpPort?: number;
+          lastError?: string | null;
+        };
+        setXrayEnabled(Boolean(data.enabled));
+        setXrayConfigInput(data.configInput || '');
+        setXrayActiveProfileId(data.activeProfileId || null);
+        if (Array.isArray(data.profiles)) setXrayProfiles(data.profiles);
+        if (data.testYoutubeUrl) setXrayTestYoutubeUrl(data.testYoutubeUrl);
+        setXrayRunning(Boolean(data.running));
+        setXrayBinaryInstalled(Boolean(data.binaryInstalled));
+        if (data.socksPort && data.httpPort) {
+          setXrayPorts({ socks: data.socksPort, http: data.httpPort });
+        }
+        if (data.lastError && data.enabled && !data.running) {
+          setXrayMessage({ type: 'error', text: data.lastError });
+        }
+      }
+    } catch {}
+  };
+
   const saveYouTubeAuth = async () => {
+    if (!isAdmin) return;
     setYoutubeLoading(true);
     setYoutubeMessage(null);
     try {
       const res = await fetch(`${apiBase}/api/admin/youtube-auth`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('grove_auth_token')}`,
-        },
+        credentials: 'include',
+        headers: getAuthHeaders(true),
         body: JSON.stringify({ youtubeCookies, youtubePoToken }),
       });
       if (res.ok) {
         setYoutubeMessage({ type: 'success', text: t.youtubeSaved });
       } else {
-        setYoutubeMessage({ type: 'error', text: 'Failed to save' });
+        const err = (await res.json().catch(() => ({}))) as { error?: string };
+        setYoutubeMessage({ type: 'error', text: err.error || 'Failed to save' });
       }
     } catch {
       setYoutubeMessage({ type: 'error', text: 'Failed to save' });
@@ -98,20 +215,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const testYouTubeAuth = async () => {
+    if (!isAdmin) return;
     setYoutubeLoading(true);
     setYoutubeMessage(null);
     try {
       const res = await fetch(`${apiBase}/api/admin/youtube-auth/test`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('grove_auth_token')}`,
-        },
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({ youtubeCookies, youtubePoToken }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as { success?: boolean; title?: string; error?: string };
       if (data.success) {
-        setYoutubeMessage({ type: 'success', text: t.youtubeTestSuccess });
+        setYoutubeMessage({
+          type: 'success',
+          text: data.title ? `${t.youtubeTestSuccess} (${data.title})` : t.youtubeTestSuccess,
+        });
       } else {
-        setYoutubeMessage({ type: 'error', text: `${t.youtubeTestFailed}: ${data.error}` });
+        setYoutubeMessage({ type: 'error', text: `${t.youtubeTestFailed}: ${data.error || ''}` });
       }
     } catch {
       setYoutubeMessage({ type: 'error', text: t.youtubeTestFailed });
@@ -120,12 +241,451 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  // Load YouTube auth on mount if admin
-  React.useEffect(() => {
-    if (user?.role === 'admin') {
-      fetchYouTubeAuth();
+  const saveXrayConfig = async (overrideEnabled?: boolean) => {
+    if (!isAdmin) return;
+    const nextEnabled = overrideEnabled !== undefined ? overrideEnabled : xrayEnabled;
+    setXrayLoading(true);
+    setXrayMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/xray`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({
+          enabled: nextEnabled,
+          configInput: xrayConfigInput,
+          testYoutubeUrl: xrayTestYoutubeUrl,
+        }),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        enabled?: boolean;
+        configInput?: string;
+        activeProfileId?: string | null;
+        profiles?: typeof xrayProfiles;
+        testYoutubeUrl?: string;
+        running?: boolean;
+        binaryInstalled?: boolean;
+        lastError?: string | null;
+        error?: string;
+      };
+      if (!res.ok) {
+        setXrayMessage({ type: 'error', text: data.error || t.xrayTestFailed });
+      } else {
+        setXrayEnabled(Boolean(data.enabled));
+        if (typeof data.configInput === 'string') setXrayConfigInput(data.configInput);
+        setXrayActiveProfileId(data.activeProfileId || null);
+        if (Array.isArray(data.profiles)) setXrayProfiles(data.profiles);
+        if (data.testYoutubeUrl) setXrayTestYoutubeUrl(data.testYoutubeUrl);
+        setXrayRunning(Boolean(data.running));
+        setXrayBinaryInstalled(Boolean(data.binaryInstalled));
+        if (data.lastError && data.enabled && !data.running) {
+          setXrayMessage({ type: 'error', text: data.lastError });
+        } else {
+          setXrayMessage({ type: 'success', text: t.xraySavedMsg });
+        }
+      }
+    } catch {
+      setXrayMessage({ type: 'error', text: t.xrayTestFailed });
+    } finally {
+      setXrayLoading(false);
     }
-  }, [user]);
+  };
+
+  const importXrayProfiles = async () => {
+    if (!isAdmin || !xrayConfigInput.trim()) return;
+    setXrayLoading(true);
+    setXrayMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/xray/profiles/import`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({ rawConfigs: xrayConfigInput }),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        addedCount?: number;
+        errors?: string[];
+        activeProfileId?: string | null;
+        profiles?: typeof xrayProfiles;
+        configInput?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        setXrayMessage({ type: 'error', text: data.error || 'Import failed' });
+      } else {
+        if (Array.isArray(data.profiles)) setXrayProfiles(data.profiles);
+        setXrayActiveProfileId(data.activeProfileId || null);
+        if (typeof data.configInput === 'string') setXrayConfigInput(data.configInput);
+        const note = data.errors?.length ? ` (${data.errors.length} skipped)` : '';
+        setXrayMessage({
+          type: 'success',
+          text: `${t.xrayImportMsg}: +${data.addedCount || 0}${note}`,
+        });
+      }
+    } catch {
+      setXrayMessage({ type: 'error', text: 'Import failed' });
+    } finally {
+      setXrayLoading(false);
+    }
+  };
+
+  const activateXrayProfile = async (profileId: string) => {
+    if (!isAdmin) return;
+    setXrayLoading(true);
+    setXrayMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/xray/profiles/${encodeURIComponent(profileId)}/activate`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        enabled?: boolean;
+        configInput?: string;
+        activeProfileId?: string | null;
+        profiles?: typeof xrayProfiles;
+        running?: boolean;
+        binaryInstalled?: boolean;
+        lastError?: string | null;
+        error?: string;
+      };
+      if (!res.ok) {
+        setXrayMessage({ type: 'error', text: data.error || 'Activation failed' });
+      } else {
+        setXrayEnabled(Boolean(data.enabled));
+        if (typeof data.configInput === 'string') setXrayConfigInput(data.configInput);
+        setXrayActiveProfileId(data.activeProfileId || null);
+        if (Array.isArray(data.profiles)) setXrayProfiles(data.profiles);
+        setXrayRunning(Boolean(data.running));
+        setXrayBinaryInstalled(Boolean(data.binaryInstalled));
+        if (data.lastError && data.enabled && !data.running) {
+          setXrayMessage({ type: 'error', text: data.lastError });
+        } else {
+          setXrayMessage({ type: 'success', text: t.xraySavedMsg });
+        }
+      }
+    } catch {
+      setXrayMessage({ type: 'error', text: 'Activation failed' });
+    } finally {
+      setXrayLoading(false);
+    }
+  };
+
+  const deleteXrayProfile = async (profileId: string) => {
+    if (!isAdmin) return;
+    setXrayLoading(true);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/xray/profiles/${encodeURIComponent(profileId)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as {
+        enabled?: boolean;
+        activeProfileId?: string | null;
+        configInput?: string;
+        profiles?: typeof xrayProfiles;
+        running?: boolean;
+      };
+      if (res.ok) {
+        setXrayEnabled(Boolean(data.enabled));
+        setXrayActiveProfileId(data.activeProfileId || null);
+        if (typeof data.configInput === 'string') setXrayConfigInput(data.configInput);
+        if (Array.isArray(data.profiles)) setXrayProfiles(data.profiles);
+        setXrayRunning(Boolean(data.running));
+      }
+    } catch {} finally {
+      setXrayLoading(false);
+    }
+  };
+
+  const installXrayCore = async () => {
+    if (!isAdmin) return;
+    setXrayLoading(true);
+    setXrayMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/xray/install`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as { success?: boolean; running?: boolean; error?: string };
+      if (res.ok && data.success) {
+        setXrayBinaryInstalled(true);
+        setXrayRunning(Boolean(data.running));
+        setXrayMessage({ type: 'success', text: t.xrayInstalledMsg });
+      } else {
+        setXrayMessage({ type: 'error', text: data.error || 'Install failed' });
+      }
+    } catch {
+      setXrayMessage({ type: 'error', text: 'Install failed' });
+    } finally {
+      setXrayLoading(false);
+    }
+  };
+
+  const testXrayVpn = async (profileId?: string) => {
+    if (!isAdmin) return;
+    if (profileId) {
+      setXrayTestingProfileId(profileId);
+    } else {
+      setXrayLoading(true);
+    }
+    setXrayMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/xray/test`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({
+          ...(profileId ? { profileId } : { configInput: xrayConfigInput }),
+          youtubeUrl: xrayTestYoutubeUrl,
+        }),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        downloadedBytes?: number;
+        title?: string;
+        exitIp?: string | null;
+        latencyMs?: number;
+        error?: string;
+        profileId?: string | null;
+        lastTest?: XrayProfileItem['lastTest'] | null;
+      };
+      if (data.profileId && data.lastTest) {
+        setXrayProfiles((prev) =>
+          prev.map((p) => (p.id === data.profileId ? { ...p, lastTest: data.lastTest || undefined } : p))
+        );
+      }
+      if (data.success) {
+        const parts = [t.xrayTestSuccess];
+        if (typeof data.downloadedBytes === 'number') {
+          parts.push(`${Math.max(1, Math.round(data.downloadedBytes / 1024))} KB`);
+        }
+        if (typeof data.latencyMs === 'number') parts.push(`${(data.latencyMs / 1000).toFixed(1)}s`);
+        if (data.exitIp) parts.push(`IP: ${data.exitIp}`);
+        if (data.title) parts.push(data.title);
+        setXrayMessage({ type: 'success', text: parts.join(' · ') });
+      } else {
+        setXrayMessage({ type: 'error', text: `${t.xrayTestFailed}: ${data.error || ''}` });
+      }
+    } catch {
+      setXrayMessage({ type: 'error', text: t.xrayTestFailed });
+    } finally {
+      if (profileId) {
+        setXrayTestingProfileId(null);
+      } else {
+        setXrayLoading(false);
+      }
+    }
+  };
+
+  const testAllXrayProfiles = async () => {
+    if (!isAdmin || xrayProfiles.length === 0) return;
+    setXrayTestingAll(true);
+    setXrayMessage(null);
+    let passCount = 0;
+    try {
+      for (const profile of xrayProfiles) {
+        setXrayTestingProfileId(profile.id);
+        try {
+          const res = await fetch(`${apiBase}/api/admin/xray/test`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: getAuthHeaders(true),
+            body: JSON.stringify({
+              profileId: profile.id,
+              youtubeUrl: xrayTestYoutubeUrl,
+            }),
+          });
+          const data = (await res.json()) as {
+            success?: boolean;
+            profileId?: string | null;
+            lastTest?: XrayProfileItem['lastTest'] | null;
+          };
+          if (data.success) passCount += 1;
+          if (data.profileId && data.lastTest) {
+            setXrayProfiles((prev) =>
+              prev.map((p) => (p.id === data.profileId ? { ...p, lastTest: data.lastTest || undefined } : p))
+            );
+          }
+        } catch {}
+      }
+      setXrayMessage({
+        type: passCount > 0 ? 'success' : 'error',
+        text: `${passCount}/${xrayProfiles.length} ${t.xrayTestedPass}`,
+      });
+    } finally {
+      setXrayTestingProfileId(null);
+      setXrayTestingAll(false);
+    }
+  };
+
+  const fetchPotProviderStatus = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${apiBase}/api/admin/pot-provider`, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          enabled?: boolean;
+          mode?: 'managed' | 'external';
+          baseUrl?: string;
+          port?: number;
+          installed?: boolean;
+          pluginInstalled?: boolean;
+          running?: boolean;
+          pingVersion?: string | null;
+          lastError?: string | null;
+        };
+        setPotEnabled(Boolean(data.enabled));
+        setPotMode(data.mode === 'external' ? 'external' : 'managed');
+        if (data.baseUrl) setPotBaseUrl(data.baseUrl);
+        if (typeof data.port === 'number') setPotPort(data.port);
+        setPotInstalled(Boolean(data.installed));
+        setPotPluginInstalled(Boolean(data.pluginInstalled));
+        setPotRunning(Boolean(data.running));
+        setPotVersion(data.pingVersion || null);
+        if (data.lastError && data.enabled && data.mode !== 'external' && !data.running) {
+          setPotMessage({ type: 'error', text: data.lastError });
+        }
+      }
+    } catch {}
+  };
+
+  const savePotProviderConfig = async (overrideEnabled?: boolean) => {
+    if (!isAdmin) return;
+    const nextEnabled = overrideEnabled !== undefined ? overrideEnabled : potEnabled;
+    setPotLoading(true);
+    setPotMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/pot-provider`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({
+          enabled: nextEnabled,
+          mode: potMode,
+          baseUrl: potBaseUrl,
+          port: Number(potPort) || 4416,
+        }),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        enabled?: boolean;
+        mode?: 'managed' | 'external';
+        baseUrl?: string;
+        port?: number;
+        installed?: boolean;
+        pluginInstalled?: boolean;
+        running?: boolean;
+        pingVersion?: string | null;
+        lastError?: string | null;
+        error?: string;
+      };
+      if (!res.ok) {
+        setPotMessage({ type: 'error', text: data.error || t.potTestFailed });
+      } else {
+        setPotEnabled(Boolean(data.enabled));
+        setPotMode(data.mode === 'external' ? 'external' : 'managed');
+        if (data.baseUrl) setPotBaseUrl(data.baseUrl);
+        if (typeof data.port === 'number') setPotPort(data.port);
+        setPotInstalled(Boolean(data.installed));
+        setPotPluginInstalled(Boolean(data.pluginInstalled));
+        setPotRunning(Boolean(data.running));
+        setPotVersion(data.pingVersion || null);
+        if (data.lastError && data.enabled && data.mode !== 'external' && !data.running) {
+          setPotMessage({ type: 'error', text: data.lastError });
+        } else {
+          setPotMessage({ type: 'success', text: t.potSavedMsg });
+        }
+      }
+    } catch {
+      setPotMessage({ type: 'error', text: t.potTestFailed });
+    } finally {
+      setPotLoading(false);
+    }
+  };
+
+  const installPotProvider = async () => {
+    if (!isAdmin) return;
+    setPotLoading(true);
+    setPotMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/pot-provider/install`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        installed?: boolean;
+        pluginInstalled?: boolean;
+        running?: boolean;
+        error?: string;
+      };
+      if (res.ok && data.success) {
+        setPotInstalled(Boolean(data.installed));
+        setPotPluginInstalled(Boolean(data.pluginInstalled));
+        setPotRunning(Boolean(data.running));
+        setPotMessage({ type: 'success', text: t.potInstalledMsg });
+      } else {
+        setPotMessage({ type: 'error', text: data.error || 'Install failed' });
+      }
+    } catch {
+      setPotMessage({ type: 'error', text: 'Install failed' });
+    } finally {
+      setPotLoading(false);
+    }
+  };
+
+  const testPotProvider = async () => {
+    if (!isAdmin) return;
+    setPotLoading(true);
+    setPotMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/pot-provider/test`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        version?: string | null;
+        latencyMs?: number;
+        tokenPreview?: string;
+        error?: string;
+      };
+      if (data.success) {
+        if (data.version) setPotVersion(data.version);
+        const parts = [t.potTestSuccess];
+        if (data.version) parts.push(`v${data.version}`);
+        if (typeof data.latencyMs === 'number') parts.push(`${data.latencyMs}ms`);
+        if (data.tokenPreview) parts.push(data.tokenPreview);
+        setPotMessage({ type: 'success', text: parts.join(' · ') });
+      } else {
+        setPotMessage({ type: 'error', text: `${t.potTestFailed}: ${data.error || ''}` });
+      }
+    } catch {
+      setPotMessage({ type: 'error', text: t.potTestFailed });
+    } finally {
+      setPotLoading(false);
+    }
+  };
+
+  // Load admin-only configurations strictly when authenticated user is admin
+  React.useEffect(() => {
+    if (isAdmin) {
+      void fetchYouTubeAuth();
+      void fetchXrayStatus();
+      void fetchPotProviderStatus();
+    }
+  }, [isAdmin, authToken]);
 
   const ChevronIcon = t.dir === 'rtl' ? ChevronLeft : ChevronRight;
 
@@ -272,6 +832,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           {t.sectionDownloads}
         </h2>
         <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="px-4 py-3.5 space-y-2.5">
+            <div className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
+              <Download className="w-4 h-4 text-zinc-500" />
+              <span>{t.defaultQualityLabel}</span>
+            </div>
+            <div className="grid grid-cols-5 gap-1.5">
+              {DEFAULT_QUALITIES.map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  onClick={() => onDefaultQualityChange(q)}
+                  className={`min-h-[40px] px-2 rounded-xl text-xs font-mono font-semibold border transition whitespace-nowrap ${
+                    defaultQuality === q
+                      ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                      : 'bg-white dark:bg-black text-zinc-700 dark:text-zinc-300 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
+                  }`}
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="h-px bg-black/10 dark:bg-white/10 ms-11" />
+
           <button
             type="button"
             onClick={handleClear}
@@ -330,69 +915,546 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
-      {/* Section 5: YouTube Authentication (Admin Only) */}
-      {user?.role === 'admin' && (
-        <section aria-labelledby="settings-youtube">
-          <h2
-            id="settings-youtube"
-            className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
-          >
-            <span className="text-red-600 dark:text-red-400 text-xs px-2 py-0.5 rounded bg-red-50 dark:bg-red-900/30">{t.adminOnly}</span>
-            {t.sectionYouTube}
-          </h2>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
-            <div className="px-4 py-3 border-b border-black/10 dark:border-white/10">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.youtubeCookiesDesc}</p>
-            </div>
-            <div className="p-4 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1">{t.youtubeCookiesLabel}</label>
-                <textarea
-                  value={youtubeCookies}
-                  onChange={(e) => setYoutubeCookies(e.target.value)}
-                  placeholder={t.youtubeCookiesPlaceholder}
-                  rows={4}
-                  className="w-full px-3 py-2 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 text-sm text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                />
+      {/* Admin-Only Sections (Hidden completely from guests and standard users) */}
+      {isAdmin && (
+        <>
+          {/* Section 5: YouTube Authentication (Cookies & PO Token) */}
+          <section aria-labelledby="settings-youtube">
+            <h2
+              id="settings-youtube"
+              className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>{t.sectionAdmin} · {t.sectionYouTube}</span>
+            </h2>
+            <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+              <div className="px-4 py-3 border-b border-black/10 dark:border-white/10">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.youtubeCookiesDesc}</p>
               </div>
-              <div className="h-px bg-black/10 dark:bg-white/10" />
-              <div>
-                <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1">{t.youtubePoTokenLabel}</label>
-                <input
-                  type="password"
-                  value={youtubePoToken}
-                  onChange={(e) => setYoutubePoToken(e.target.value)}
-                  placeholder={t.youtubePoTokenPlaceholder}
-                  className="w-full px-3 py-2 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 text-sm text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
-                />
-                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{t.youtubePoTokenDesc}</p>
-              </div>
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={saveYouTubeAuth}
-                  disabled={youtubeLoading}
-                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold disabled:opacity-50"
-                >
-                  {youtubeLoading ? '...' : t.youtubeSaveBtn}
-                </button>
-                <button
-                  type="button"
-                  onClick={testYouTubeAuth}
-                  disabled={youtubeLoading}
-                  className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold disabled:opacity-50"
-                >
-                  {t.youtubeTestBtn}
-                </button>
-              </div>
-              {youtubeMessage && (
-                <div className={`text-xs p-2 rounded-lg ${youtubeMessage.type === 'success' ? 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400' : 'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400'}`}>
-                  {youtubeMessage.text}
+              <div className="p-4 space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.youtubeCookiesLabel}
+                  </label>
+                  <textarea
+                    dir="ltr"
+                    value={youtubeCookies}
+                    onChange={(e) => setYoutubeCookies(e.target.value)}
+                    placeholder={t.youtubeCookiesPlaceholder}
+                    rows={4}
+                    className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
                 </div>
-              )}
+
+                <div className="h-px bg-black/10 dark:bg-white/10" />
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.youtubePoTokenLabel}
+                  </label>
+                  <div className="relative flex items-center">
+                    <input
+                      dir="ltr"
+                      type={showPoToken ? 'text' : 'password'}
+                      value={youtubePoToken}
+                      onChange={(e) => setYoutubePoToken(e.target.value)}
+                      placeholder={t.youtubePoTokenPlaceholder}
+                      className="w-full min-h-[44px] ps-3 pe-11 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPoToken((v) => !v)}
+                      aria-label={showPoToken ? 'Hide PO Token' : 'Show PO Token'}
+                      className="absolute end-1 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg text-zinc-500 hover:text-black dark:hover:text-white transition-colors"
+                    >
+                      {showPoToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.youtubePoTokenDesc}</p>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={saveYouTubeAuth}
+                    disabled={youtubeLoading}
+                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {youtubeLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                    <span>{t.youtubeSaveBtn}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={testYouTubeAuth}
+                    disabled={youtubeLoading}
+                    className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                  >
+                    {t.youtubeTestBtn}
+                  </button>
+                </div>
+
+                {youtubeMessage && (
+                  <div
+                    className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
+                      youtubeMessage.type === 'success'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
+                        : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
+                    }`}
+                  >
+                    {youtubeMessage.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    )}
+                    <span className="break-words min-w-0">{youtubeMessage.text}</span>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </section>
+          </section>
+
+          {/* Section 6: Xray VPN Proxy */}
+          <section aria-labelledby="settings-xray">
+            <h2
+              id="settings-xray"
+              className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span>{t.sectionAdmin} · {t.sectionXray}</span>
+            </h2>
+            <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+              <div className="px-4 py-3.5 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-black dark:text-white">
+                    {t.xrayEnableLabel}
+                  </div>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    {t.xrayEnableDesc}
+                  </p>
+                  <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
+                    {!xrayBinaryInstalled
+                      ? t.xrayStatusNotInstalled
+                      : xrayRunning
+                        ? `${t.xrayStatusConnected} · SOCKS5 :${xrayPorts.socks} / HTTP :${xrayPorts.http}`
+                        : t.xrayStatusStopped}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={xrayEnabled}
+                  aria-label={t.xrayEnableLabel}
+                  disabled={xrayLoading}
+                  onClick={() => {
+                    const next = !xrayEnabled;
+                    setXrayEnabled(next);
+                    if (xrayConfigInput.trim()) {
+                      void saveXrayConfig(next);
+                    }
+                  }}
+                  className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
+                    xrayEnabled
+                      ? 'bg-black text-white dark:bg-white dark:text-black'
+                      : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                  }`}
+                >
+                  <span className="text-xs font-bold">{xrayEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+              </div>
+
+              <div className="p-4 space-y-4">
+                {!xrayBinaryInstalled && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
+                    <span className="text-xs text-zinc-600 dark:text-zinc-300">
+                      {t.xrayStatusNotInstalled}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={installXrayCore}
+                      disabled={xrayLoading}
+                      className="min-h-[40px] px-3.5 rounded-lg bg-black text-white dark:bg-white dark:text-black text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                    >
+                      {t.xrayInstallBtn}
+                    </button>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.xrayTestUrlLabel}
+                  </label>
+                  <input
+                    dir="ltr"
+                    type="url"
+                    value={xrayTestYoutubeUrl}
+                    onChange={(e) => setXrayTestYoutubeUrl(e.target.value)}
+                    placeholder="https://www.youtube.com/watch?v=jNQXAC9IVRw"
+                    className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
+                  <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.xrayTestUrlDesc}</p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.xrayConfigLabel}
+                  </label>
+                  <textarea
+                    dir="ltr"
+                    value={xrayConfigInput}
+                    onChange={(e) => setXrayConfigInput(e.target.value)}
+                    placeholder={t.xrayConfigPlaceholder}
+                    rows={4}
+                    className="w-full px-3 py-2.5 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                  />
+                  <p className="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{t.xrayConfigDesc}</p>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={importXrayProfiles}
+                    disabled={xrayLoading || !xrayConfigInput.trim()}
+                    className="min-h-[44px] px-4 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{t.xrayImportBtn}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => saveXrayConfig()}
+                    disabled={xrayLoading}
+                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {xrayLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                    <span>{t.xraySaveBtn}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => testXrayVpn()}
+                    disabled={xrayLoading || xrayTestingAll || !xrayConfigInput.trim()}
+                    className="min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                  >
+                    {t.xrayTestBtn}
+                  </button>
+                </div>
+
+                {/* Saved Server Configs List with per-config YouTube lowest-quality download test */}
+                <div className="pt-2 border-t border-black/10 dark:border-white/10 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-zinc-600 dark:text-zinc-300 tabular-nums">
+                      {t.xrayProfilesTitle} ({xrayProfiles.length})
+                    </div>
+                    {xrayProfiles.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={testAllXrayProfiles}
+                        disabled={xrayTestingAll || xrayLoading}
+                        className="min-h-[40px] px-3 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {xrayTestingAll ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Play className="w-3.5 h-3.5" />
+                        )}
+                        <span>{t.xrayTestAllBtn}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {xrayProfiles.length === 0 ? (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 py-2">
+                      {t.xrayProfilesEmpty}
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {xrayProfiles.map((profile) => {
+                        const isActive = profile.id === xrayActiveProfileId;
+                        const isTesting = xrayTestingProfileId === profile.id;
+                        return (
+                          <div
+                            key={profile.id}
+                            className={`p-3 rounded-xl border transition-colors ${
+                              isActive
+                                ? 'bg-white dark:bg-black border-black dark:border-white'
+                                : 'bg-white/70 dark:bg-black/60 border-black/10 dark:border-white/15'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="text-xs font-semibold text-black dark:text-white break-words">
+                                  {profile.name}
+                                </div>
+                                <div className="mt-0.5 text-[11px] font-mono text-zinc-500 dark:text-zinc-400 tabular-nums">
+                                  {profile.protocol.toUpperCase()} · {profile.address}
+                                  {isActive ? ` · ${t.xrayActiveLabel}` : ''}
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => testXrayVpn(profile.id)}
+                                  disabled={isTesting || xrayTestingAll}
+                                  className="min-h-[40px] px-3 rounded-lg border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-zinc-900 text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
+                                >
+                                  {isTesting ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <Play className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>{t.xrayTestProfileBtn}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => activateXrayProfile(profile.id)}
+                                  disabled={xrayLoading || isActive}
+                                  className={`min-h-[40px] px-3 rounded-lg text-xs font-semibold whitespace-nowrap disabled:opacity-50 ${
+                                    isActive
+                                      ? 'bg-black text-white dark:bg-white dark:text-black'
+                                      : 'border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white'
+                                  }`}
+                                >
+                                  {isActive ? t.xrayActiveLabel : t.xrayActivateBtn}
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label={t.xrayDeleteBtn}
+                                  onClick={() => deleteXrayProfile(profile.id)}
+                                  disabled={xrayLoading || isTesting}
+                                  className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg border border-black/10 dark:border-white/15 text-zinc-500 hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {profile.lastTest && (
+                              <div
+                                className={`mt-2 pt-2 border-t border-black/5 dark:border-white/10 text-[11px] font-mono flex items-start gap-1.5 ${
+                                  profile.lastTest.ok
+                                    ? 'text-emerald-700 dark:text-emerald-300'
+                                    : 'text-red-700 dark:text-red-300'
+                                }`}
+                              >
+                                {profile.lastTest.ok ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                ) : (
+                                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                )}
+                                <span className="break-words min-w-0">
+                                  {profile.lastTest.ok
+                                    ? [
+                                        t.xrayTestedPass,
+                                        typeof profile.lastTest.downloadedBytes === 'number'
+                                          ? `${Math.max(1, Math.round(profile.lastTest.downloadedBytes / 1024))} KB`
+                                          : null,
+                                        typeof profile.lastTest.latencyMs === 'number'
+                                          ? `${(profile.lastTest.latencyMs / 1000).toFixed(1)}s`
+                                          : null,
+                                        profile.lastTest.exitIp ? `IP ${profile.lastTest.exitIp}` : null,
+                                        profile.lastTest.title || null,
+                                      ]
+                                        .filter(Boolean)
+                                        .join(' · ')
+                                    : `${t.xrayTestedFail}: ${profile.lastTest.error || ''}`}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {xrayMessage && (
+                  <div
+                    className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
+                      xrayMessage.type === 'success'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
+                        : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
+                    }`}
+                  >
+                    {xrayMessage.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    )}
+                    <span className="break-words min-w-0 font-mono">{xrayMessage.text}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* Section 7: bgutil-ytdlp-pot-provider Server */}
+          <section aria-labelledby="settings-pot-provider">
+            <h2
+              id="settings-pot-provider"
+              className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400 flex items-center gap-2"
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>{t.sectionAdmin} · {t.sectionPotProvider}</span>
+            </h2>
+            <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+              <div className="px-4 py-3.5 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-black dark:text-white">
+                    {t.potEnableLabel}
+                  </div>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    {t.potEnableDesc}
+                  </p>
+                  <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
+                    {potMode === 'managed' && !potInstalled
+                      ? t.potStatusNotInstalled
+                      : potRunning
+                        ? `${t.potStatusRunning}${potVersion ? ` v${potVersion}` : ''} · ${potMode === 'managed' ? `127.0.0.1:${potPort}` : potBaseUrl}`
+                        : t.potStatusStopped}
+                    {!potPluginInstalled ? ` · ${t.potPluginMissing}` : ''}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={potEnabled}
+                  aria-label={t.potEnableLabel}
+                  disabled={potLoading}
+                  onClick={() => {
+                    const next = !potEnabled;
+                    setPotEnabled(next);
+                    void savePotProviderConfig(next);
+                  }}
+                  className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
+                    potEnabled
+                      ? 'bg-black text-white dark:bg-white dark:text-black'
+                      : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                  }`}
+                >
+                  <span className="text-xs font-bold">{potEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+              </div>
+
+              <div className="p-4 space-y-4">
+                {(potMode === 'managed' && (!potInstalled || !potPluginInstalled)) && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
+                    <span className="text-xs text-zinc-600 dark:text-zinc-300">
+                      {!potInstalled ? t.potStatusNotInstalled : t.potPluginMissing}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={installPotProvider}
+                      disabled={potLoading}
+                      className="min-h-[40px] px-3.5 rounded-lg bg-black text-white dark:bg-white dark:text-black text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                    >
+                      {t.potInstallBtn}
+                    </button>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.potModeLabel}
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPotMode('managed')}
+                      className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                        potMode === 'managed'
+                          ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                          : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
+                      }`}
+                    >
+                      {t.potModeManaged}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPotMode('external')}
+                      className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                        potMode === 'external'
+                          ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                          : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
+                      }`}
+                    >
+                      {t.potModeExternal}
+                    </button>
+                  </div>
+                </div>
+
+                {potMode === 'managed' ? (
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                      {t.potPortLabel}
+                    </label>
+                    <input
+                      dir="ltr"
+                      type="number"
+                      min={1025}
+                      max={65534}
+                      value={potPort}
+                      onChange={(e) => setPotPort(Number(e.target.value) || 4416)}
+                      className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white tabular-nums focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                      {t.potBaseUrlLabel}
+                    </label>
+                    <input
+                      dir="ltr"
+                      type="url"
+                      value={potBaseUrl}
+                      onChange={(e) => setPotBaseUrl(e.target.value)}
+                      placeholder="http://127.0.0.1:4416"
+                      className="w-full min-h-[44px] px-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-black dark:text-white placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                    />
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => savePotProviderConfig()}
+                    disabled={potLoading}
+                    className="flex-1 min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-sm font-semibold whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {potLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                    <span>{t.potSaveBtn}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={testPotProvider}
+                    disabled={potLoading}
+                    className="flex-1 min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                  >
+                    {t.potTestBtn}
+                  </button>
+                </div>
+
+                {potMessage && (
+                  <div
+                    className={`text-xs p-3 rounded-xl flex items-start gap-2 ${
+                      potMessage.type === 'success'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/60'
+                        : 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/60'
+                    }`}
+                  >
+                    {potMessage.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    )}
+                    <span className="break-words min-w-0 font-mono">{potMessage.text}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+        </>
       )}
 
       {showIOSGuide && (

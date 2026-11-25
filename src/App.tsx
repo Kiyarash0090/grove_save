@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ArrowDownToLine, Moon, Settings, Sun, User, WifiOff } from 'lucide-react';
 import { TRANSLATIONS, type AppLanguage, type AppTheme } from './i18n';
@@ -8,6 +8,24 @@ import { AuthModal, type AuthUser } from './components/AuthModal';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 
 type TabIndex = 0 | 1;
+
+const GUEST_HISTORY_KEY = 'grove_guest_history';
+
+function readGuestHistory(): SavedItem[] {
+  try {
+    const raw = localStorage.getItem(GUEST_HISTORY_KEY) || localStorage.getItem('grove_history');
+    return raw ? (JSON.parse(raw) as SavedItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeDefaultQuality(q: string | undefined): string {
+  if (q && ['2160p', '1080p', '720p', '480p', '360p'].includes(q)) {
+    return q;
+  }
+  return '1080p';
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabIndex>(0);
@@ -24,43 +42,75 @@ export default function App() {
     return 'en';
   });
   const [defaultQuality, setDefaultQuality] = useState<string>(() => {
-    return localStorage.getItem('grove_quality') || '1080p';
+    return normalizeDefaultQuality(localStorage.getItem('grove_quality') || undefined);
   });
-  const [history, setHistory] = useState<SavedItem[]>(() => {
-    try {
-      const raw = localStorage.getItem('grove_history');
-      return raw ? (JSON.parse(raw) as SavedItem[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [history, setHistory] = useState<SavedItem[]>(() => readGuestHistory());
 
-  // Load auth token from localStorage on initial render
-  const [authToken, setAuthToken] = useState<string | null>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('grove_auth_token');
-    }
-    return null;
-  });
-  const [user, setUser] = useState<AuthUser | null>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('grove_user');
-      if (saved) {
-        try {
-          return JSON.parse(saved) as AuthUser;
-        } catch {
-          return null;
-        }
-      }
-    }
-    return null;
-  });
+  // Auth token stays in React memory only; persistent reload sessions use HttpOnly cookie + DB
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [isRedGlow, setIsRedGlow] = useState(false);
+  const authEpochRef = useRef(0);
 
   const isOnline = useOnlineStatus();
   const t = TRANSLATIONS[language];
   const apiBase = '';
+
+  const buildAuthHeaders = useCallback(
+    (withJson = false, tokenOverride?: string | null): Record<string, string> => {
+      const headers: Record<string, string> = {
+        'X-Requested-With': 'GroveSave',
+      };
+      if (withJson) {
+        headers['Content-Type'] = 'application/json';
+      }
+      const activeToken = tokenOverride !== undefined ? tokenOverride : authToken;
+      if (activeToken) {
+        headers.Authorization = `Bearer ${activeToken}`;
+      }
+      return headers;
+    },
+    [authToken]
+  );
+
+  const applyUserPreferences = useCallback((authedUser: AuthUser) => {
+    if (!authedUser.preferences) return;
+    if (authedUser.preferences.theme === 'dark' || authedUser.preferences.theme === 'light') {
+      setTheme(authedUser.preferences.theme);
+    }
+    if (
+      authedUser.preferences.language === 'en' ||
+      authedUser.preferences.language === 'fa' ||
+      authedUser.preferences.language === 'ru' ||
+      authedUser.preferences.language === 'zh'
+    ) {
+      setLanguage(authedUser.preferences.language);
+    }
+    if (authedUser.preferences.defaultQuality) {
+      setDefaultQuality(normalizeDefaultQuality(authedUser.preferences.defaultQuality));
+    }
+  }, []);
+
+  const loadUserHistoryFromDb = useCallback(
+    async (tokenOverride?: string | null) => {
+      try {
+        const res = await fetch(`${apiBase}/api/user/history`, {
+          credentials: 'include',
+          headers: buildAuthHeaders(false, tokenOverride),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { items?: SavedItem[] };
+          if (Array.isArray(data.items)) {
+            setHistory(data.items);
+          }
+        }
+      } catch {
+        // Ignore transient offline error
+      }
+    },
+    [apiBase, buildAuthHeaders]
+  );
 
   // Sync theme with <html> and <meta name="theme-color">
   useEffect(() => {
@@ -90,26 +140,70 @@ export default function App() {
   }, [defaultQuality]);
 
   useEffect(() => {
-    localStorage.setItem('grove_history', JSON.stringify(history));
-  }, [history]);
+    if (!user) {
+      localStorage.setItem(GUEST_HISTORY_KEY, JSON.stringify(history));
+    }
+  }, [history, user]);
+
+  // Hydrate persistent HttpOnly cookie session from database once on initial page load / reload
+  useEffect(() => {
+    try {
+      localStorage.removeItem('grove_auth_token');
+      localStorage.removeItem('grove_user');
+    } catch {}
+
+    let cancelled = false;
+    const epochAtStart = authEpochRef.current;
+
+    fetch(`${apiBase}/api/auth/me`, {
+      credentials: 'include',
+      headers: { 'X-Requested-With': 'GroveSave' },
+    })
+      .then(async (res) => {
+        if (res.status === 401) return { unauthenticated: true as const };
+        if (!res.ok) return null;
+        return (await res.json()) as { user?: AuthUser };
+      })
+      .then((data) => {
+        if (cancelled || !data || authEpochRef.current !== epochAtStart) return;
+        if ('unauthenticated' in data) {
+          setUser(null);
+          setAuthToken(null);
+          setHistory(readGuestHistory());
+          return;
+        }
+        if (data.user) {
+          setUser(data.user);
+          applyUserPreferences(data.user);
+          void loadUserHistoryFromDb(null);
+        }
+      })
+      .catch(() => {
+        // Keep current state when offline
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally run once on mount so login/logout state updates never re-trigger /api/auth/me without the new token
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const syncPreferencesToServer = async (
     nextTheme: AppTheme,
     nextLang: AppLanguage,
     nextQuality: string
   ) => {
-    if (!authToken) return;
+    if (!user) return;
     try {
       await fetch(`${apiBase}/api/user/preferences`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${authToken}`,
-        },
+        credentials: 'include',
+        headers: buildAuthHeaders(true),
         body: JSON.stringify({
           theme: nextTheme,
           language: nextLang,
-          defaultQuality: nextQuality,
+          defaultQuality: normalizeDefaultQuality(nextQuality),
         }),
       });
     } catch {
@@ -119,52 +213,78 @@ export default function App() {
 
   const handleThemeChange = (next: AppTheme) => {
     setTheme(next);
-    syncPreferencesToServer(next, language, defaultQuality);
+    void syncPreferencesToServer(next, language, defaultQuality);
   };
 
   const handleLanguageChange = (next: AppLanguage) => {
     setLanguage(next);
-    syncPreferencesToServer(theme, next, defaultQuality);
+    void syncPreferencesToServer(theme, next, defaultQuality);
+  };
+
+  const handleDefaultQualityChange = (next: string) => {
+    const normalized = normalizeDefaultQuality(next);
+    setDefaultQuality(normalized);
+    void syncPreferencesToServer(theme, language, normalized);
   };
 
   const handleAuthenticated = (token: string, authedUser: AuthUser) => {
+    authEpochRef.current += 1;
     setAuthToken(token);
     setUser(authedUser);
-    localStorage.setItem('grove_auth_token', token);
-    localStorage.setItem('grove_user', JSON.stringify(authedUser));
-    if (authedUser.preferences) {
-      if (authedUser.preferences.theme === 'dark' || authedUser.preferences.theme === 'light') {
-        setTheme(authedUser.preferences.theme);
-      }
-      if (
-        authedUser.preferences.language === 'en' ||
-        authedUser.preferences.language === 'fa' ||
-        authedUser.preferences.language === 'ru' ||
-        authedUser.preferences.language === 'zh'
-      ) {
-        setLanguage(authedUser.preferences.language);
-      }
-      if (authedUser.preferences.defaultQuality) {
-        setDefaultQuality(authedUser.preferences.defaultQuality);
-      }
+    applyUserPreferences(authedUser);
+    void loadUserHistoryFromDb(token);
+  };
+
+  // Prevent duplicate history entries and persist per-user in database when signed in
+  const handleAddHistory = (item: SavedItem) => {
+    setHistory((prev) => {
+      const filtered = prev.filter((h) => h.url !== item.url);
+      return [item, ...filtered].slice(0, 50);
+    });
+
+    if (user) {
+      fetch(`${apiBase}/api/user/history`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: buildAuthHeaders(true),
+        body: JSON.stringify(item),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { items?: SavedItem[] } | null) => {
+          if (data?.items) {
+            setHistory(data.items);
+          }
+        })
+        .catch(() => {});
     }
   };
 
-  // Prevent duplicate history entries
-  const handleAddHistory = (item: SavedItem) => {
-    setHistory((prev) => {
-      // Check if URL already exists in history
-      const exists = prev.some((h) => h.url === item.url);
-      if (exists) return prev;
-      return [item, ...prev].slice(0, 25);
-    });
+  const handleClearHistory = () => {
+    setHistory([]);
+    if (user) {
+      fetch(`${apiBase}/api/user/history`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: buildAuthHeaders(),
+      }).catch(() => {});
+    } else {
+      localStorage.removeItem(GUEST_HISTORY_KEY);
+      localStorage.removeItem('grove_history');
+    }
   };
 
-  const handleSignOut = () => {
+  const handleSignOut = async () => {
+    authEpochRef.current += 1;
+    try {
+      await fetch(`${apiBase}/api/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: buildAuthHeaders(),
+      });
+    } catch {}
     setAuthToken(null);
     setUser(null);
-    localStorage.removeItem('grove_auth_token');
-    localStorage.removeItem('grove_user');
+    setHistory(readGuestHistory());
   };
 
   const switchTab = (next: TabIndex) => {
@@ -227,39 +347,69 @@ export default function App() {
         />
       </div>
 
-      {/* Compact Top Bar */}
-      <header className="sticky top-0 z-30 backdrop-blur-md bg-white/80 dark:bg-black/80 border-b border-black/10 dark:border-white/10">
-        <div className="max-w-6xl mx-auto h-14 px-4 sm:px-6 flex items-center justify-between gap-4">
+      {/* Modern Minimalist Frosted Glass Header */}
+      <header className="sticky top-0 z-30 backdrop-blur-2xl bg-white/80 dark:bg-black/75 border-b border-black/[0.06] dark:border-white/[0.08] transition-colors duration-300">
+        <div className="max-w-6xl mx-auto h-14 sm:h-16 px-4 sm:px-6 flex items-center justify-between gap-6">
           <button
             type="button"
             onClick={() => switchTab(0)}
-            className="grove-wordmark text-2xl sm:text-3xl text-white select-none whitespace-nowrap shrink-0 cursor-pointer"
+            className="group min-h-[44px] px-1.5 -ms-1.5 rounded-xl flex items-center gap-2.5 select-none whitespace-nowrap shrink-0 cursor-pointer transition-opacity hover:opacity-85 active:scale-[0.98]"
           >
-            grove save
+            <span className="w-8 h-8 rounded-xl bg-black text-white dark:bg-white dark:text-black flex items-center justify-center shrink-0 shadow-sm transition-transform duration-200 group-hover:scale-105">
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 4v11" />
+                <path d="m7.5 10.5 4.5 4.5 4.5-4.5" />
+                <path d="M5 19h14" />
+              </svg>
+            </span>
+            <span className="grove-wordmark text-lg sm:text-xl font-bold text-black dark:text-white tracking-tight lowercase">
+              grove save
+            </span>
           </button>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => handleThemeChange(theme === 'dark' ? 'light' : 'dark')}
               aria-label={theme === 'dark' ? t.themeWhite : t.themeBlack}
-              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-black dark:text-white hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl border border-black/10 dark:border-white/12 bg-black/[0.03] dark:bg-white/[0.05] text-black dark:text-white hover:bg-black/[0.07] dark:hover:bg-white/[0.1] active:scale-95 transition"
             >
-              {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
             <button
               type="button"
               onClick={() => (user ? switchTab(1) : setAuthModalOpen(true))}
               aria-label={t.sectionAccount}
-              className="min-h-[44px] min-w-[44px] px-2 flex items-center justify-center rounded-xl text-black dark:text-white hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
+              className={`min-h-[44px] flex items-center justify-center gap-2 rounded-xl transition active:scale-95 whitespace-nowrap shrink-0 ${
+                user
+                  ? 'px-2.5 border border-black/10 dark:border-white/12 bg-black/[0.03] dark:bg-white/[0.05] text-black dark:text-white hover:bg-black/[0.07] dark:hover:bg-white/[0.1]'
+                  : 'px-3.5 bg-black text-white dark:bg-white dark:text-black text-xs font-semibold hover:opacity-90'
+              }`}
             >
               {user ? (
-                <span className="w-7 h-7 rounded-full bg-black text-white dark:bg-white dark:text-black text-xs font-bold flex items-center justify-center">
-                  {user.displayName.charAt(0).toUpperCase()}
-                </span>
+                <>
+                  <span className="w-7 h-7 rounded-lg bg-black text-white dark:bg-white dark:text-black text-xs font-bold flex items-center justify-center shrink-0">
+                    {user.displayName.charAt(0).toUpperCase()}
+                  </span>
+                  <span className="hidden sm:inline text-xs font-semibold max-w-[110px] truncate">
+                    {user.displayName}
+                  </span>
+                </>
               ) : (
-                <User className="w-5 h-5" />
+                <>
+                  <User className="w-4 h-4 shrink-0" />
+                  <span className="hidden sm:inline">{t.modeSignIn}</span>
+                </>
               )}
             </button>
           </div>
@@ -300,11 +450,15 @@ export default function App() {
                 onThemeChange={handleThemeChange}
                 language={language}
                 onLanguageChange={handleLanguageChange}
+                defaultQuality={defaultQuality}
+                onDefaultQualityChange={handleDefaultQualityChange}
                 historyCount={history.length}
-                onClearHistory={() => setHistory([])}
+                onClearHistory={handleClearHistory}
                 user={user}
+                authToken={authToken}
                 onOpenAuth={() => setAuthModalOpen(true)}
                 onSignOut={handleSignOut}
+                apiBase={apiBase}
               />
             </motion.div>
           )}
