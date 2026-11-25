@@ -298,7 +298,8 @@ function buildYtDlpArgs(baseArgs: string[]): string[] {
   // Ensure yt-dlp uses Node.js as JavaScript runtime for YouTube extraction
   // This is needed because newer YouTube player requires JS execution
   // Also add --no-check-certificate for container environments
-  return ['--js-runtimes', 'node', '--no-check-certificate', ...baseArgs];
+  // Add --remote-components ejs:github for YouTube challenge solving
+  return ['--js-runtimes', 'node', '--no-check-certificate', '--remote-components', 'ejs:github', ...baseArgs];
 }
 
 function sanitizeFilename(name: string): string {

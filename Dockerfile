@@ -12,8 +12,12 @@ RUN apk add --no-cache \
     curl \
     ca-certificates
 
-# Install yt-dlp via pip
-RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
+# Install yt-dlp via pip with EJS support for YouTube challenges
+RUN pip3 install --no-cache-dir --break-system-packages "yt-dlp[default]"
+
+# Install yt-dlp remote components (EJS for YouTube JS challenges)
+RUN yt-dlp --update-to nightly 2>/dev/null || true && \
+    yt-dlp --remote-components ejs:github 2>/dev/null || true
 
 # Verify installations
 RUN node --version && npm --version && yt-dlp --version && ffmpeg -version
