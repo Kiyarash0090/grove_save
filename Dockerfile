@@ -1,23 +1,73 @@
-FROM node:22-bookworm-slim
+# Grove Save - Dockerfile
+# Multi-stage build for Node.js app with yt-dlp support
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    ffmpeg \
+# Base stage - install system dependencies
+FROM node:22-alpine AS base
+
+# Install system dependencies including yt-dlp and ffmpeg
+RUN apk add --no-cache \
     python3 \
-    && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp \
-    && rm -rf /var/lib/apt/lists/*
+    py3-pip \
+    ffmpeg \
+    curl \
+    ca-certificates
+
+# Install yt-dlp via pip
+RUN pip3 install --no-cache-dir --break-system-packages yt-dlp
+
+# Verify installations
+RUN node --version && npm --version && yt-dlp --version && ffmpeg -version
+
+# Build stage
+FROM base AS builder
 
 WORKDIR /app
 
+# Copy package files
 COPY package*.json ./
-RUN npm install --legacy-peer-deps --no-audit --no-fund
 
+# Install dependencies
+RUN npm ci
+
+# Copy source code
 COPY . .
+
+# Build the application
 RUN npm run build
 
-ENV NODE_ENV=production
+# Production stage
+FROM base AS production
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install production dependencies only
+RUN npm ci --omit=dev
+
+# Copy built application from builder
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/server.ts ./
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/data ./data
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S grovesave -u 1001 -G nodejs
+
+# Create data and cache directories with proper permissions
+RUN mkdir -p /app/data/cache && \
+    chown -R grovesave:nodejs /app
+
+USER grovesave
+
+# Expose port
 EXPOSE 3000
 
-CMD ["npm", "start"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
+
+# Start the application
+CMD ["node", "server.ts"]

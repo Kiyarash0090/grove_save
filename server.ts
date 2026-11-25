@@ -267,6 +267,8 @@ function extractYouTubeId(parsed: URL): string | null {
 }
 
 let cachedYtDlpPath: string | null | undefined;
+let cachedYtDlpVersion: string | null | undefined;
+
 async function getYtDlpPath(): Promise<string | null> {
   if (cachedYtDlpPath !== undefined) return cachedYtDlpPath;
   try {
@@ -277,6 +279,26 @@ async function getYtDlpPath(): Promise<string | null> {
     cachedYtDlpPath = null;
   }
   return cachedYtDlpPath;
+}
+
+async function getYtDlpVersion(): Promise<string | null> {
+  if (cachedYtDlpVersion !== undefined) return cachedYtDlpVersion;
+  const ytdlp = await getYtDlpPath();
+  if (!ytdlp) return null;
+  try {
+    const { stdout } = await execFileAsync(ytdlp, ['--version'], { timeout: 5000 });
+    cachedYtDlpVersion = stdout.trim();
+  } catch {
+    cachedYtDlpVersion = null;
+  }
+  return cachedYtDlpVersion;
+}
+
+function buildYtDlpArgs(baseArgs: string[]): string[] {
+  // Ensure yt-dlp uses Node.js as JavaScript runtime for YouTube extraction
+  // This is needed because newer YouTube player requires JS execution
+  // Also add --no-check-certificate for container environments
+  return ['--js-runtimes', 'node', '--no-check-certificate', ...baseArgs];
 }
 
 function sanitizeFilename(name: string): string {
@@ -369,10 +391,12 @@ async function startServer() {
 
   app.get('/api/health', async (_req: Request, res: Response) => {
     const ytdlp = await getYtDlpPath();
+    const ytdlpVersion = ytdlp ? await getYtDlpVersion() : null;
     res.json({
       status: 'ok',
       engine: ytdlp ? 'express-ytdlp' : 'express-ytdl-core',
       ytdlpAvailable: Boolean(ytdlp),
+      ytdlpVersion,
     });
   });
 
@@ -546,7 +570,7 @@ async function startServer() {
       try {
         const { stdout } = await execFileAsync(
           ytdlp,
-          ['--dump-single-json', '--no-playlist', '--no-warnings', '--', parsed.toString()],
+          buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', parsed.toString()]),
           { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }
         );
         const info = JSON.parse(stdout) as {
@@ -685,7 +709,7 @@ async function startServer() {
       const ytdlp = await getYtDlpPath();
       if (ytdlp) {
         const targetH = String(selectTargetHeight(job.quality));
-        const args = isAudio
+        const baseArgs = isAudio
           ? ['-x', '--audio-format', 'mp3', '-o', job.filePath, '--', parsed.toString()]
           : [
               '-f',
@@ -697,7 +721,7 @@ async function startServer() {
               '--',
               parsed.toString(),
             ];
-        await execFileAsync(ytdlp, args, { timeout: 15 * 60 * 1000 });
+        await execFileAsync(ytdlp, buildYtDlpArgs(baseArgs), { timeout: 15 * 60 * 1000 });
         await finalizeJobFile(job);
         return;
       }
@@ -1061,7 +1085,7 @@ async function startServer() {
     const ytdlp = await getYtDlpPath();
     if (ytdlp) {
       const targetH = String(selectTargetHeight(quality));
-      const args = isAudio
+      const baseArgs = isAudio
         ? ['-x', '--audio-format', 'mp3', '-o', '-', '--', parsed.toString()]
         : [
             '-f',
@@ -1071,6 +1095,7 @@ async function startServer() {
             '--',
             parsed.toString(),
           ];
+      const args = buildYtDlpArgs(baseArgs);
 
       res.setHeader('Content-Type', isAudio ? 'audio/mpeg' : 'video/mp4');
       res.setHeader('Content-Disposition', contentDisposition);
