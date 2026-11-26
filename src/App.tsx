@@ -5,12 +5,22 @@ import { TRANSLATIONS, type AppLanguage, type AppTheme } from './i18n';
 import { getThemeMeta, isDarkTheme, normalizeAppTheme } from './themes';
 import { DownloaderView, type ProviderGlow, type SavedItem } from './components/DownloaderView';
 import { InfoView, type AnnouncementItem } from './components/InfoView';
-import { SettingsView } from './components/SettingsView';
+import { SettingsView, type AdminPage } from './components/SettingsView';
 import { AuthModal, type AuthUser } from './components/AuthModal';
 import { AmbientTwinkleDots } from './components/AmbientTwinkleDots';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 
 type TabIndex = 0 | 1 | 2;
+
+interface NavHistoryState {
+  groveNav: true;
+  tab: TabIndex;
+  adminPage: AdminPage;
+  authModal: boolean;
+  iosGuide: boolean;
+  subOverlay: boolean;
+  depth: number;
+}
 
 const GUEST_HISTORY_KEY = 'grove_guest_history';
 const LEGACY_HISTORY_KEY = 'grove_history';
@@ -58,6 +68,8 @@ export default function App() {
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [adminPage, setAdminPage] = useState<AdminPage>('main');
+  const [iosGuideOpen, setIosGuideOpen] = useState(false);
   const [providerGlow, setProviderGlow] = useState<ProviderGlow>('default');
   const [announcements, setAnnouncements] = useState<AnnouncementItem[]>([]);
   const [seenAnnouncementKey, setSeenAnnouncementKey] = useState<string | null>(() => {
@@ -68,6 +80,11 @@ export default function App() {
     }
   });
   const authEpochRef = useRef(0);
+  const activeTabRef = useRef<TabIndex>(0);
+  activeTabRef.current = activeTab;
+  const navDepthRef = useRef<number>(0);
+  const pendingReplaceAfterPopRef = useRef<NavHistoryState | null>(null);
+  const subOverlayCloseRef = useRef<(() => void) | null>(null);
 
   const isOnline = useOnlineStatus();
   const t = TRANSLATIONS[language];
@@ -205,6 +222,77 @@ export default function App() {
     };
     // Intentionally run once on mount so login/logout state updates never re-trigger /api/auth/me without the new token
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep browser/device back button inside the app so navigating back from sub-tabs,
+  // admin pages, or modals returns to the main page instead of exiting the app.
+  useEffect(() => {
+    const initialSnapshot: NavHistoryState = {
+      groveNav: true,
+      tab: 0,
+      adminPage: 'main',
+      authModal: false,
+      iosGuide: false,
+      subOverlay: false,
+      depth: 0,
+    };
+    window.history.replaceState(initialSnapshot, '');
+
+    const handlePopState = (event: PopStateEvent) => {
+      if (pendingReplaceAfterPopRef.current) {
+        const nextSnap = pendingReplaceAfterPopRef.current;
+        pendingReplaceAfterPopRef.current = null;
+        window.history.replaceState(nextSnap, '');
+        return;
+      }
+
+      const state = event.state as Partial<NavHistoryState> | null;
+      if (state && state.groveNav) {
+        const targetTab: TabIndex = state.tab === 1 || state.tab === 2 ? state.tab : 0;
+        const targetAdmin: AdminPage = targetTab === 2 && state.adminPage ? state.adminPage : 'main';
+
+        navDepthRef.current = typeof state.depth === 'number' ? state.depth : 0;
+
+        if (!state.subOverlay && subOverlayCloseRef.current) {
+          const closeFn = subOverlayCloseRef.current;
+          subOverlayCloseRef.current = null;
+          closeFn();
+        }
+
+        const prevTab = activeTabRef.current;
+        if (prevTab !== targetTab) {
+          setSwipeDir(targetTab > prevTab ? 1 : -1);
+        }
+        activeTabRef.current = targetTab;
+        setActiveTab(targetTab);
+        setAdminPage(targetAdmin);
+        setAuthModalOpen(Boolean(state.authModal));
+        setIosGuideOpen(Boolean(state.iosGuide));
+        return;
+      }
+
+      // Fallback: return cleanly to the main page
+      navDepthRef.current = 0;
+      if (subOverlayCloseRef.current) {
+        const closeFn = subOverlayCloseRef.current;
+        subOverlayCloseRef.current = null;
+        closeFn();
+      }
+      const prevTab = activeTabRef.current;
+      if (prevTab !== 0) {
+        setSwipeDir(-1);
+      }
+      activeTabRef.current = 0;
+      setActiveTab(0);
+      setAdminPage('main');
+      setAuthModalOpen(false);
+      setIosGuideOpen(false);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
   }, []);
 
   const loadAnnouncements = useCallback(async () => {
@@ -399,10 +487,179 @@ export default function App() {
     }
   };
 
+  const handleAdminPageChange = (nextPage: AdminPage) => {
+    if (nextPage === adminPage) return;
+    setAdminPage(nextPage);
+    if (nextPage !== 'main') {
+      if (adminPage === 'main') {
+        const nextDepth = navDepthRef.current + 1;
+        navDepthRef.current = nextDepth;
+        window.history.pushState(
+          {
+            groveNav: true,
+            tab: 2,
+            adminPage: nextPage,
+            authModal: false,
+            iosGuide: false,
+            subOverlay: false,
+            depth: nextDepth,
+          } satisfies NavHistoryState,
+          ''
+        );
+      } else {
+        window.history.replaceState(
+          {
+            groveNav: true,
+            tab: 2,
+            adminPage: nextPage,
+            authModal: false,
+            iosGuide: false,
+            subOverlay: false,
+            depth: navDepthRef.current,
+          } satisfies NavHistoryState,
+          ''
+        );
+      }
+    } else {
+      const state = window.history.state as Partial<NavHistoryState> | null;
+      if (state?.groveNav && state.adminPage !== 'main' && navDepthRef.current > 1) {
+        navDepthRef.current -= 1;
+        window.history.back();
+      }
+    }
+  };
+
+  const openAuthModal = () => {
+    if (authModalOpen) return;
+    setAuthModalOpen(true);
+    const nextDepth = navDepthRef.current + 1;
+    navDepthRef.current = nextDepth;
+    window.history.pushState(
+      {
+        groveNav: true,
+        tab: activeTab,
+        adminPage,
+        authModal: true,
+        iosGuide: iosGuideOpen,
+        subOverlay: Boolean(subOverlayCloseRef.current),
+        depth: nextDepth,
+      } satisfies NavHistoryState,
+      ''
+    );
+  };
+
+  const closeAuthModal = () => {
+    if (!authModalOpen) return;
+    setAuthModalOpen(false);
+    const state = window.history.state as Partial<NavHistoryState> | null;
+    if (state?.groveNav && state.authModal && navDepthRef.current > 0) {
+      navDepthRef.current -= 1;
+      window.history.back();
+    }
+  };
+
+  const handleIosGuideChange = (open: boolean) => {
+    if (open === iosGuideOpen) return;
+    setIosGuideOpen(open);
+    if (open) {
+      const nextDepth = navDepthRef.current + 1;
+      navDepthRef.current = nextDepth;
+      window.history.pushState(
+        {
+          groveNav: true,
+          tab: activeTab,
+          adminPage,
+          authModal: authModalOpen,
+          iosGuide: true,
+          subOverlay: false,
+          depth: nextDepth,
+        } satisfies NavHistoryState,
+        ''
+      );
+    } else {
+      const state = window.history.state as Partial<NavHistoryState> | null;
+      if (state?.groveNav && state.iosGuide && navDepthRef.current > 0) {
+        navDepthRef.current -= 1;
+        window.history.back();
+      }
+    }
+  };
+
+  const handlePushBackOverlay = useCallback((onClose: () => void) => {
+    subOverlayCloseRef.current = onClose;
+    const state = window.history.state as Partial<NavHistoryState> | null;
+    if (state?.groveNav && state.subOverlay) return;
+    const nextDepth = navDepthRef.current + 1;
+    navDepthRef.current = nextDepth;
+    window.history.pushState(
+      {
+        groveNav: true,
+        tab: activeTabRef.current,
+        adminPage: 'main',
+        authModal: false,
+        iosGuide: false,
+        subOverlay: true,
+        depth: nextDepth,
+      } satisfies NavHistoryState,
+      ''
+    );
+  }, []);
+
+  const handlePopBackOverlay = useCallback(() => {
+    subOverlayCloseRef.current = null;
+    const state = window.history.state as Partial<NavHistoryState> | null;
+    if (state?.groveNav && state.subOverlay && navDepthRef.current > 0) {
+      navDepthRef.current -= 1;
+      window.history.back();
+    }
+  }, []);
+
   const switchTab = (next: TabIndex) => {
-    if (next === activeTab) return;
+    if (next === activeTab) {
+      if (next === 2 && adminPage !== 'main') {
+        handleAdminPageChange('main');
+      }
+      return;
+    }
     setSwipeDir(next > activeTab ? 1 : -1);
+    activeTabRef.current = next;
     setActiveTab(next);
+    setAdminPage('main');
+    setIosGuideOpen(false);
+    setAuthModalOpen(false);
+    subOverlayCloseRef.current = null;
+    pendingReplaceAfterPopRef.current = null;
+
+    if (next === 0) {
+      if (navDepthRef.current > 0) {
+        const steps = navDepthRef.current;
+        navDepthRef.current = 0;
+        window.history.go(-steps);
+      }
+      return;
+    }
+
+    const nextSnap: NavHistoryState = {
+      groveNav: true,
+      tab: next,
+      adminPage: 'main',
+      authModal: false,
+      iosGuide: false,
+      subOverlay: false,
+      depth: 1,
+    };
+
+    if (navDepthRef.current === 0) {
+      navDepthRef.current = 1;
+      window.history.pushState(nextSnap, '');
+    } else if (navDepthRef.current === 1) {
+      window.history.replaceState(nextSnap, '');
+    } else {
+      const steps = navDepthRef.current - 1;
+      navDepthRef.current = 1;
+      pendingReplaceAfterPopRef.current = nextSnap;
+      window.history.go(-steps);
+    }
   };
 
   // Finger / Touch swipe navigation across pages
@@ -531,7 +788,7 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => (user ? switchTab(2) : setAuthModalOpen(true))}
+              onClick={() => (user ? switchTab(2) : openAuthModal())}
               aria-label={t.sectionAccount}
               className={`min-h-[44px] flex items-center justify-center gap-2 rounded-xl transition active:scale-95 whitespace-nowrap shrink-0 ${
                 user
@@ -581,6 +838,8 @@ export default function App() {
                 isGuest={!user}
                 isAdmin={user?.role === 'admin'}
                 authToken={authToken}
+                onPushBackOverlay={handlePushBackOverlay}
+                onPopBackOverlay={handlePopBackOverlay}
               />
             </motion.div>
           ) : activeTab === 1 ? (
@@ -617,12 +876,16 @@ export default function App() {
                 onClearHistory={handleClearHistory}
                 user={user}
                 authToken={authToken}
-                onOpenAuth={() => setAuthModalOpen(true)}
+                onOpenAuth={openAuthModal}
                 onSignOut={handleSignOut}
                 onUpdateDisplayName={handleUpdateDisplayName}
                 apiBase={apiBase}
                 announcements={announcements}
                 onAnnouncementsChange={setAnnouncements}
+                adminPage={adminPage}
+                onAdminPageChange={handleAdminPageChange}
+                showIOSGuide={iosGuideOpen}
+                onShowIOSGuideChange={handleIosGuideChange}
               />
             </motion.div>
           )}
@@ -694,7 +957,7 @@ export default function App() {
       {/* Account Auth Modal (Google + Email/Password + Guest) */}
       <AuthModal
         open={authModalOpen}
-        onClose={() => setAuthModalOpen(false)}
+        onClose={closeAuthModal}
         t={t}
         apiBase={apiBase}
         onAuthenticated={handleAuthenticated}

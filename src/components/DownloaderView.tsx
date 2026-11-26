@@ -111,6 +111,8 @@ interface DownloaderViewProps {
   isGuest?: boolean;
   isAdmin?: boolean;
   authToken?: string | null;
+  onPushBackOverlay?: (onClose: () => void) => void;
+  onPopBackOverlay?: () => void;
 }
 
 export function extractClientYouTubeId(raw: string): string | null {
@@ -300,6 +302,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   isGuest = false,
   isAdmin = false,
   authToken = null,
+  onPushBackOverlay,
+  onPopBackOverlay,
 }) => {
   const [urlInput, setUrlInput] = useState('');
   const [selectedQuality, setSelectedQuality] = useState(defaultQuality);
@@ -943,10 +947,19 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     startAppDownload(item.url, item.title, item.quality, item.thumbnail, item.author);
   };
 
+  const closeHistoryPlayer = () => {
+    setHistoryPlayer(null);
+    onPopBackOverlay?.();
+  };
+
   const handleHistoryPlay = async (item: SavedItem) => {
     if (historyPlayer?.item.id === item.id && !historyPlayer.error) {
-      setHistoryPlayer(null);
+      closeHistoryPlayer();
       return;
+    }
+
+    if (!historyPlayer) {
+      onPushBackOverlay?.(() => setHistoryPlayer(null));
     }
 
     setHistoryPlayer({
@@ -1072,7 +1085,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
 
   const handleHistoryDelete = (item: SavedItem) => {
     if (historyPlayer?.item.id === item.id) {
-      setHistoryPlayer(null);
+      closeHistoryPlayer();
     }
     onDeleteHistoryItem?.(item.id);
   };
@@ -2446,7 +2459,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                   </div>
                   <button
                     type="button"
-                    onClick={() => setHistoryPlayer(null)}
+                    onClick={closeHistoryPlayer}
                     aria-label={t.close}
                     className="min-h-[32px] min-w-[32px] rounded-lg flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition shrink-0"
                   >

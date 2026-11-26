@@ -40,6 +40,8 @@ import type { AnnouncementItem } from './InfoView';
 import { AdminStatsView, type AdminStatsPayload } from './AdminStatsView';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
+export type AdminPage = 'main' | 'stats' | 'xray' | 'pot' | 'telegram' | 'announcements';
+
 interface SettingsViewProps {
   t: TranslationDict;
   theme: AppTheme;
@@ -58,6 +60,10 @@ interface SettingsViewProps {
   apiBase: string;
   announcements: AnnouncementItem[];
   onAnnouncementsChange: (items: AnnouncementItem[]) => void;
+  adminPage?: AdminPage;
+  onAdminPageChange?: (page: AdminPage) => void;
+  showIOSGuide?: boolean;
+  onShowIOSGuideChange?: (open: boolean) => void;
 }
 
 const LANGUAGES: { code: AppLanguage; label: string }[] = [
@@ -87,9 +93,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   apiBase,
   announcements,
   onAnnouncementsChange,
+  adminPage: controlledAdminPage,
+  onAdminPageChange,
+  showIOSGuide: controlledShowIOSGuide,
+  onShowIOSGuideChange,
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
-  const [showIOSGuide, setShowIOSGuide] = useState(false);
+  const [internalShowIOSGuide, setInternalShowIOSGuide] = useState(false);
+  const showIOSGuide = controlledShowIOSGuide ?? internalShowIOSGuide;
+  const setShowIOSGuide = onShowIOSGuideChange ?? setInternalShowIOSGuide;
   const [clearedFeedback, setClearedFeedback] = useState(false);
 
   const [editingName, setEditingName] = useState(false);
@@ -97,7 +109,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [nameSaving, setNameSaving] = useState(false);
   const [nameFeedback, setNameFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const [adminPage, setAdminPage] = useState<'main' | 'stats' | 'xray' | 'pot' | 'telegram' | 'announcements'>('main');
+  const [internalAdminPage, setInternalAdminPage] = useState<AdminPage>('main');
+  const adminPage = controlledAdminPage ?? internalAdminPage;
+  const setAdminPage = onAdminPageChange ?? setInternalAdminPage;
   const [adminStats, setAdminStats] = useState<AdminStatsPayload | null>(null);
   const [adminStatsLoading, setAdminStatsLoading] = useState(false);
   const [adminStatsError, setAdminStatsError] = useState<string | null>(null);
@@ -1366,7 +1380,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       void fetchTelegramFiles();
       void fetchDbStats();
       void fetchDbBackups();
-    } else {
+    } else if (adminPage !== 'main') {
       setAdminPage('main');
     }
   }, [isAdmin, authToken]);
