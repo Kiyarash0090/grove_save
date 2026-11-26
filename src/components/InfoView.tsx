@@ -23,6 +23,22 @@ import {
 } from 'lucide-react';
 import type { AppLanguage, TranslationDict } from '../i18n';
 
+const PLATFORM_ICON_COLORS: Record<string, string> = {
+  youtube: 'text-red-500',
+  instagram: 'text-[#dd2a7b]',
+  tiktok: 'text-cyan-400',
+  x: 'text-sky-400',
+  pinterest: 'text-[#e60023]',
+  telegram: 'text-[#0088cc]',
+};
+
+const BOT_ICON_COLORS: Record<string, string> = {
+  media: 'text-[#0088cc]',
+  music: 'text-[#1db954]',
+  youtube: 'text-red-500',
+  video: 'text-[#ff6b35]',
+};
+
 export interface AnnouncementItem {
   id: string;
   title: string;
@@ -43,6 +59,7 @@ interface TelegramBotEntry {
   handle: string;
   url: string;
   icon: 'media' | 'music' | 'youtube' | 'video';
+  iconColor?: string;
 }
 
 const CREATOR_CHANNEL_URL = 'https://t.me/GROVE_STREET_BOT1';
@@ -55,6 +72,7 @@ const TELEGRAM_BOTS: TelegramBotEntry[] = [
     handle: '@Groove_media_dl_bot',
     url: 'https://t.me/Groove_media_dl_bot',
     icon: 'media',
+    iconColor: 'text-[#0088cc]',
   },
   {
     brandTitle: 'Grove Music',
@@ -62,6 +80,7 @@ const TELEGRAM_BOTS: TelegramBotEntry[] = [
     handle: '@grove_SpotifyDl_bot',
     url: 'https://t.me/grove_SpotifyDl_bot',
     icon: 'music',
+    iconColor: 'text-[#1db954]',
   },
   {
     brandTitle: 'Grove YouTube',
@@ -69,6 +88,7 @@ const TELEGRAM_BOTS: TelegramBotEntry[] = [
     handle: '@Grove_YoutubeDl_bot',
     url: 'https://t.me/Grove_YoutubeDl_bot',
     icon: 'youtube',
+    iconColor: 'text-red-500',
   },
   {
     brandTitle: 'Grove PH',
@@ -76,6 +96,7 @@ const TELEGRAM_BOTS: TelegramBotEntry[] = [
     handle: '@Grove_phdl_bot',
     url: 'https://t.me/Grove_phdl_bot',
     icon: 'video',
+    iconColor: 'text-[#ff6b35]',
   },
 ];
 
@@ -103,35 +124,37 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
   const [showFeatures, setShowFeatures] = useState(false);
   const [featureFilter, setFeatureFilter] = useState<'all' | 'platforms' | 'general'>('all');
 
-  const renderBotIcon = (kind: TelegramBotEntry['icon']) => {
+  const renderBotIcon = (kind: TelegramBotEntry['icon'], colorClass?: string) => {
+    const resolvedColor = colorClass || BOT_ICON_COLORS[kind] || 'text-black dark:text-white';
     switch (kind) {
       case 'music':
-        return <Music className="w-4 h-4 text-black dark:text-white" />;
+        return <Music className={`w-4 h-4 ${resolvedColor}`} />;
       case 'youtube':
-        return <Youtube className="w-4 h-4 text-black dark:text-white" />;
+        return <Youtube className={`w-4 h-4 ${resolvedColor}`} />;
       case 'video':
-        return <Film className="w-4 h-4 text-black dark:text-white" />;
+        return <Film className={`w-4 h-4 ${resolvedColor}`} />;
       default:
-        return <Bot className="w-4 h-4 text-black dark:text-white" />;
+        return <Bot className={`w-4 h-4 ${resolvedColor}`} />;
     }
   };
 
   const renderPlatformIcon = (
     id: TranslationDict['infoFeaturesPlatforms'][number]['id']
   ) => {
+    const colorClass = PLATFORM_ICON_COLORS[id] || 'text-black dark:text-white';
     switch (id) {
       case 'youtube':
-        return <Youtube className="w-4 h-4 text-black dark:text-white" />;
+        return <Youtube className={`w-4 h-4 ${colorClass}`} />;
       case 'instagram':
-        return <Camera className="w-4 h-4 text-black dark:text-white" />;
+        return <Camera className={`w-4 h-4 ${colorClass}`} />;
       case 'tiktok':
-        return <Clapperboard className="w-4 h-4 text-black dark:text-white" />;
+        return <Clapperboard className={`w-4 h-4 ${colorClass}`} />;
       case 'x':
-        return <Share2 className="w-4 h-4 text-black dark:text-white" />;
+        return <Share2 className={`w-4 h-4 ${colorClass}`} />;
       case 'pinterest':
         return (
           <svg
-            className="w-4 h-4 text-black dark:text-white"
+            className={`w-4 h-4 ${colorClass}`}
             viewBox="0 0 24 24"
             fill="currentColor"
             aria-hidden="true"
@@ -140,9 +163,9 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
           </svg>
         );
       case 'telegram':
-        return <Send className="w-4 h-4 text-black dark:text-white" />;
+        return <Send className={`w-4 h-4 ${colorClass}`} />;
       default:
-        return <Globe className="w-4 h-4 text-black dark:text-white" />;
+        return <Globe className={`w-4 h-4 ${colorClass}`} />;
     }
   };
 
@@ -464,7 +487,7 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
             >
               <span className="flex items-center gap-3 min-w-0">
                 <span className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
-                  {renderBotIcon(bot.icon)}
+                  {renderBotIcon(bot.icon, bot.iconColor)}
                 </span>
                 <span className="min-w-0 space-y-0.5">
                   <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
