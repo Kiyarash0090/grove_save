@@ -95,17 +95,16 @@ function generateMilkyWayStars(): StarSpec[] {
   const rng = createRng(20260842);
   const stars: StarSpec[] = [];
 
-  // 1. Dense Galactic Stardust Band (580 fine pinpoint stars forming the misty Milky Way river)
-  for (let i = 0; i < 580; i++) {
-    // Cluster slightly more around the galactic bulge (u ~ -0.05..0.15)
-    const isCore = i < 200;
+  // 1. Fine Galactic Stardust Band (250 pinpoint stars forming a calm, airy Milky Way river)
+  for (let i = 0; i < 250; i++) {
+    const isCore = i < 85;
     const u = isCore
-      ? randGaussian(rng) * 0.26 + 0.04
+      ? randGaussian(rng) * 0.25 + 0.04
       : (rng() * 2 - 1) * 0.92;
-    const spread = isCore ? 0.085 : 0.115;
+    const spread = isCore ? 0.08 : 0.11;
     let v = randGaussian(rng) * spread;
 
-    // Carve a subtle "Great Rift" dark dust lane near the center of the band for organic depth
+    // Carve a subtle "Great Rift" dark dust lane near the center of the band
     if (Math.abs(v - 0.012) < 0.018 && Math.abs(u) < 0.45 && rng() < 0.65) {
       v += (v >= 0.012 ? 1 : -1) * (0.025 + rng() * 0.04);
     }
@@ -120,93 +119,93 @@ function generateMilkyWayStars(): StarSpec[] {
     stars.push({
       nx,
       ny,
-      radius: 0.45 + rng() * 0.78,
+      radius: 0.34 + rng() * 0.42,
       paletteSlot,
-      minAlpha: 0.12 + rng() * 0.22,
-      maxAlpha: 0.52 + rng() * 0.42,
-      twinkleSpeed: 0.35 + rng() * 0.85,
+      minAlpha: 0.1 + rng() * 0.16,
+      maxAlpha: 0.42 + rng() * 0.36,
+      twinkleSpeed: 0.32 + rng() * 0.75,
       phase: rng() * Math.PI * 2,
-      hasHalo: rng() < 0.08,
+      hasHalo: false,
       hasSpike: false,
-      driftX: (rng() - 0.5) * 3.5,
-      driftY: (rng() - 0.5) * 3.5,
+      driftX: (rng() - 0.5) * 2,
+      driftY: (rng() - 0.5) * 2,
     });
   }
 
-  // 2. Spiral Arm & Star Cloud Medium Stars (240 luminous stars flanking the galactic band)
-  for (let i = 0; i < 240; i++) {
+  // 2. Spiral Arm & Star Cloud Medium Stars (110 luminous stars along the galactic band)
+  for (let i = 0; i < 110; i++) {
     const u = (rng() * 2 - 1) * 0.95;
-    const v = randGaussian(rng) * 0.22;
+    const v = randGaussian(rng) * 0.21;
     const { nx, ny } = galacticToScreen(u, v);
     if (nx < -0.04 || nx > 1.04 || ny < -0.04 || ny > 1.04) continue;
 
     const r = rng();
-    const paletteSlot: 0 | 1 | 2 | 3 = r < 0.38 ? 0 : r < 0.62 ? 2 : r < 0.8 ? 1 : 3;
+    const paletteSlot: 0 | 1 | 2 | 3 = r < 0.4 ? 0 : r < 0.65 ? 2 : r < 0.82 ? 1 : 3;
 
     stars.push({
       nx,
       ny,
-      radius: 0.95 + rng() * 1.05,
+      radius: 0.58 + rng() * 0.56,
       paletteSlot,
-      minAlpha: 0.16 + rng() * 0.2,
-      maxAlpha: 0.68 + rng() * 0.3,
-      twinkleSpeed: 0.45 + rng() * 0.95,
+      minAlpha: 0.14 + rng() * 0.16,
+      maxAlpha: 0.56 + rng() * 0.3,
+      twinkleSpeed: 0.4 + rng() * 0.8,
       phase: rng() * Math.PI * 2,
-      hasHalo: rng() < 0.35,
+      hasHalo: rng() < 0.22,
       hasSpike: false,
-      driftX: (rng() - 0.5) * 5,
-      driftY: (rng() - 0.5) * 5,
+      driftX: (rng() - 0.5) * 2.5,
+      driftY: (rng() - 0.5) * 2.5,
     });
   }
 
-  // 3. Deep-Space Background Field Stars (130 stars distributed across the full sky)
-  for (let i = 0; i < 130; i++) {
+  // 3. Deep-Space Background Field Stars (65 crisp stars distributed across the sky)
+  for (let i = 0; i < 65; i++) {
     const nx = rng();
     const ny = rng();
     const r = rng();
-    const paletteSlot: 0 | 1 | 2 | 3 = r < 0.48 ? 0 : r < 0.72 ? 2 : r < 0.86 ? 1 : 3;
+    const paletteSlot: 0 | 1 | 2 | 3 = r < 0.5 ? 0 : r < 0.74 ? 2 : r < 0.88 ? 1 : 3;
 
     stars.push({
       nx,
       ny,
-      radius: 0.6 + rng() * 1.15,
+      radius: 0.45 + rng() * 0.55,
       paletteSlot,
-      minAlpha: 0.1 + rng() * 0.16,
-      maxAlpha: 0.48 + rng() * 0.38,
-      twinkleSpeed: 0.3 + rng() * 0.75,
+      minAlpha: 0.08 + rng() * 0.14,
+      maxAlpha: 0.4 + rng() * 0.34,
+      twinkleSpeed: 0.28 + rng() * 0.65,
       phase: rng() * Math.PI * 2,
-      hasHalo: rng() < 0.2,
+      hasHalo: rng() < 0.12,
       hasSpike: false,
-      driftX: (rng() - 0.5) * 4,
-      driftY: (rng() - 0.5) * 4,
+      driftX: (rng() - 0.5) * 2,
+      driftY: (rng() - 0.5) * 2,
     });
   }
 
-  // 4. First-Magnitude Beacon Stars with Soft Diffraction Spikes (24 prominent stars)
-  for (let i = 0; i < 24; i++) {
-    const onBand = i < 16;
+  // 4. First-Magnitude Beacon Stars with Subtle Diffraction Spikes (12 prominent stars)
+  for (let i = 0; i < 12; i++) {
+    const onBand = i < 8;
     const pos = onBand
-      ? galacticToScreen((rng() * 2 - 1) * 0.85, randGaussian(rng) * 0.2)
-      : { nx: 0.05 + rng() * 0.9, ny: 0.05 + rng() * 0.9 };
+      ? galacticToScreen((rng() * 2 - 1) * 0.82, randGaussian(rng) * 0.19)
+      : { nx: 0.06 + rng() * 0.88, ny: 0.06 + rng() * 0.88 };
 
     if (pos.nx < 0.02 || pos.nx > 0.98 || pos.ny < 0.02 || pos.ny > 0.98) continue;
 
     const r = rng();
-    const paletteSlot: 0 | 1 | 2 | 3 = r < 0.35 ? 0 : r < 0.6 ? 2 : r < 0.8 ? 1 : 3;
+    const paletteSlot: 0 | 1 | 2 | 3 = r < 0.38 ? 0 : r < 0.64 ? 2 : r < 0.82 ? 1 : 3;
 
     stars.push({
       nx: pos.nx,
       ny: pos.ny,
-      radius: 1.75 + rng() * 0.95,
+      radius: 1.05 + rng() * 0.48,
       paletteSlot,
-      minAlpha: 0.45 + rng() * 0.18,
-      maxAlpha: 0.92 + rng() * 0.08,
-      twinkleSpeed: 0.55 + rng() * 0.7,
+      minAlpha: 0.36 + rng() * 0.16,
+      maxAlpha: 0.82 + rng() * 0.14,
+      twinkleSpeed: 0.5 + rng() * 0.6,
       phase: rng() * Math.PI * 2,
       hasHalo: true,
       hasSpike: true,
-      driftX: (rng() - 0.5) * 6,
-      driftY: (rng() - 0.5) * 6,
+      driftX: (rng() - 0.5) * 3,
+      driftY: (rng() - 0.5) * 3,
     });
   }
 
@@ -531,28 +530,36 @@ export const AmbientTwinkleDots: React.FC<AmbientTwinkleDotsProps> = React.memo(
       // 1. Pre-rendered Milky Way galactic nebula & dust band
       ctx.drawImage(nebulaCanvas, 0, 0, width, height);
 
-      // 2. Render all Milky Way stars
-      for (let i = 0; i < MILKY_WAY_STARS.length; i++) {
-        const star = MILKY_WAY_STARS[i];
+      // Responsive size & density scaling so mobile screens stay crisp and uncluttered
+      const minDim = Math.min(width, height);
+      const starSizeScale = Math.min(1, Math.max(0.56, minDim / 760));
+      const areaFactor = Math.min(1, Math.max(0.46, (width * height) / (1200 * 750)));
+      const activeStarLimit = Math.max(140, Math.round(MILKY_WAY_STARS.length * areaFactor));
+      // Stride across the array evenly so all 4 star populations remain proportionally represented
+      const step = MILKY_WAY_STARS.length / activeStarLimit;
+
+      // 2. Render Milky Way stars
+      for (let k = 0; k < activeStarLimit; k++) {
+        const star = MILKY_WAY_STARS[Math.min(MILKY_WAY_STARS.length - 1, Math.floor(k * step))];
         const twinkleWave = reducedMotion
           ? 0.65
           : 0.5 + 0.5 * Math.sin(t * star.twinkleSpeed + star.phase);
         const alpha = star.minAlpha + (star.maxAlpha - star.minAlpha) * twinkleWave;
 
-        const driftOffsetX = reducedMotion ? 0 : Math.sin(t * 0.08 + star.phase) * star.driftX;
-        const driftOffsetY = reducedMotion ? 0 : Math.cos(t * 0.07 + star.phase) * star.driftY;
+        const driftOffsetX = reducedMotion ? 0 : Math.sin(t * 0.08 + star.phase) * star.driftX * starSizeScale;
+        const driftOffsetY = reducedMotion ? 0 : Math.cos(t * 0.07 + star.phase) * star.driftY * starSizeScale;
 
         const x = star.nx * width + driftOffsetX;
         const y = star.ny * height + driftOffsetY;
         const [r, g, b] = palette.starColors[star.paletteSlot];
-        const radius = star.radius * (0.88 + 0.22 * twinkleWave);
+        const radius = star.radius * starSizeScale * (0.9 + 0.18 * twinkleWave);
 
         // Soft luminous halo on prominent stars
         if (star.hasHalo) {
-          const haloRadius = radius * (star.hasSpike ? 5.2 : 3.4);
+          const haloRadius = radius * (star.hasSpike ? 3.5 : 2.6);
           const haloGrad = ctx.createRadialGradient(x, y, 0, x, y, haloRadius);
-          haloGrad.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${(alpha * 0.45).toFixed(3)})`);
-          haloGrad.addColorStop(0.45, `rgba(${r}, ${g}, ${b}, ${(alpha * 0.14).toFixed(3)})`);
+          haloGrad.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${(alpha * 0.34).toFixed(3)})`);
+          haloGrad.addColorStop(0.45, `rgba(${r}, ${g}, ${b}, ${(alpha * 0.1).toFixed(3)})`);
           haloGrad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
           ctx.fillStyle = haloGrad;
           ctx.beginPath();
@@ -562,9 +569,9 @@ export const AmbientTwinkleDots: React.FC<AmbientTwinkleDotsProps> = React.memo(
 
         // Delicate 4-point starlight diffraction spike on 1st-magnitude beacon stars
         if (star.hasSpike) {
-          const spikeLen = radius * (3.6 + twinkleWave * 2.2);
-          ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${(alpha * 0.55).toFixed(3)})`;
-          ctx.lineWidth = 0.75;
+          const spikeLen = radius * (2.5 + twinkleWave * 1.4);
+          ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${(alpha * 0.38).toFixed(3)})`;
+          ctx.lineWidth = 0.6 * starSizeScale;
           ctx.beginPath();
           ctx.moveTo(x - spikeLen, y);
           ctx.lineTo(x + spikeLen, y);
@@ -573,7 +580,7 @@ export const AmbientTwinkleDots: React.FC<AmbientTwinkleDotsProps> = React.memo(
           ctx.stroke();
         }
 
-        // Crisp star core
+        // Crisp pinpoint star core
         ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`;
         ctx.beginPath();
         ctx.arc(x, y, radius, 0, Math.PI * 2);
