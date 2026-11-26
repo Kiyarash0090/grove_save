@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ArrowDownToLine, Info, Moon, Settings, Sun, User, WifiOff } from 'lucide-react';
 import { TRANSLATIONS, type AppLanguage, type AppTheme } from './i18n';
+import { getThemeMeta, isDarkTheme, normalizeAppTheme } from './themes';
 import { DownloaderView, type ProviderGlow, type SavedItem } from './components/DownloaderView';
 import { InfoView, type AnnouncementItem } from './components/InfoView';
 import { SettingsView } from './components/SettingsView';
@@ -37,8 +38,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabIndex>(0);
   const [swipeDir, setSwipeDir] = useState<1 | -1>(1);
   const [theme, setTheme] = useState<AppTheme>(() => {
-    const saved = localStorage.getItem('grove_theme');
-    return saved === 'light' ? 'light' : 'dark';
+    return normalizeAppTheme(localStorage.getItem('grove_theme'));
   });
   const [language, setLanguage] = useState<AppLanguage>(() => {
     const saved = localStorage.getItem('grove_lang');
@@ -92,8 +92,8 @@ export default function App() {
 
   const applyUserPreferences = useCallback((authedUser: AuthUser) => {
     if (!authedUser.preferences) return;
-    if (authedUser.preferences.theme === 'dark' || authedUser.preferences.theme === 'light') {
-      setTheme(authedUser.preferences.theme);
+    if (authedUser.preferences.theme) {
+      setTheme(normalizeAppTheme(authedUser.preferences.theme));
     }
     if (
       authedUser.preferences.language === 'en' ||
@@ -128,10 +128,12 @@ export default function App() {
     [apiBase, buildAuthHeaders]
   );
 
-  // Sync theme with <html> and <meta name="theme-color">
+  // Sync theme with <html>, data-theme, and <meta name="theme-color">
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === 'dark') {
+    const meta = getThemeMeta(theme);
+    root.dataset.theme = theme;
+    if (meta.isDark) {
       root.classList.add('dark');
     } else {
       root.classList.remove('dark');
@@ -139,7 +141,7 @@ export default function App() {
     localStorage.setItem('grove_theme', theme);
     const metaTheme = document.querySelector('meta[name="theme-color"]');
     if (metaTheme) {
-      metaTheme.setAttribute('content', theme === 'dark' ? '#000000' : '#ffffff');
+      metaTheme.setAttribute('content', meta.metaColor);
     }
   }, [theme]);
 
@@ -434,15 +436,23 @@ export default function App() {
     }
   };
 
+  const darkSurface = isDarkTheme(theme);
+
   return (
     <div
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
-      className="relative min-h-dvh bg-white dark:bg-black text-black dark:text-white transition-colors duration-300 overflow-x-clip"
+      style={{ backgroundImage: 'var(--app-bg-gradient, none)' }}
+      className="relative min-h-dvh bg-[var(--app-bg)] text-black dark:text-white transition-colors duration-300 overflow-x-clip"
     >
       {/* Animated Radiant Background Glow */}
       <div aria-hidden="true" className="fixed inset-0 pointer-events-none overflow-hidden z-0">
         <div
+          style={
+            providerGlow === 'default'
+              ? { backgroundColor: 'var(--app-glow-top)' }
+              : undefined
+          }
           className={`animate-radiant-float absolute top-[-140px] left-1/2 w-[560px] sm:w-[760px] h-[360px] rounded-full blur-[110px] transition-all duration-700 ${
             providerGlow === 'red'
               ? 'bg-red-500/25 dark:bg-red-600/30'
@@ -450,10 +460,15 @@ export default function App() {
                 ? 'bg-gradient-to-r from-[#f58529]/30 via-[#dd2a7b]/35 to-[#8134af]/30 dark:from-[#f58529]/30 dark:via-[#dd2a7b]/35 dark:to-[#8134af]/32'
                 : providerGlow === 'pinterest'
                   ? 'bg-gradient-to-r from-[#e60023]/28 via-[#bd081c]/30 to-[#ff4d5a]/25 dark:from-[#e60023]/30 dark:via-[#bd081c]/32 dark:to-[#ff4d5a]/25'
-                  : 'bg-zinc-400/25 dark:bg-white/15'
+                  : ''
           }`}
         />
         <div
+          style={
+            providerGlow === 'default'
+              ? { backgroundColor: 'var(--app-glow-bottom)' }
+              : undefined
+          }
           className={`absolute bottom-[-160px] left-1/2 -translate-x-1/2 w-[480px] h-[280px] rounded-full blur-[120px] transition-all duration-700 ${
             providerGlow === 'red'
               ? 'bg-red-500/15 dark:bg-red-600/15'
@@ -461,7 +476,7 @@ export default function App() {
                 ? 'bg-gradient-to-r from-[#8134af]/20 via-[#dd2a7b]/22 to-[#f58529]/18 dark:from-[#8134af]/22 dark:via-[#dd2a7b]/24 dark:to-[#f58529]/18'
                 : providerGlow === 'pinterest'
                   ? 'bg-gradient-to-r from-[#bd081c]/20 via-[#e60023]/22 to-[#ff4d5a]/16 dark:from-[#bd081c]/22 dark:via-[#e60023]/24 dark:to-[#ff4d5a]/18'
-                  : 'bg-zinc-300/20 dark:bg-white/10'
+                  : ''
           }`}
         />
       </div>
@@ -470,7 +485,13 @@ export default function App() {
       <AmbientTwinkleDots providerGlow={providerGlow} />
 
       {/* Modern Minimalist Frosted Glass Header */}
-      <header className="sticky top-0 z-30 backdrop-blur-2xl backdrop-saturate-150 bg-white/50 dark:bg-black/45 border-b border-black/[0.07] dark:border-white/[0.12] shadow-[0_4px_24px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.7)] dark:shadow-[0_8px_28px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.1)] transition-colors duration-300">
+      <header
+        style={{
+          backgroundColor: 'var(--app-header-bg)',
+          borderColor: 'var(--app-header-border)',
+        }}
+        className="sticky top-0 z-30 backdrop-blur-2xl backdrop-saturate-150 border-b shadow-[0_4px_24px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.7)] dark:shadow-[0_8px_28px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.1)] transition-colors duration-300"
+      >
         <div className="max-w-6xl mx-auto h-14 sm:h-16 px-4 sm:px-6 flex items-center justify-between gap-6 backdrop-blur-xl bg-white/20 dark:bg-white/[0.02]">
           <button
             type="button"
@@ -501,11 +522,11 @@ export default function App() {
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => handleThemeChange(theme === 'dark' ? 'light' : 'dark')}
-              aria-label={theme === 'dark' ? t.themeWhite : t.themeBlack}
+              onClick={() => handleThemeChange(darkSurface ? 'light' : 'dark')}
+              aria-label={darkSurface ? t.themeWhite : t.themeBlack}
               className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl border border-black/10 dark:border-white/12 bg-black/[0.03] dark:bg-white/[0.05] text-black dark:text-white hover:bg-black/[0.07] dark:hover:bg-white/[0.1] active:scale-95 transition"
             >
-              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {darkSurface ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
             <button

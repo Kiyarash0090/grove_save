@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  BarChart3,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -33,8 +34,10 @@ import {
   X,
 } from 'lucide-react';
 import type { AppLanguage, AppTheme, TranslationDict } from '../i18n';
+import { isDarkTheme, THEME_LIST } from '../themes';
 import type { AuthUser } from './AuthModal';
 import type { AnnouncementItem } from './InfoView';
+import { AdminStatsView, type AdminStatsPayload } from './AdminStatsView';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface SettingsViewProps {
@@ -94,7 +97,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [nameSaving, setNameSaving] = useState(false);
   const [nameFeedback, setNameFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const [adminPage, setAdminPage] = useState<'main' | 'xray' | 'pot' | 'telegram' | 'announcements'>('main');
+  const [adminPage, setAdminPage] = useState<'main' | 'stats' | 'xray' | 'pot' | 'telegram' | 'announcements'>('main');
+  const [adminStats, setAdminStats] = useState<AdminStatsPayload | null>(null);
+  const [adminStatsLoading, setAdminStatsLoading] = useState(false);
+  const [adminStatsError, setAdminStatsError] = useState<string | null>(null);
   const [announcementTitle, setAnnouncementTitle] = useState('');
   const [announcementBody, setAnnouncementBody] = useState('');
   const [announcementBusy, setAnnouncementBusy] = useState(false);
@@ -1000,6 +1006,29 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     } catch {}
   };
 
+  const fetchAdminStats = async () => {
+    if (!isAdmin) return;
+    setAdminStatsLoading(true);
+    setAdminStatsError(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/stats`, {
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as { error?: string };
+        setAdminStatsError(err.error || t.statsLoadError);
+      } else {
+        const data = (await res.json()) as AdminStatsPayload;
+        setAdminStats(data);
+      }
+    } catch {
+      setAdminStatsError(t.statsLoadError);
+    } finally {
+      setAdminStatsLoading(false);
+    }
+  };
+
   const fetchDbStats = async () => {
     if (!isAdmin) return;
     try {
@@ -1329,6 +1358,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Load admin-only configurations strictly when authenticated user is admin
   useEffect(() => {
     if (isAdmin) {
+      void fetchAdminStats();
       void fetchYouTubeAuth();
       void fetchXrayStatus();
       void fetchPotProviderStatus();
@@ -1341,9 +1371,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   }, [isAdmin, authToken]);
 
-  // Refresh the Telegram inventory whenever the Telegram page is opened
+  // Refresh the Telegram inventory or Admin stats whenever their subpages open
   useEffect(() => {
-    if (isAdmin && adminPage === 'telegram') {
+    if (isAdmin && adminPage === 'stats') {
+      void fetchAdminStats();
+    } else if (isAdmin && adminPage === 'telegram') {
       void fetchTelegramStatus();
       void fetchTelegramFiles();
       void fetchDbStats();
@@ -1354,7 +1386,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const ChevronIcon = t.dir === 'rtl' ? ChevronLeft : ChevronRight;
   const BackArrowIcon = t.dir === 'rtl' ? ArrowRight : ArrowLeft;
 
-  const openAdminPage = (page: 'main' | 'xray' | 'pot' | 'telegram' | 'announcements') => {
+  const openAdminPage = (page: 'main' | 'stats' | 'xray' | 'pot' | 'telegram' | 'announcements') => {
     setAdminPage(page);
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2689,6 +2721,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     );
   }
 
+  if (isAdmin && adminPage === 'stats') {
+    return (
+      <AdminStatsView
+        t={t}
+        stats={adminStats}
+        loading={adminStatsLoading}
+        error={adminStatsError}
+        onBack={() => openAdminPage('main')}
+        onRefresh={() => void fetchAdminStats()}
+      />
+    );
+  }
+
   if (isAdmin && adminPage === 'announcements') {
     return (
       <div className="max-w-3xl mx-auto pb-28 space-y-6">
@@ -2837,7 +2882,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         >
           {t.sectionAccount}
         </h2>
-        <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
           <div className="p-4 flex items-center gap-4">
             <div className="w-12 h-12 rounded-full bg-black text-white dark:bg-white dark:text-black flex items-center justify-center shrink-0 font-bold text-lg">
               {user ? user.displayName.charAt(0).toUpperCase() : <User className="w-5 h-5" />}
@@ -2976,35 +3021,92 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         >
           {t.sectionAppearance}
         </h2>
-        <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
-          <div className="min-h-[60px] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-            <span className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
-              {theme === 'dark' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-              <span>{t.themeLabel}</span>
-            </span>
-            <div className="flex items-center gap-1 p-1 rounded-xl bg-zinc-200/80 dark:bg-black border border-black/10 dark:border-white/15">
-              <button
-                type="button"
-                onClick={() => onThemeChange('dark')}
-                className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition ${
-                  theme === 'dark'
-                    ? 'bg-white text-black shadow-sm'
-                    : 'text-zinc-600 dark:text-zinc-400'
-                }`}
-              >
-                {t.themeBlack}
-              </button>
-              <button
-                type="button"
-                onClick={() => onThemeChange('light')}
-                className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition ${
-                  theme === 'light'
-                    ? 'bg-black text-white shadow-sm'
-                    : 'text-zinc-600 dark:text-zinc-400'
-                }`}
-              >
-                {t.themeWhite}
-              </button>
+        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
+          <div className="px-4 py-3.5 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
+                {isDarkTheme(theme) ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+                <span>{t.themeLabel}</span>
+              </span>
+              <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                {(() => {
+                  switch (theme) {
+                    case 'dark':
+                      return t.themeBlack;
+                    case 'light':
+                      return t.themeWhite;
+                    case 'spring':
+                      return t.themeSpring;
+                    case 'summer':
+                      return t.themeSummer;
+                    case 'autumn':
+                      return t.themeAutumn;
+                    case 'winter':
+                      return t.themeWinter;
+                    case 'shiraz':
+                      return t.themeShiraz;
+                    case 'pastelDark':
+                      return t.themePastelDark;
+                  }
+                })()}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {THEME_LIST.map((item) => {
+                const active = theme === item.id;
+                const label =
+                  item.id === 'dark'
+                    ? t.themeBlack
+                    : item.id === 'light'
+                      ? t.themeWhite
+                      : item.id === 'spring'
+                        ? t.themeSpring
+                        : item.id === 'summer'
+                          ? t.themeSummer
+                          : item.id === 'autumn'
+                            ? t.themeAutumn
+                            : item.id === 'winter'
+                              ? t.themeWinter
+                              : item.id === 'shiraz'
+                                ? t.themeShiraz
+                                : t.themePastelDark;
+
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => onThemeChange(item.id)}
+                    aria-pressed={active}
+                    className={`min-h-[46px] px-3 py-2 rounded-xl text-xs font-semibold border transition flex items-center gap-2.5 text-start cursor-pointer active:scale-[0.98] ${
+                      active
+                        ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white shadow-sm'
+                        : 'bg-white/80 dark:bg-black/60 text-zinc-800 dark:text-zinc-200 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
+                    }`}
+                    style={
+                      active && item.id !== 'dark' && item.id !== 'light'
+                        ? {
+                            boxShadow: `0 0 0 2px ${item.ringPrimary}, 0 6px 16px -6px ${item.ringSecondary}`,
+                          }
+                        : undefined
+                    }
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="w-6 h-6 rounded-full p-[2.5px] shrink-0 flex items-center justify-center shadow-xs"
+                      style={{
+                        background: `linear-gradient(135deg, ${item.ringPrimary}, ${item.ringSecondary})`,
+                      }}
+                    >
+                      <span
+                        className="w-full h-full rounded-full border border-black/10 dark:border-white/15"
+                        style={{ backgroundColor: item.swatchBg }}
+                      />
+                    </span>
+                    <span className="truncate">{label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -3043,7 +3145,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         >
           {t.sectionDownloads}
         </h2>
-        <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
           <div className="px-4 py-3.5 space-y-2.5">
             <div className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
               <Download className="w-4 h-4 text-zinc-500" />
@@ -3122,7 +3224,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             {t.sectionAdmin}
           </h2>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
+            <button
+              type="button"
+              onClick={() => openAdminPage('stats')}
+              className="w-full min-h-[64px] px-4 py-3 flex items-center justify-between gap-3 text-start hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            >
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="w-9 h-9 rounded-xl bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
+                  <BarChart3 className="w-4 h-4 text-black dark:text-white" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-black dark:text-white truncate">
+                    {t.sectionAdmin} · {t.adminStatsSection}
+                  </span>
+                  <span className="block text-xs text-zinc-500 dark:text-zinc-400 truncate mt-0.5 tabular-nums">
+                    {adminStats
+                      ? `${adminStats.overview.totalUsers} ${t.statsUsersTotal} · ${adminStats.overview.totalSavedHistoryItems + adminStats.overview.downloadsCompleted} ${t.statsCompletedCount}`
+                      : dbStats
+                        ? `${dbStats.users} ${t.statsUsersTotal} · ${dbStats.history} ${t.statsSavedDownloads}`
+                        : t.adminStatsDesc}
+                  </span>
+                </span>
+              </span>
+              <ChevronIcon className="w-4 h-4 text-zinc-400 shrink-0" />
+            </button>
+
+            <div className="h-px bg-black/10 dark:bg-white/10 ms-16" />
+
             <button
               type="button"
               onClick={() => openAdminPage('xray')}

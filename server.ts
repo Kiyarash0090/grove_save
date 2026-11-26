@@ -142,7 +142,7 @@ interface StoredUser {
   provider: 'email' | 'google';
   role: 'user' | 'admin';
   preferences: {
-    theme: 'dark' | 'light';
+    theme: 'dark' | 'light' | 'spring' | 'summer' | 'autumn' | 'winter' | 'shiraz' | 'pastelDark';
     language: 'en' | 'fa' | 'ru' | 'zh';
     defaultQuality: string;
     youtubeCookies?: string;
@@ -437,7 +437,86 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS activity_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT 'other',
+    quality TEXT,
+    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    title TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_events(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_activity_type ON activity_events(event_type);
 `);
+
+type AnalyticsPlatform = 'youtube' | 'instagram' | 'tiktok' | 'x' | 'pinterest' | 'telegram' | 'other';
+
+function detectMediaPlatformFromUrl(rawUrl: string | null | undefined): AnalyticsPlatform {
+  if (!rawUrl || typeof rawUrl !== 'string') return 'other';
+  const lower = rawUrl.toLowerCase();
+  if (lower.includes('youtube.com') || lower.includes('youtu.be') || lower.includes('music.youtube.com')) {
+    return 'youtube';
+  }
+  if (lower.includes('instagram.com') || lower.includes('instagr.am')) {
+    return 'instagram';
+  }
+  if (lower.includes('tiktok.com') || lower.includes('vt.tiktok.com') || lower.includes('vm.tiktok.com')) {
+    return 'tiktok';
+  }
+  if (
+    lower.includes('x.com/') ||
+    lower.includes('://x.com') ||
+    lower.includes('twitter.com') ||
+    lower.includes('t.co/') ||
+    lower.includes('fxtwitter.com') ||
+    lower.includes('vxtwitter.com')
+  ) {
+    return 'x';
+  }
+  if (lower.includes('pinterest.') || lower.includes('pin.it')) {
+    return 'pinterest';
+  }
+  if (lower.includes('t.me/') || lower.includes('telegram.me/') || lower.includes('telegram.dog/')) {
+    return 'telegram';
+  }
+  return 'other';
+}
+
+function recordActivityEvent(opts: {
+  eventType:
+    | 'inspect'
+    | 'download_start'
+    | 'download_complete'
+    | 'download_error'
+    | 'stream'
+    | 'auth_register'
+    | 'auth_login';
+  platform?: AnalyticsPlatform | string;
+  quality?: string | null;
+  userId?: string | null;
+  sizeBytes?: number;
+  title?: string | null;
+}): void {
+  try {
+    db.prepare(`
+      INSERT INTO activity_events (event_type, platform, quality, user_id, size_bytes, title, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      opts.eventType,
+      String(opts.platform || 'other').slice(0, 32),
+      opts.quality ? String(opts.quality).slice(0, 32) : null,
+      opts.userId ?? null,
+      Math.max(0, Math.floor(opts.sizeBytes || 0)),
+      opts.title ? String(opts.title).slice(0, 200) : null,
+      Date.now()
+    );
+  } catch {
+    // Analytics must never interrupt primary request execution
+  }
+}
 
 // Migrate existing download_history tables from UNIQUE(user_id, url) to UNIQUE(user_id, url, quality)
 try {
@@ -489,6 +568,26 @@ try {
   // Ignore migration error if table is newly created
 }
 
+type ValidTheme = StoredUser['preferences']['theme'];
+
+const VALID_THEMES = new Set<ValidTheme>([
+  'dark',
+  'light',
+  'spring',
+  'summer',
+  'autumn',
+  'winter',
+  'shiraz',
+  'pastelDark',
+]);
+
+function normalizeThemeValue(raw: unknown): ValidTheme {
+  if (typeof raw === 'string' && VALID_THEMES.has(raw as ValidTheme)) {
+    return raw as ValidTheme;
+  }
+  return 'dark';
+}
+
 function normalizeQualityValue(raw: unknown): string {
   if (typeof raw === 'string' && ['2160p', '1080p', '720p', '480p', '360p'].includes(raw)) {
     return raw;
@@ -512,7 +611,7 @@ function dbRowToUser(row: Record<string, unknown>): StoredUser {
     provider: row.provider === 'google' ? 'google' : 'email',
     role,
     preferences: {
-      theme: row.theme === 'light' ? 'light' : 'dark',
+      theme: normalizeThemeValue(row.theme),
       language: lang === 'fa' || lang === 'ru' || lang === 'zh' ? lang : 'en',
       defaultQuality: normalizeQualityValue(row.default_quality),
     },
@@ -564,13 +663,13 @@ function insertUser(user: StoredUser): void {
 
 function updateUserPreferencesInDb(
   userId: string,
-  prefs: { theme: 'dark' | 'light'; language: 'en' | 'fa' | 'ru' | 'zh'; defaultQuality: string }
+  prefs: { theme: ValidTheme; language: 'en' | 'fa' | 'ru' | 'zh'; defaultQuality: string }
 ): void {
   db.prepare(`
     UPDATE users
     SET theme = ?, language = ?, default_quality = ?, updated_at = ?
     WHERE id = ?
-  `).run(prefs.theme, prefs.language, normalizeQualityValue(prefs.defaultQuality), Date.now(), userId);
+  `).run(normalizeThemeValue(prefs.theme), prefs.language, normalizeQualityValue(prefs.defaultQuality), Date.now(), userId);
 }
 
 function updateUserDisplayNameInDb(userId: string, displayName: string): void {
@@ -622,7 +721,7 @@ try {
           provider: u.provider === 'google' ? 'google' : 'email',
           role,
           preferences: {
-            theme: u.preferences?.theme === 'light' ? 'light' : 'dark',
+            theme: normalizeThemeValue(u.preferences?.theme),
             language:
               u.preferences?.language === 'fa' ||
               u.preferences?.language === 'ru' ||
@@ -8740,6 +8839,7 @@ async function startServer() {
       },
     };
     insertUser(user);
+    recordActivityEvent({ eventType: 'auth_register', platform: 'other', userId: user.id, quality: 'email' });
 
     const token = createUserSession(user.id);
     setSessionCookie(req, res, token);
@@ -8763,6 +8863,7 @@ async function startServer() {
 
     const token = createUserSession(user.id);
     setSessionCookie(req, res, token);
+    recordActivityEvent({ eventType: 'auth_login', platform: 'other', userId: user.id, quality: 'email' });
     res.json({ token, user: publicUserView(user) });
   });
 
@@ -8774,39 +8875,88 @@ async function startServer() {
       });
       return;
     }
-    const body = req.body as { credential?: unknown };
+    const body = req.body as { credential?: unknown; accessToken?: unknown };
     const credential = typeof body.credential === 'string' ? body.credential.trim() : '';
-    if (!credential) {
+    const accessToken = typeof body.accessToken === 'string' ? body.accessToken.trim() : '';
+    if (!credential && !accessToken) {
       res.status(400).json({ error: 'Missing Google credential token.' });
       return;
     }
     try {
-      const verifyRes = await fetch(
-        `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`
-      );
-      if (!verifyRes.ok) {
-        res.status(401).json({ error: 'Invalid Google ID token.' });
-        return;
+      let verifiedEmail = '';
+      let verifiedName = '';
+
+      if (credential) {
+        const verifyRes = await fetch(
+          `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`
+        );
+        if (!verifyRes.ok) {
+          res.status(401).json({ error: 'Invalid Google ID token.' });
+          return;
+        }
+        const data = (await verifyRes.json()) as {
+          aud?: string;
+          email?: string;
+          email_verified?: string;
+          name?: string;
+        };
+        if (data.aud !== GOOGLE_CLIENT_ID || !data.email || data.email_verified !== 'true') {
+          res.status(401).json({ error: 'Google token verification failed.' });
+          return;
+        }
+        verifiedEmail = data.email.toLowerCase();
+        verifiedName = data.name || '';
+      } else {
+        const tokenInfoRes = await fetch(
+          `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`
+        );
+        if (!tokenInfoRes.ok) {
+          res.status(401).json({ error: 'Invalid Google access token.' });
+          return;
+        }
+        const tokenInfo = (await tokenInfoRes.json()) as {
+          aud?: string;
+          azp?: string;
+          email?: string;
+          email_verified?: string;
+        };
+        if (tokenInfo.aud !== GOOGLE_CLIENT_ID && tokenInfo.azp !== GOOGLE_CLIENT_ID) {
+          res.status(401).json({ error: 'Google token verification failed.' });
+          return;
+        }
+        const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!userInfoRes.ok) {
+          res.status(401).json({ error: 'Failed to read Google user profile.' });
+          return;
+        }
+        const profile = (await userInfoRes.json()) as {
+          email?: string;
+          email_verified?: boolean;
+          name?: string;
+        };
+        const isVerified =
+          profile.email_verified === true || tokenInfo.email_verified === 'true';
+        const resolvedEmail = profile.email || tokenInfo.email || '';
+        if (!resolvedEmail || !isVerified) {
+          res.status(401).json({ error: 'Google account email is not verified.' });
+          return;
+        }
+        verifiedEmail = resolvedEmail.toLowerCase();
+        verifiedName = profile.name || '';
       }
-      const data = (await verifyRes.json()) as {
-        aud?: string;
-        email?: string;
-        email_verified?: string;
-        name?: string;
-      };
-      if (data.aud !== GOOGLE_CLIENT_ID || !data.email || data.email_verified !== 'true') {
-        res.status(401).json({ error: 'Google token verification failed.' });
-        return;
-      }
-      const email = data.email.toLowerCase();
-      let user = getUserByEmail(email);
+
+      let isNewGoogleUser = false;
+      let user = getUserByEmail(verifiedEmail);
       if (!user) {
+        isNewGoogleUser = true;
         user = {
           id: crypto.randomUUID(),
-          email,
-          displayName: data.name || email.split('@')[0],
+          email: verifiedEmail,
+          displayName: verifiedName || verifiedEmail.split('@')[0],
           provider: 'google',
-          role: ADMIN_EMAIL_NORMALIZED && email === ADMIN_EMAIL_NORMALIZED ? 'admin' : 'user',
+          role: ADMIN_EMAIL_NORMALIZED && verifiedEmail === ADMIN_EMAIL_NORMALIZED ? 'admin' : 'user',
           preferences: {
             theme: 'dark',
             language: 'en',
@@ -8815,6 +8965,12 @@ async function startServer() {
         };
         insertUser(user);
       }
+      recordActivityEvent({
+        eventType: isNewGoogleUser ? 'auth_register' : 'auth_login',
+        platform: 'other',
+        userId: user.id,
+        quality: 'google',
+      });
       const token = createUserSession(user.id);
       setSessionCookie(req, res, token);
       res.json({ token, user: publicUserView(user) });
@@ -8847,8 +9003,8 @@ async function startServer() {
       language?: unknown;
       defaultQuality?: unknown;
     };
-    if (body.theme === 'dark' || body.theme === 'light') {
-      user.preferences.theme = body.theme;
+    if (typeof body.theme === 'string' && VALID_THEMES.has(body.theme as ValidTheme)) {
+      user.preferences.theme = body.theme as ValidTheme;
     }
     if (
       body.language === 'en' ||
@@ -9815,6 +9971,483 @@ async function startServer() {
       users: count('SELECT COUNT(*) AS n FROM users'),
       history: count('SELECT COUNT(*) AS n FROM download_history'),
       telegramFiles: count('SELECT COUNT(*) AS n FROM telegram_files WHERE deleted_at IS NULL'),
+    });
+  });
+
+  app.get('/api/admin/stats', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const since24h = now - dayMs;
+    const since7d = now - 7 * dayMs;
+    const since30d = now - 30 * dayMs;
+
+    const countQuery = (sql: string, ...params: (string | number | null)[]): number => {
+      try {
+        const row = db.prepare(sql).get(...params) as { n?: number } | undefined;
+        return Number(row?.n || 0);
+      } catch {
+        return 0;
+      }
+    };
+
+    const measureDirStats = async (dirPath: string): Promise<{ files: number; bytes: number }> => {
+      let files = 0;
+      let bytes = 0;
+      const walk = async (target: string): Promise<void> => {
+        try {
+          const entries = await fs.promises.readdir(target, { withFileTypes: true });
+          for (const entry of entries) {
+            const full = path.join(target, entry.name);
+            if (entry.isDirectory()) {
+              await walk(full);
+            } else if (entry.isFile()) {
+              try {
+                const st = await fs.promises.stat(full);
+                files += 1;
+                bytes += st.size;
+              } catch {}
+            }
+          }
+        } catch {}
+      };
+      await walk(dirPath);
+      return { files, bytes };
+    };
+
+    const fileSizeSafe = (filePath: string): number => {
+      try {
+        return fs.statSync(filePath).size;
+      } catch {
+        return 0;
+      }
+    };
+
+    const [cacheDirStats, ytDlpCacheStats] = await Promise.all([
+      measureDirStats(CACHE_DIR),
+      measureDirStats(YT_DLP_CACHE_DIR),
+    ]);
+    const backups = listDatabaseSnapshots();
+    const backupBytes = backups.reduce((acc, item) => acc + item.sizeBytes, 0);
+
+    // Users stats
+    const totalUsers = countQuery('SELECT COUNT(*) AS n FROM users');
+    const adminUsers = countQuery("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'");
+    const googleUsers = countQuery("SELECT COUNT(*) AS n FROM users WHERE provider = 'google'");
+    const emailUsers = countQuery("SELECT COUNT(*) AS n FROM users WHERE provider != 'google'");
+    const newUsers24h = countQuery('SELECT COUNT(*) AS n FROM users WHERE created_at >= ?', since24h);
+    const newUsers7d = countQuery('SELECT COUNT(*) AS n FROM users WHERE created_at >= ?', since7d);
+    const newUsers30d = countQuery('SELECT COUNT(*) AS n FROM users WHERE created_at >= ?', since30d);
+
+    // Sessions stats
+    const activeSessions = countQuery('SELECT COUNT(*) AS n FROM sessions WHERE expires_at > ?', now);
+    const expiredSessions = countQuery('SELECT COUNT(*) AS n FROM sessions WHERE expires_at <= ?', now);
+
+    // Saved history stats
+    const historyAgg = (db
+      .prepare(
+        'SELECT COUNT(*) AS totalCount, COALESCE(SUM(size_bytes), 0) AS totalBytes, COUNT(DISTINCT url) AS uniqueUrls FROM download_history'
+      )
+      .get() as { totalCount?: number; totalBytes?: number; uniqueUrls?: number } | undefined) || {};
+
+    // Telegram files stats
+    const tgActiveAgg = (db
+      .prepare(
+        'SELECT COUNT(*) AS totalCount, COALESCE(SUM(size_bytes), 0) AS totalBytes FROM telegram_files WHERE deleted_at IS NULL'
+      )
+      .get() as { totalCount?: number; totalBytes?: number } | undefined) || {};
+    const telegramDeletedFiles = countQuery('SELECT COUNT(*) AS n FROM telegram_files WHERE deleted_at IS NOT NULL');
+
+    // Announcements
+    const announcementsCount = countQuery('SELECT COUNT(*) AS n FROM announcements');
+
+    // Activity events stats
+    const eventsTotal = countQuery('SELECT COUNT(*) AS n FROM activity_events');
+    const inspectsTotal = countQuery("SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'inspect'");
+    const downloadsStarted = countQuery("SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'download_start'");
+    const downloadsCompleted = countQuery("SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'download_complete'");
+    const downloadErrors = countQuery("SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'download_error'");
+    const streamsTotal = countQuery("SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'stream'");
+    const completedBytes = countQuery(
+      "SELECT COALESCE(SUM(size_bytes), 0) AS n FROM activity_events WHERE event_type = 'download_complete'"
+    );
+    const events24h = countQuery('SELECT COUNT(*) AS n FROM activity_events WHERE created_at >= ?', since24h);
+    const downloads24h = countQuery(
+      "SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'download_complete' AND created_at >= ?",
+      since24h
+    );
+    const downloads7d = countQuery(
+      "SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'download_complete' AND created_at >= ?",
+      since7d
+    );
+    const downloads30d = countQuery(
+      "SELECT COUNT(*) AS n FROM activity_events WHERE event_type = 'download_complete' AND created_at >= ?",
+      since30d
+    );
+    const guestEvents = countQuery('SELECT COUNT(*) AS n FROM activity_events WHERE user_id IS NULL');
+    const registeredEvents = countQuery('SELECT COUNT(*) AS n FROM activity_events WHERE user_id IS NOT NULL');
+
+    // Platform breakdown combining history + telegram_files + activity_events
+    const platformKeys: AnalyticsPlatform[] = [
+      'youtube',
+      'instagram',
+      'tiktok',
+      'x',
+      'pinterest',
+      'telegram',
+      'other',
+    ];
+    const platformMap = new Map<
+      AnalyticsPlatform,
+      {
+        platform: AnalyticsPlatform;
+        historyCount: number;
+        historyBytes: number;
+        telegramCount: number;
+        telegramBytes: number;
+        inspectCount: number;
+        downloadCount: number;
+        errorCount: number;
+      }
+    >();
+    for (const key of platformKeys) {
+      platformMap.set(key, {
+        platform: key,
+        historyCount: 0,
+        historyBytes: 0,
+        telegramCount: 0,
+        telegramBytes: 0,
+        inspectCount: 0,
+        downloadCount: 0,
+        errorCount: 0,
+      });
+    }
+
+    const histRows = db
+      .prepare('SELECT url, quality, size_bytes, created_at FROM download_history')
+      .all() as Array<{ url: string; quality: string; size_bytes: number; created_at: number }>;
+    const qualityMap = new Map<string, { quality: string; count: number; totalBytes: number }>();
+
+    for (const row of histRows) {
+      const p = detectMediaPlatformFromUrl(row.url);
+      const entry = platformMap.get(p)!;
+      entry.historyCount += 1;
+      entry.historyBytes += Number(row.size_bytes || 0);
+
+      const qKey = String(row.quality || 'unknown').trim() || 'unknown';
+      const qEntry = qualityMap.get(qKey) || { quality: qKey, count: 0, totalBytes: 0 };
+      qEntry.count += 1;
+      qEntry.totalBytes += Number(row.size_bytes || 0);
+      qualityMap.set(qKey, qEntry);
+    }
+
+    const tgRows = db
+      .prepare('SELECT source_url, size_bytes FROM telegram_files WHERE deleted_at IS NULL')
+      .all() as Array<{ source_url: string | null; size_bytes: number }>;
+    for (const row of tgRows) {
+      const p = detectMediaPlatformFromUrl(row.source_url);
+      const entry = platformMap.get(p)!;
+      entry.telegramCount += 1;
+      entry.telegramBytes += Number(row.size_bytes || 0);
+    }
+
+    const eventPlatRows = db
+      .prepare(
+        'SELECT platform, event_type, COUNT(*) AS cnt FROM activity_events GROUP BY platform, event_type'
+      )
+      .all() as Array<{ platform: string; event_type: string; cnt: number }>;
+    for (const row of eventPlatRows) {
+      const p = (platformMap.has(row.platform as AnalyticsPlatform)
+        ? row.platform
+        : 'other') as AnalyticsPlatform;
+      const entry = platformMap.get(p)!;
+      const cnt = Number(row.cnt || 0);
+      if (row.event_type === 'inspect') entry.inspectCount += cnt;
+      else if (row.event_type === 'download_complete') entry.downloadCount += cnt;
+      else if (row.event_type === 'download_error') entry.errorCount += cnt;
+    }
+
+    const eventQualRows = db
+      .prepare(
+        "SELECT quality, COUNT(*) AS cnt, COALESCE(SUM(size_bytes), 0) AS bytes FROM activity_events WHERE event_type = 'download_complete' AND quality IS NOT NULL AND quality != '' GROUP BY quality"
+      )
+      .all() as Array<{ quality: string; cnt: number; bytes: number }>;
+    for (const row of eventQualRows) {
+      const qKey = String(row.quality || 'unknown').trim() || 'unknown';
+      const qEntry = qualityMap.get(qKey) || { quality: qKey, count: 0, totalBytes: 0 };
+      qEntry.count += Number(row.cnt || 0);
+      qEntry.totalBytes += Number(row.bytes || 0);
+      qualityMap.set(qKey, qEntry);
+    }
+
+    const platforms = Array.from(platformMap.values()).sort(
+      (a, b) =>
+        b.historyCount + b.downloadCount + b.inspectCount + b.telegramCount -
+        (a.historyCount + a.downloadCount + a.inspectCount + a.telegramCount)
+    );
+    const qualities = Array.from(qualityMap.values()).sort((a, b) => b.count - a.count);
+
+    // 14-day daily activity breakdown
+    const dailyMap = new Map<
+      string,
+      { date: string; inspects: number; downloads: number; errors: number; newUsers: number; historySaved: number }
+    >();
+    const todayDate = new Date(now);
+    for (let i = 13; i >= 0; i -= 1) {
+      const d = new Date(todayDate.getTime() - i * dayMs);
+      const iso = d.toISOString().slice(0, 10);
+      dailyMap.set(iso, { date: iso, inspects: 0, downloads: 0, errors: 0, newUsers: 0, historySaved: 0 });
+    }
+    const cutoff14d = now - 14 * dayMs;
+    const recentEventRows = db
+      .prepare('SELECT event_type, created_at FROM activity_events WHERE created_at >= ?')
+      .all(cutoff14d) as Array<{ event_type: string; created_at: number }>;
+    for (const ev of recentEventRows) {
+      const iso = new Date(ev.created_at).toISOString().slice(0, 10);
+      const bucket = dailyMap.get(iso);
+      if (!bucket) continue;
+      if (ev.event_type === 'inspect') bucket.inspects += 1;
+      else if (ev.event_type === 'download_complete') bucket.downloads += 1;
+      else if (ev.event_type === 'download_error') bucket.errors += 1;
+    }
+    const recentUserCreatedRows = db
+      .prepare('SELECT created_at FROM users WHERE created_at >= ?')
+      .all(cutoff14d) as Array<{ created_at: number }>;
+    for (const u of recentUserCreatedRows) {
+      const iso = new Date(u.created_at).toISOString().slice(0, 10);
+      const bucket = dailyMap.get(iso);
+      if (bucket) bucket.newUsers += 1;
+    }
+    for (const h of histRows) {
+      if (h.created_at >= cutoff14d) {
+        const iso = new Date(h.created_at).toISOString().slice(0, 10);
+        const bucket = dailyMap.get(iso);
+        if (bucket) bucket.historySaved += 1;
+      }
+    }
+
+    // User preferences distributions
+    const languages: Record<string, number> = {};
+    const themes: Record<string, number> = {};
+    const defaultQualities: Record<string, number> = {};
+    const allUserRows = db
+      .prepare('SELECT language, theme, default_quality FROM users')
+      .all() as Array<{ language: string; theme: string; default_quality: string }>;
+    for (const u of allUserRows) {
+      const lang = String(u.language || 'en');
+      const th = normalizeThemeValue(u.theme);
+      const dq = String(u.default_quality || '1080p');
+      languages[lang] = (languages[lang] || 0) + 1;
+      themes[th] = (themes[th] || 0) + 1;
+      defaultQualities[dq] = (defaultQualities[dq] || 0) + 1;
+    }
+
+    // Recent users (15 latest)
+    const recentUsers = (db
+      .prepare(
+        `SELECT u.id, u.display_name, u.email, u.provider, u.role, u.language, u.theme, u.default_quality,
+                u.created_at, u.updated_at,
+                (SELECT COUNT(*) FROM download_history h WHERE h.user_id = u.id) AS history_count
+         FROM users u
+         ORDER BY u.created_at DESC
+         LIMIT 15`
+      )
+      .all() as Array<Record<string, unknown>>).map((r) => ({
+      id: String(r.id),
+      displayName: String(r.display_name || ''),
+      email: String(r.email || ''),
+      provider: String(r.provider || 'email'),
+      role: String(r.role || 'user'),
+      language: String(r.language || 'en'),
+      theme: normalizeThemeValue(r.theme),
+      defaultQuality: String(r.default_quality || '1080p'),
+      historyCount: Number(r.history_count || 0),
+      createdAt: Number(r.created_at || 0),
+      updatedAt: Number(r.updated_at || 0),
+    }));
+
+    // Recent saved downloads (15 latest)
+    const recentDownloads = (db
+      .prepare(
+        `SELECT h.id, h.title, h.author, h.url, h.quality, h.size_bytes, h.saved_at, h.created_at,
+                u.email AS user_email, u.display_name AS user_display_name
+         FROM download_history h
+         LEFT JOIN users u ON u.id = h.user_id
+         ORDER BY h.created_at DESC
+         LIMIT 15`
+      )
+      .all() as Array<Record<string, unknown>>).map((r) => ({
+      id: String(r.id),
+      title: String(r.title || 'Untitled'),
+      author: String(r.author || ''),
+      platform: detectMediaPlatformFromUrl(String(r.url || '')),
+      quality: String(r.quality || ''),
+      sizeBytes: Number(r.size_bytes || 0),
+      savedAt: String(r.saved_at || ''),
+      createdAt: Number(r.created_at || 0),
+      userEmail: r.user_email ? String(r.user_email) : null,
+      userDisplayName: r.user_display_name ? String(r.user_display_name) : null,
+    }));
+
+    // Live download jobs in memory
+    const jobEntries = Array.from(downloadJobs.values());
+    const liveJobs = {
+      total: jobEntries.length,
+      downloading: jobEntries.filter((j) => j.status === 'downloading').length,
+      processing: jobEntries.filter((j) => j.status === 'processing').length,
+      ready: jobEntries.filter((j) => j.status === 'ready').length,
+      error: jobEntries.filter((j) => j.status === 'error').length,
+      cancelled: jobEntries.filter((j) => j.status === 'cancelled').length,
+      items: jobEntries
+        .slice(-10)
+        .reverse()
+        .map((j) => ({
+          id: j.id,
+          title: j.title,
+          platform: detectMediaPlatformFromUrl(j.url),
+          quality: j.quality,
+          ext: j.ext,
+          status: j.status,
+          progress: j.progress,
+          downloadedBytes: j.downloadedBytes,
+          totalBytes: j.totalBytes,
+          createdAt: j.createdAt,
+        })),
+    };
+
+    // Logs breakdown
+    let logInfo = 0;
+    let logWarn = 0;
+    let logError = 0;
+    for (const entry of appLogBuffer) {
+      if (entry.level === 'info') logInfo += 1;
+      else if (entry.level === 'warn') logWarn += 1;
+      else if (entry.level === 'error') logError += 1;
+    }
+
+    const activeProfile = adminConfig.xray.profiles.find((p) => p.id === adminConfig.xray.activeProfileId) || null;
+    const testedOkCount = adminConfig.xray.profiles.filter((p) => p.lastTest?.ok).length;
+    const mem = process.memoryUsage();
+    const load = os.loadavg();
+
+    res.json({
+      generatedAt: now,
+      overview: {
+        totalUsers,
+        adminUsers,
+        regularUsers: Math.max(0, totalUsers - adminUsers),
+        googleUsers,
+        emailUsers,
+        newUsers24h,
+        newUsers7d,
+        newUsers30d,
+        activeSessions,
+        expiredSessions,
+        totalSavedHistoryItems: Number(historyAgg.totalCount || 0),
+        totalSavedHistoryBytes: Number(historyAgg.totalBytes || 0),
+        uniqueSavedUrls: Number(historyAgg.uniqueUrls || 0),
+        telegramActiveFiles: Number(tgActiveAgg.totalCount || 0),
+        telegramActiveBytes: Number(tgActiveAgg.totalBytes || 0),
+        telegramDeletedFiles,
+        announcementsCount,
+        eventsTotal,
+        inspectsTotal,
+        downloadsStarted,
+        downloadsCompleted,
+        downloadErrors,
+        streamsTotal,
+        completedBytes,
+        events24h,
+        downloads24h,
+        downloads7d,
+        downloads30d,
+        guestEvents,
+        registeredEvents,
+      },
+      platforms,
+      qualities,
+      dailyActivity: Array.from(dailyMap.values()),
+      userPreferences: {
+        languages,
+        themes,
+        defaultQualities,
+      },
+      recentUsers,
+      recentDownloads,
+      liveJobs,
+      storageAndCache: {
+        dbFileBytes: fileSizeSafe(DB_FILE),
+        dbWalBytes: fileSizeSafe(`${DB_FILE}-wal`) + fileSizeSafe(`${DB_FILE}-shm`),
+        cacheDirFiles: cacheDirStats.files,
+        cacheDirBytes: cacheDirStats.bytes,
+        ytDlpCacheFiles: ytDlpCacheStats.files,
+        ytDlpCacheBytes: ytDlpCacheStats.bytes,
+        backupFiles: backups.length,
+        backupBytes,
+        memoryCaches: {
+          youtubeInspect: youtubeInspectCache.size,
+          youtubeRawInfo: youtubeRawInfoCache.size,
+          youtubeSubtitle: youtubeSubtitleCache.size,
+          streamResolve: streamResolveCache.size,
+          instagramInfo: instagramInfoCache.size,
+          pinterestResolve: pinterestResolveCache.size,
+          telegramResolved: telegramResolvedFileCache.size,
+        },
+      },
+      services: {
+        xray: {
+          enabled: Boolean(adminConfig.xray.enabled),
+          running: Boolean(xrayState.running),
+          profilesCount: adminConfig.xray.profiles.length,
+          testedOkCount,
+          activeProfileName: activeProfile?.name || null,
+          lastError: xrayState.lastError || null,
+        },
+        potProvider: {
+          enabled: Boolean(adminConfig.potProvider.enabled),
+          mode: adminConfig.potProvider.mode,
+          running: Boolean(bgutilState.running),
+          installed: Boolean(findBgutilPotEntry()),
+          denoInstalled: Boolean(findDenoBinarySync()),
+        },
+        telegram: (() => {
+          const tgView = telegramStatusView();
+          return {
+            enabled: Boolean(tgView.enabled),
+            uploadEnabled: Boolean(tgView.uploadEnabled),
+            mode: tgView.mode,
+            signedIn: Boolean(tgView.signedIn),
+            account: tgView.account || null,
+            channel: tgView.channel || '',
+            lastError: tgView.lastError || null,
+          };
+        })(),
+        youtubeCookiesConfigured: Boolean(adminConfig.youtubeCookies && adminConfig.youtubeCookies.trim()),
+        logs: {
+          total: appLogBuffer.length,
+          info: logInfo,
+          warn: logWarn,
+          error: logError,
+        },
+      },
+      system: {
+        uptimeSeconds: Math.floor(process.uptime()),
+        nodeVersion: process.version,
+        platform: process.platform,
+        arch: process.arch,
+        rssBytes: mem.rss,
+        heapUsedBytes: mem.heapUsed,
+        heapTotalBytes: mem.heapTotal,
+        osTotalMemBytes: os.totalmem(),
+        osFreeMemBytes: os.freemem(),
+        cpuCount: os.cpus().length,
+        loadAvg1m: Number((load[0] || 0).toFixed(2)),
+      },
     });
   });
 
@@ -11168,7 +11801,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/media/inspect', async (req: Request, res: Response) => {
+  app.post('/api/media/inspect', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
     const body = req.body as { url?: unknown };
     const rawUrl = extractCleanHttpUrl(typeof body.url === 'string' ? body.url : '');
     const parsed = await validatePublicUrl(rawUrl);
@@ -11176,6 +11809,11 @@ async function startServer() {
       res.status(400).json({ error: 'Invalid or disallowed media URL.' });
       return;
     }
+    recordActivityEvent({
+      eventType: 'inspect',
+      platform: detectMediaPlatformFromUrl(parsed.toString()),
+      userId: req.authUser?.id ?? null,
+    });
 
     const tgPost = parseTelegramPostUrl(parsed);
     if (tgPost) {
@@ -12300,6 +12938,14 @@ async function startServer() {
     }
     job.progress = 100;
     job.status = 'ready';
+    recordActivityEvent({
+      eventType: 'download_complete',
+      platform: detectMediaPlatformFromUrl(job.url),
+      quality: job.quality,
+      userId: job.ownerUserId ?? null,
+      sizeBytes: job.totalBytes ?? 0,
+      title: job.title,
+    });
     appendAppLog('info', 'download', `Job ready: ${job.title} [${job.quality}.${job.ext}] (${job.totalBytes ?? 0} bytes)`);
   }
 
@@ -14991,6 +15637,13 @@ async function startServer() {
       }
       job.status = 'error';
       job.error = err instanceof Error ? err.message : 'Download failed';
+      recordActivityEvent({
+        eventType: 'download_error',
+        platform: detectMediaPlatformFromUrl(job.url),
+        quality: job.quality,
+        userId: job.ownerUserId ?? null,
+        title: job.title,
+      });
       appendAppLog('error', 'download', `Download job failed (${job.title}): ${job.error}`);
       fs.promises.rm(job.filePath, { force: true }).catch(() => {});
     }
@@ -15048,6 +15701,13 @@ async function startServer() {
       author: rawAuthor,
     };
     downloadJobs.set(id, job);
+    recordActivityEvent({
+      eventType: 'download_start',
+      platform: detectMediaPlatformFromUrl(parsed.toString()),
+      quality,
+      userId: req.authUser?.id ?? null,
+      title: rawTitle,
+    });
     appendAppLog('info', 'download', `Job started: ${rawTitle} [${quality}] (${parsed.hostname})`);
 
     void runStagedDownload(job, parsed);
@@ -15411,7 +16071,7 @@ async function startServer() {
   }
 
   // Online inline player streaming endpoint (supports Range requests, audio track switching, and Xray VPN proxy)
-  app.get('/api/media/stream', async (req: Request, res: Response) => {
+  app.get('/api/media/stream', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
     const rawUrl = extractCleanHttpUrl(typeof req.query.url === 'string' ? req.query.url : '');
     const rawQuality = typeof req.query.quality === 'string' ? req.query.quality.trim() : '720p';
     const quality = rawQuality === 'audio' ? '360p' : rawQuality;
@@ -15427,6 +16087,15 @@ async function startServer() {
     if (!parsed) {
       res.status(400).json({ error: 'Invalid or disallowed media URL.' });
       return;
+    }
+
+    if (startSeconds === 0 && !req.headers.range) {
+      recordActivityEvent({
+        eventType: 'stream',
+        platform: detectMediaPlatformFromUrl(parsed.toString()),
+        quality,
+        userId: req.authUser?.id ?? null,
+      });
     }
 
     // 0. If a matching prepared/ready file already exists in cache or Telegram, stream it directly with full Range seeking

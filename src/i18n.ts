@@ -1,5 +1,6 @@
+import type { AppTheme } from './themes';
+export type { AppTheme };
 export type AppLanguage = 'en' | 'fa' | 'ru' | 'zh';
-export type AppTheme = 'dark' | 'light';
 
 export interface TranslationDict {
   dir: 'ltr' | 'rtl';
@@ -88,6 +89,12 @@ export interface TranslationDict {
   themeLabel: string;
   themeBlack: string;
   themeWhite: string;
+  themeSpring: string;
+  themeSummer: string;
+  themeAutumn: string;
+  themeWinter: string;
+  themeShiraz: string;
+  themePastelDark: string;
   languageLabel: string;
   sectionDownloads: string;
   defaultQualityLabel: string;
@@ -108,8 +115,6 @@ export interface TranslationDict {
   continueWithGoogle: string;
   googleNotConfigured: string;
   orUseEmail: string;
-  privateAuthTitle: string;
-  privateAuthSubtitle: string;
   modeSignIn: string;
   modeRegister: string;
   displayNameLabel: string;
@@ -330,6 +335,61 @@ export interface TranslationDict {
   adminLogsPause: string;
   adminLogsResume: string;
   adminLogsEmpty: string;
+  adminStatsSection: string;
+  adminStatsDesc: string;
+  statsRefreshBtn: string;
+  statsLastUpdated: string;
+  statsOverviewHeading: string;
+  statsUsersTotal: string;
+  statsActiveSessions: string;
+  statsSavedDownloads: string;
+  statsTrackedEvents: string;
+  statsTelegramStorage: string;
+  statsAnnouncementsLabel: string;
+  statsAdminsCount: string;
+  statsNew24h: string;
+  statsNew7d: string;
+  statsNew30d: string;
+  statsUniqueLinks: string;
+  statsInspectsCount: string;
+  statsCompletedCount: string;
+  statsStreamsCount: string;
+  statsErrorsCount: string;
+  statsGuestEvents: string;
+  statsRegisteredEvents: string;
+  statsDailyActivityHeading: string;
+  statsDailyActivityDesc: string;
+  statsPlatformsHeading: string;
+  statsQualitiesHeading: string;
+  statsPreferencesHeading: string;
+  statsLanguagesLabel: string;
+  statsThemesLabel: string;
+  statsDefaultQualitiesLabel: string;
+  statsStorageHeading: string;
+  statsDatabaseLabel: string;
+  statsCacheDirLabel: string;
+  statsYtDlpCacheLabel: string;
+  statsBackupsLabel: string;
+  statsMemoryCachesLabel: string;
+  statsServicesHeading: string;
+  statsSystemHeading: string;
+  statsUptimeLabel: string;
+  statsRamUsageLabel: string;
+  statsCpuLoadLabel: string;
+  statsNodeVersionLabel: string;
+  statsLiveJobsHeading: string;
+  statsRecentUsersHeading: string;
+  statsRecentDownloadsHeading: string;
+  statsSearchUsersPlaceholder: string;
+  statsSearchDownloadsPlaceholder: string;
+  statsEmptyList: string;
+  statsLoadError: string;
+  statsRetryBtn: string;
+  statsAllPeriods: string;
+  statsActive: string;
+  statsInactive: string;
+  statsConfigured: string;
+  statsNotConfigured: string;
 }
 
 export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
@@ -433,6 +493,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     themeLabel: 'Theme',
     themeBlack: 'Pure Black',
     themeWhite: 'Pure White',
+    themeSpring: 'Spring',
+    themeSummer: 'Summer',
+    themeAutumn: 'Autumn',
+    themeWinter: 'Winter',
+    themeShiraz: 'Shiraz Wine',
+    themePastelDark: 'Pastel Dark',
     languageLabel: 'Language',
     sectionDownloads: 'Downloads & Storage',
     defaultQualityLabel: 'Default Quality',
@@ -453,8 +519,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: 'Continue with Google',
     googleNotConfigured: 'Google Client ID is not configured on this server yet. Use email & password below or set GOOGLE_CLIENT_ID.',
     orUseEmail: 'or with email',
-    privateAuthTitle: 'Personal & Private Account',
-    privateAuthSubtitle: 'Sign in directly inside Grove Save without redirecting to Google.',
     modeSignIn: 'Sign In',
     modeRegister: 'Create Account',
     displayNameLabel: 'Name',
@@ -751,6 +815,61 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     adminLogsPause: 'Pause',
     adminLogsResume: 'Live',
     adminLogsEmpty: 'No logs recorded yet.',
+    adminStatsSection: 'Statistics',
+    adminStatsDesc: 'Users, downloads, platforms, storage, and live system telemetry',
+    statsRefreshBtn: 'Refresh',
+    statsLastUpdated: 'Updated',
+    statsOverviewHeading: 'Overview',
+    statsUsersTotal: 'Registered Users',
+    statsActiveSessions: 'Active Sessions',
+    statsSavedDownloads: 'Saved History',
+    statsTrackedEvents: 'Tracked Activity',
+    statsTelegramStorage: 'Telegram Archive',
+    statsAnnouncementsLabel: 'Announcements',
+    statsAdminsCount: 'Admins',
+    statsNew24h: '24h',
+    statsNew7d: '7d',
+    statsNew30d: '30d',
+    statsUniqueLinks: 'Unique URLs',
+    statsInspectsCount: 'Inspects',
+    statsCompletedCount: 'Completed',
+    statsStreamsCount: 'Streams',
+    statsErrorsCount: 'Errors',
+    statsGuestEvents: 'Guests',
+    statsRegisteredEvents: 'Signed-in',
+    statsDailyActivityHeading: '14-Day Activity',
+    statsDailyActivityDesc: 'Daily link inspects, completed downloads, and new signups',
+    statsPlatformsHeading: 'Platforms Breakdown',
+    statsQualitiesHeading: 'Formats & Qualities',
+    statsPreferencesHeading: 'User Preferences',
+    statsLanguagesLabel: 'Languages',
+    statsThemesLabel: 'Themes',
+    statsDefaultQualitiesLabel: 'Default Quality',
+    statsStorageHeading: 'Database, Disk & Caches',
+    statsDatabaseLabel: 'SQLite Database',
+    statsCacheDirLabel: 'Media Cache',
+    statsYtDlpCacheLabel: 'yt-dlp Cache',
+    statsBackupsLabel: 'Snapshots',
+    statsMemoryCachesLabel: 'In-Memory Caches',
+    statsServicesHeading: 'Services Status',
+    statsSystemHeading: 'Server & Runtime',
+    statsUptimeLabel: 'Uptime',
+    statsRamUsageLabel: 'Process / System RAM',
+    statsCpuLoadLabel: 'CPU & Load Avg',
+    statsNodeVersionLabel: 'Runtime',
+    statsLiveJobsHeading: 'Active & Recent Jobs',
+    statsRecentUsersHeading: 'Recent Users',
+    statsRecentDownloadsHeading: 'Recent Downloads',
+    statsSearchUsersPlaceholder: 'Filter users by name or email...',
+    statsSearchDownloadsPlaceholder: 'Filter downloads by title or platform...',
+    statsEmptyList: 'No records yet.',
+    statsLoadError: 'Could not load admin statistics.',
+    statsRetryBtn: 'Retry',
+    statsAllPeriods: 'All time',
+    statsActive: 'Active',
+    statsInactive: 'Off',
+    statsConfigured: 'Configured',
+    statsNotConfigured: 'Not set',
   },
   fa: {
     dir: 'rtl',
@@ -852,6 +971,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     themeLabel: 'تم برنامه',
     themeBlack: 'کاملاً سیاه',
     themeWhite: 'کاملاً سفید',
+    themeSpring: 'بهار',
+    themeSummer: 'تابستون',
+    themeAutumn: 'پاییز',
+    themeWinter: 'زمستون',
+    themeShiraz: 'شراب شیراز',
+    themePastelDark: 'دارک',
     languageLabel: 'زبان',
     sectionDownloads: 'دانلودها و حافظه',
     defaultQualityLabel: 'کیفیت پیش‌فرض',
@@ -872,8 +997,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: 'ورود با گوگل',
     googleNotConfigured: 'شناسه Google Client ID هنوز روی سرور تنظیم نشده است. از جیمیل و رمز عبور پایین استفاده کنید.',
     orUseEmail: 'یا با جیمیل و رمز عبور',
-    privateAuthTitle: 'حساب شخصی و اختصاصی',
-    privateAuthSubtitle: 'ورود مستقیم و شخصی داخل برنامه؛ بدون اتصال به گوگل و بدون باز شدن صفحه گوگل.',
     modeSignIn: 'ورود',
     modeRegister: 'ثبت‌نام',
     displayNameLabel: 'نام نمایشی',
@@ -1171,6 +1294,61 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     adminLogsPause: 'توقف',
     adminLogsResume: 'زنده',
     adminLogsEmpty: 'هنوز لاگی ثبت نشده است.',
+    adminStatsSection: 'آمار',
+    adminStatsDesc: 'آمار کامل کاربران، دانلودها، پلتفرم‌ها، حافظه، کش و وضعیت سرور',
+    statsRefreshBtn: 'بروزرسانی',
+    statsLastUpdated: 'آخرین بروزرسانی',
+    statsOverviewHeading: 'خلاصه آمار کلی',
+    statsUsersTotal: 'کل کاربران',
+    statsActiveSessions: 'نشست‌های فعال',
+    statsSavedDownloads: 'تاریخچه ذخیره شده',
+    statsTrackedEvents: 'رویدادهای ثبت شده',
+    statsTelegramStorage: 'آرشیو تلگرام',
+    statsAnnouncementsLabel: 'اطلاعیه‌ها',
+    statsAdminsCount: 'ادمین',
+    statsNew24h: '۲۴ ساعت',
+    statsNew7d: '۷ روز',
+    statsNew30d: '۳۰ روز',
+    statsUniqueLinks: 'لینک یکتا',
+    statsInspectsCount: 'بررسی لینک',
+    statsCompletedCount: 'دانلود موفق',
+    statsStreamsCount: 'پخش آنلاین',
+    statsErrorsCount: 'خطا',
+    statsGuestEvents: 'مهمان',
+    statsRegisteredEvents: 'کاربر عضو',
+    statsDailyActivityHeading: 'روند ۱۴ روز اخیر',
+    statsDailyActivityDesc: 'تعداد بررسی لینک، دانلودهای موفق و کاربران جدید در هر روز',
+    statsPlatformsHeading: 'آمار پلتفرم‌ها',
+    statsQualitiesHeading: 'کیفیت‌ها و فرمت‌ها',
+    statsPreferencesHeading: 'تنظیمات محبوب کاربران',
+    statsLanguagesLabel: 'زبان‌ها',
+    statsThemesLabel: 'تم‌ها',
+    statsDefaultQualitiesLabel: 'کیفیت پیش‌فرض',
+    statsStorageHeading: 'دیتابیس، فضای دیسک و کش',
+    statsDatabaseLabel: 'دیتابیس SQLite',
+    statsCacheDirLabel: 'کش فایل‌ها',
+    statsYtDlpCacheLabel: 'کش yt-dlp',
+    statsBackupsLabel: 'بکاپ‌ها',
+    statsMemoryCachesLabel: 'کش‌های رم (حافظه موقت)',
+    statsServicesHeading: 'وضعیت سرویس‌ها',
+    statsSystemHeading: 'سخت‌افزار و سیستم',
+    statsUptimeLabel: 'مدت فعالیت سرور',
+    statsRamUsageLabel: 'مصرف رم فرآیند / کل',
+    statsCpuLoadLabel: 'هسته پردازنده و بار',
+    statsNodeVersionLabel: 'نسخه اجرا',
+    statsLiveJobsHeading: 'صف پردازش و دانلودهای زنده',
+    statsRecentUsersHeading: 'آخرین کاربران ثبت‌نامی',
+    statsRecentDownloadsHeading: 'آخرین دانلودهای ثبت‌شده',
+    statsSearchUsersPlaceholder: 'جستجوی کاربر با نام یا ایمیل...',
+    statsSearchDownloadsPlaceholder: 'جستجوی دانلود با عنوان یا پلتفرم...',
+    statsEmptyList: 'موردی ثبت نشده است.',
+    statsLoadError: 'دریافت آمار پنل ادمین با خطا مواجه شد.',
+    statsRetryBtn: 'تلاش مجدد',
+    statsAllPeriods: 'کل زمان',
+    statsActive: 'فعال',
+    statsInactive: 'خاموش',
+    statsConfigured: 'تنظیم شده',
+    statsNotConfigured: 'تنظیم نشده',
   },
   ru: {
     dir: 'ltr',
@@ -1272,6 +1450,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     themeLabel: 'Тема',
     themeBlack: 'Чисто чёрная',
     themeWhite: 'Чисто белая',
+    themeSpring: 'Весна',
+    themeSummer: 'Лето',
+    themeAutumn: 'Осень',
+    themeWinter: 'Зима',
+    themeShiraz: 'Вино Шираз',
+    themePastelDark: 'Тёмный пастель',
     languageLabel: 'Язык',
     sectionDownloads: 'Загрузки и память',
     defaultQualityLabel: 'Качество по умолчанию',
@@ -1292,8 +1476,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: 'Войти через Google',
     googleNotConfigured: 'Google Client ID не настроен на сервере. Войдите по почте и паролю ниже.',
     orUseEmail: 'или по почте',
-    privateAuthTitle: 'Личный приватный аккаунт',
-    privateAuthSubtitle: 'Прямой вход внутри приложения без перехода в Google.',
     modeSignIn: 'Вход',
     modeRegister: 'Регистрация',
     displayNameLabel: 'Имя',
@@ -1591,6 +1773,61 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     adminLogsPause: 'Пауза',
     adminLogsResume: 'В эфире',
     adminLogsEmpty: 'Логов пока нет.',
+    adminStatsSection: 'Статистика',
+    adminStatsDesc: 'Пользователи, загрузки, платформы, хранилище и состояние сервера',
+    statsRefreshBtn: 'Обновить',
+    statsLastUpdated: 'Обновлено',
+    statsOverviewHeading: 'Общая сводка',
+    statsUsersTotal: 'Пользователи',
+    statsActiveSessions: 'Активные сессии',
+    statsSavedDownloads: 'История загрузок',
+    statsTrackedEvents: 'События активности',
+    statsTelegramStorage: 'Архив Telegram',
+    statsAnnouncementsLabel: 'Объявления',
+    statsAdminsCount: 'Админы',
+    statsNew24h: '24ч',
+    statsNew7d: '7д',
+    statsNew30d: '30д',
+    statsUniqueLinks: 'Уник. ссылки',
+    statsInspectsCount: 'Проверки',
+    statsCompletedCount: 'Завершено',
+    statsStreamsCount: 'Стримы',
+    statsErrorsCount: 'Ошибки',
+    statsGuestEvents: 'Гости',
+    statsRegisteredEvents: 'Аккаунты',
+    statsDailyActivityHeading: 'Активность за 14 дней',
+    statsDailyActivityDesc: 'Ежедневные проверки ссылок, завершённые загрузки и регистрации',
+    statsPlatformsHeading: 'По платформам',
+    statsQualitiesHeading: 'Качества и форматы',
+    statsPreferencesHeading: 'Предпочтения пользователей',
+    statsLanguagesLabel: 'Языки',
+    statsThemesLabel: 'Темы',
+    statsDefaultQualitiesLabel: 'Качество по умолчанию',
+    statsStorageHeading: 'БД, диск и кэш',
+    statsDatabaseLabel: 'База SQLite',
+    statsCacheDirLabel: 'Медиа-кэш',
+    statsYtDlpCacheLabel: 'Кэш yt-dlp',
+    statsBackupsLabel: 'Снимки БД',
+    statsMemoryCachesLabel: 'Кэш в памяти',
+    statsServicesHeading: 'Состояние сервисов',
+    statsSystemHeading: 'Сервер и система',
+    statsUptimeLabel: 'Аптайм',
+    statsRamUsageLabel: 'ОЗУ процесса / системы',
+    statsCpuLoadLabel: 'CPU и нагрузка',
+    statsNodeVersionLabel: 'Среда',
+    statsLiveJobsHeading: 'Текущие задачи',
+    statsRecentUsersHeading: 'Недавние пользователи',
+    statsRecentDownloadsHeading: 'Недавние загрузки',
+    statsSearchUsersPlaceholder: 'Поиск по имени или email...',
+    statsSearchDownloadsPlaceholder: 'Поиск по названию или платформе...',
+    statsEmptyList: 'Записей пока нет.',
+    statsLoadError: 'Не удалось загрузить статистику.',
+    statsRetryBtn: 'Повторить',
+    statsAllPeriods: 'За всё время',
+    statsActive: 'Активен',
+    statsInactive: 'Выкл',
+    statsConfigured: 'Настроено',
+    statsNotConfigured: 'Не задано',
   },
   zh: {
     dir: 'ltr',
@@ -1691,6 +1928,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     themeLabel: '主题',
     themeBlack: '纯黑模式',
     themeWhite: '纯白模式',
+    themeSpring: '春意',
+    themeSummer: '盛夏',
+    themeAutumn: '秋韵',
+    themeWinter: '初冬',
+    themeShiraz: '设拉子红',
+    themePastelDark: '柔暗夜',
     languageLabel: '语言',
     sectionDownloads: '下载与存储',
     defaultQualityLabel: '默认画质',
@@ -1711,8 +1954,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: '使用 Google 登录',
     googleNotConfigured: '服务器尚未配置 Google Client ID，请使用下方的邮箱与密码登录。',
     orUseEmail: '或使用邮箱',
-    privateAuthTitle: '私人专属账号',
-    privateAuthSubtitle: '直接在应用内私密登录，无需跳转至 Google。',
     modeSignIn: '登录',
     modeRegister: '注册',
     displayNameLabel: '昵称',
@@ -2009,5 +2250,60 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     adminLogsPause: '暂停',
     adminLogsResume: '实时',
     adminLogsEmpty: '暂无日志记录。',
+    adminStatsSection: '统计数据',
+    adminStatsDesc: '用户、下载量、平台分布、存储缓存与服务器运行指标',
+    statsRefreshBtn: '刷新',
+    statsLastUpdated: '更新时间',
+    statsOverviewHeading: '核心概览',
+    statsUsersTotal: '注册用户',
+    statsActiveSessions: '活跃会话',
+    statsSavedDownloads: '历史记录',
+    statsTrackedEvents: '追踪事件',
+    statsTelegramStorage: 'Telegram 存储',
+    statsAnnouncementsLabel: '系统公告',
+    statsAdminsCount: '管理员',
+    statsNew24h: '24小时',
+    statsNew7d: '7天',
+    statsNew30d: '30天',
+    statsUniqueLinks: '唯一链接',
+    statsInspectsCount: '解析次数',
+    statsCompletedCount: '完成下载',
+    statsStreamsCount: '在线播放',
+    statsErrorsCount: '失败次数',
+    statsGuestEvents: '访客',
+    statsRegisteredEvents: '已登录',
+    statsDailyActivityHeading: '近14天趋势',
+    statsDailyActivityDesc: '每日链接解析、成功下载及新注册人数',
+    statsPlatformsHeading: '平台分布',
+    statsQualitiesHeading: '画质与格式',
+    statsPreferencesHeading: '用户偏好分布',
+    statsLanguagesLabel: '界面语言',
+    statsThemesLabel: '主题选择',
+    statsDefaultQualitiesLabel: '默认画质',
+    statsStorageHeading: '数据库与缓存占用',
+    statsDatabaseLabel: 'SQLite 数据库',
+    statsCacheDirLabel: '媒体缓存目录',
+    statsYtDlpCacheLabel: 'yt-dlp 缓存',
+    statsBackupsLabel: '备份快照',
+    statsMemoryCachesLabel: '内存缓存条数',
+    statsServicesHeading: '服务运行状态',
+    statsSystemHeading: '服务器状态',
+    statsUptimeLabel: '运行时长',
+    statsRamUsageLabel: '进程 / 系统内存',
+    statsCpuLoadLabel: 'CPU 与负载',
+    statsNodeVersionLabel: '运行环境',
+    statsLiveJobsHeading: '实时下载任务',
+    statsRecentUsersHeading: '最近注册用户',
+    statsRecentDownloadsHeading: '最近下载记录',
+    statsSearchUsersPlaceholder: '按名称或邮箱筛选用户...',
+    statsSearchDownloadsPlaceholder: '按标题或平台筛选记录...',
+    statsEmptyList: '暂无记录。',
+    statsLoadError: '加载统计数据失败。',
+    statsRetryBtn: '重试',
+    statsAllPeriods: '全部时间',
+    statsActive: '运行中',
+    statsInactive: '关闭',
+    statsConfigured: '已配置',
+    statsNotConfigured: '未配置',
   },
 };

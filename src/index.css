@@ -6,6 +6,183 @@
     --font-display: 'Syne', 'Vazirmatn', sans-serif;
     --font-sans: 'Outfit', 'Vazirmatn', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
+    --app-bg: #ffffff;
+    --app-header-bg: rgba(255, 255, 255, 0.52);
+    --app-header-border: rgba(0, 0, 0, 0.07);
+    --app-card-bg: rgb(250, 250, 250);
+    --app-card-border: rgba(0, 0, 0, 0.1);
+    --app-card-ring: none;
+    --app-glow-top: rgba(161, 161, 170, 0.25);
+    --app-glow-bottom: rgba(212, 212, 216, 0.2);
+    --app-dot-bg: rgba(82, 82, 91, 0.55);
+    --app-dot-glow: rgba(0, 0, 0, 0.18);
+    --app-box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.14),
+      0 12px 32px -8px rgba(0, 0, 0, 0.14),
+      0 0 28px rgba(255, 255, 255, 0.85);
+    --app-dock-shadow:
+      0 10px 30px -6px rgba(0, 0, 0, 0.22),
+      0 0 22px rgba(255, 255, 255, 0.9),
+      0 0 0 1px rgba(0, 0, 0, 0.12);
+  }
+
+  html.dark {
+    color-scheme: dark;
+    scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+    --app-bg: #000000;
+    --app-header-bg: rgba(0, 0, 0, 0.45);
+    --app-header-border: rgba(255, 255, 255, 0.12);
+    --app-card-bg: #0a0a0a;
+    --app-card-border: rgba(255, 255, 255, 0.15);
+    --app-card-ring: none;
+    --app-glow-top: rgba(255, 255, 255, 0.15);
+    --app-glow-bottom: rgba(255, 255, 255, 0.1);
+    --app-dot-bg: rgba(255, 255, 255, 0.92);
+    --app-dot-glow: rgba(255, 255, 255, 0.85);
+    --app-box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.28),
+      0 0 28px rgba(255, 255, 255, 0.18),
+      inset 0 0 16px rgba(255, 255, 255, 0.05);
+    --app-dock-shadow:
+      0 14px 36px -6px rgba(0, 0, 0, 0.9),
+      0 0 26px rgba(255, 255, 255, 0.26),
+      0 0 0 1px rgba(255, 255, 255, 0.32);
+  }
+
+  html[data-theme="spring"] {
+    --app-bg: #edf9f1;
+    --app-bg-gradient: radial-gradient(circle at 18% 12%, rgba(16, 185, 129, 0.22), transparent 46%), radial-gradient(circle at 84% 18%, rgba(244, 63, 94, 0.18), transparent 44%), radial-gradient(circle at 50% 95%, rgba(52, 211, 153, 0.2), transparent 52%);
+    --app-header-bg: rgba(237, 249, 241, 0.72);
+    --app-header-border: rgba(16, 185, 129, 0.34);
+    --app-card-bg: rgba(252, 255, 253, 0.88);
+    --app-card-border: rgba(16, 185, 129, 0.32);
+    --app-card-ring: 0 0 0 1px rgba(244, 63, 94, 0.2), 0 12px 30px -12px rgba(16, 185, 129, 0.36);
+    --app-glow-top: rgba(16, 185, 129, 0.36);
+    --app-glow-bottom: rgba(244, 63, 94, 0.3);
+    --app-dot-bg: rgba(244, 63, 94, 0.78);
+    --app-dot-glow: rgba(16, 185, 129, 0.75);
+    --app-box-shadow:
+      0 0 0 1.5px rgba(16, 185, 129, 0.68),
+      0 0 0 4px rgba(244, 63, 94, 0.18),
+      0 14px 36px -10px rgba(16, 185, 129, 0.42);
+    --app-dock-shadow:
+      0 12px 32px -8px rgba(5, 150, 105, 0.28),
+      0 0 0 1.5px rgba(16, 185, 129, 0.72),
+      0 0 0 4px rgba(244, 63, 94, 0.2);
+  }
+
+  html[data-theme="summer"] {
+    --app-bg: #fff6e4;
+    --app-bg-gradient: radial-gradient(circle at 80% 10%, rgba(245, 158, 11, 0.28), transparent 46%), radial-gradient(circle at 15% 22%, rgba(249, 115, 22, 0.18), transparent 42%), radial-gradient(circle at 50% 95%, rgba(6, 182, 212, 0.24), transparent 54%);
+    --app-header-bg: rgba(255, 246, 228, 0.74);
+    --app-header-border: rgba(245, 158, 11, 0.38);
+    --app-card-bg: rgba(255, 253, 246, 0.88);
+    --app-card-border: rgba(245, 158, 11, 0.34);
+    --app-card-ring: 0 0 0 1px rgba(6, 182, 212, 0.24), 0 12px 30px -12px rgba(245, 158, 11, 0.38);
+    --app-glow-top: rgba(245, 158, 11, 0.42);
+    --app-glow-bottom: rgba(6, 182, 212, 0.34);
+    --app-dot-bg: rgba(245, 158, 11, 0.85);
+    --app-dot-glow: rgba(6, 182, 212, 0.75);
+    --app-box-shadow:
+      0 0 0 1.5px rgba(245, 158, 11, 0.78),
+      0 0 0 4px rgba(6, 182, 212, 0.22),
+      0 14px 36px -10px rgba(245, 158, 11, 0.44);
+    --app-dock-shadow:
+      0 12px 32px -8px rgba(217, 119, 6, 0.28),
+      0 0 0 1.5px rgba(245, 158, 11, 0.78),
+      0 0 0 4px rgba(6, 182, 212, 0.24);
+  }
+
+  html[data-theme="autumn"] {
+    --app-bg: #fceddd;
+    --app-bg-gradient: radial-gradient(circle at 20% 14%, rgba(234, 88, 12, 0.24), transparent 46%), radial-gradient(circle at 82% 20%, rgba(185, 28, 28, 0.18), transparent 44%), radial-gradient(circle at 50% 94%, rgba(217, 119, 6, 0.24), transparent 52%);
+    --app-header-bg: rgba(252, 237, 221, 0.74);
+    --app-header-border: rgba(234, 88, 12, 0.36);
+    --app-card-bg: rgba(255, 250, 244, 0.88);
+    --app-card-border: rgba(234, 88, 12, 0.32);
+    --app-card-ring: 0 0 0 1px rgba(217, 119, 6, 0.26), 0 12px 30px -12px rgba(234, 88, 12, 0.38);
+    --app-glow-top: rgba(234, 88, 12, 0.38);
+    --app-glow-bottom: rgba(185, 28, 28, 0.28);
+    --app-dot-bg: rgba(234, 88, 12, 0.82);
+    --app-dot-glow: rgba(217, 119, 6, 0.78);
+    --app-box-shadow:
+      0 0 0 1.5px rgba(234, 88, 12, 0.74),
+      0 0 0 4px rgba(217, 119, 6, 0.22),
+      0 14px 36px -10px rgba(234, 88, 12, 0.42);
+    --app-dock-shadow:
+      0 12px 32px -8px rgba(180, 68, 14, 0.3),
+      0 0 0 1.5px rgba(234, 88, 12, 0.76),
+      0 0 0 4px rgba(217, 119, 6, 0.24);
+  }
+
+  html[data-theme="winter"] {
+    --app-bg: #071322;
+    --app-bg-gradient: radial-gradient(circle at 50% 8%, rgba(56, 189, 248, 0.24), transparent 48%), radial-gradient(circle at 18% 72%, rgba(37, 99, 235, 0.2), transparent 46%), radial-gradient(circle at 84% 84%, rgba(186, 230, 253, 0.16), transparent 45%);
+    --app-header-bg: rgba(7, 19, 34, 0.64);
+    --app-header-border: rgba(56, 189, 248, 0.32);
+    --app-card-bg: rgba(11, 27, 48, 0.88);
+    --app-card-border: rgba(56, 189, 248, 0.3);
+    --app-card-ring: 0 0 0 1px rgba(186, 230, 253, 0.2), 0 14px 32px -12px rgba(56, 189, 248, 0.32);
+    --app-glow-top: rgba(56, 189, 248, 0.36);
+    --app-glow-bottom: rgba(147, 197, 253, 0.28);
+    --app-dot-bg: rgba(224, 242, 254, 0.94);
+    --app-dot-glow: rgba(56, 189, 248, 0.9);
+    --app-box-shadow:
+      0 0 0 1.5px rgba(56, 189, 248, 0.68),
+      0 0 0 4px rgba(186, 230, 253, 0.18),
+      0 0 36px rgba(56, 189, 248, 0.32),
+      inset 0 0 18px rgba(56, 189, 248, 0.09);
+    --app-dock-shadow:
+      0 14px 36px -6px rgba(3, 10, 20, 0.92),
+      0 0 0 1.5px rgba(56, 189, 248, 0.7),
+      0 0 0 4px rgba(186, 230, 253, 0.2),
+      0 0 28px rgba(56, 189, 248, 0.32);
+  }
+
+  html[data-theme="shiraz"] {
+    --app-bg: #13080d;
+    --app-header-bg: rgba(19, 8, 13, 0.62);
+    --app-header-border: rgba(226, 163, 182, 0.28);
+    --app-card-bg: rgba(31, 13, 22, 0.9);
+    --app-card-border: rgba(226, 163, 182, 0.26);
+    --app-card-ring: 0 0 0 1px rgba(196, 147, 178, 0.22), 0 12px 30px -12px rgba(226, 163, 182, 0.24);
+    --app-glow-top: rgba(190, 86, 122, 0.34);
+    --app-glow-bottom: rgba(226, 163, 182, 0.24);
+    --app-dot-bg: rgba(226, 163, 182, 0.85);
+    --app-dot-glow: rgba(226, 163, 182, 0.72);
+    --app-box-shadow:
+      0 0 0 1.5px rgba(226, 163, 182, 0.56),
+      0 0 0 4px rgba(196, 147, 178, 0.16),
+      0 0 32px rgba(226, 163, 182, 0.24),
+      inset 0 0 18px rgba(226, 163, 182, 0.07);
+    --app-dock-shadow:
+      0 14px 36px -6px rgba(10, 3, 7, 0.92),
+      0 0 0 1.5px rgba(226, 163, 182, 0.58),
+      0 0 0 4px rgba(196, 147, 178, 0.18),
+      0 0 26px rgba(226, 163, 182, 0.24);
+  }
+
+  html[data-theme="pastelDark"] {
+    --app-bg: #0d0f14;
+    --app-header-bg: rgba(13, 15, 20, 0.62);
+    --app-header-border: rgba(183, 180, 237, 0.26);
+    --app-card-bg: rgba(20, 23, 32, 0.9);
+    --app-card-border: rgba(183, 180, 237, 0.26);
+    --app-card-ring: 0 0 0 1px rgba(155, 218, 200, 0.2), 0 12px 30px -12px rgba(183, 180, 237, 0.24);
+    --app-glow-top: rgba(183, 180, 237, 0.28);
+    --app-glow-bottom: rgba(155, 218, 200, 0.22);
+    --app-dot-bg: rgba(183, 180, 237, 0.85);
+    --app-dot-glow: rgba(155, 218, 200, 0.72);
+    --app-box-shadow:
+      0 0 0 1.5px rgba(183, 180, 237, 0.56),
+      0 0 0 4px rgba(155, 218, 200, 0.16),
+      0 0 32px rgba(183, 180, 237, 0.24),
+      inset 0 0 18px rgba(183, 180, 237, 0.07);
+    --app-dock-shadow:
+      0 14px 36px -6px rgba(4, 5, 10, 0.92),
+      0 0 0 1.5px rgba(183, 180, 237, 0.58),
+      0 0 0 4px rgba(155, 218, 200, 0.18),
+      0 0 26px rgba(183, 180, 237, 0.24);
   }
 
   html {
@@ -18,15 +195,11 @@
     scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
   }
 
-  html.dark {
-    color-scheme: dark;
-    scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
-  }
-
   body {
     margin: 0;
     min-height: 100dvh;
     overflow-x: clip;
+    background-color: var(--app-bg);
   }
 
   *::-webkit-scrollbar {
@@ -62,18 +235,14 @@
   line-height: 1;
 }
 
-.neon-white-box {
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.14),
-    0 12px 32px -8px rgba(0, 0, 0, 0.14),
-    0 0 28px rgba(255, 255, 255, 0.85);
+.theme-surface {
+  background-color: var(--app-card-bg);
+  border-color: var(--app-card-border);
+  box-shadow: var(--app-card-ring);
 }
 
-.dark .neon-white-box {
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.28),
-    0 0 28px rgba(255, 255, 255, 0.18),
-    inset 0 0 16px rgba(255, 255, 255, 0.05);
+.neon-white-box {
+  box-shadow: var(--app-box-shadow);
 }
 
 .neon-red-box {
@@ -155,17 +324,7 @@
 }
 
 .neon-dock {
-  box-shadow:
-    0 10px 30px -6px rgba(0, 0, 0, 0.22),
-    0 0 22px rgba(255, 255, 255, 0.9),
-    0 0 0 1px rgba(0, 0, 0, 0.12);
-}
-
-.dark .neon-dock {
-  box-shadow:
-    0 14px 36px -6px rgba(0, 0, 0, 0.9),
-    0 0 26px rgba(255, 255, 255, 0.26),
-    0 0 0 1px rgba(255, 255, 255, 0.32);
+  box-shadow: var(--app-dock-shadow);
 }
 
 @keyframes radiantFloat {

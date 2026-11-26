@@ -70,6 +70,7 @@ function getAccentDotClass(providerGlow: ProviderGlow): string {
 
 export const AmbientTwinkleDots: React.FC<AmbientTwinkleDotsProps> = React.memo(({ providerGlow }) => {
   const accentDotClass = getAccentDotClass(providerGlow);
+  const isDefaultGlow = providerGlow === 'default';
 
   return (
     <div aria-hidden="true" className="fixed inset-0 pointer-events-none overflow-hidden z-0">
@@ -84,6 +85,12 @@ export const AmbientTwinkleDots: React.FC<AmbientTwinkleDotsProps> = React.memo(
           '--dot-min': String(dot.minOpacity),
           '--dot-mid': String(((dot.minOpacity + dot.maxOpacity) * 0.45).toFixed(2)),
           '--dot-max': String(dot.maxOpacity),
+          ...(isDefaultGlow
+            ? {
+                backgroundColor: 'var(--app-dot-bg)',
+                boxShadow: '0 0 9px var(--app-dot-glow)',
+              }
+            : {}),
         } as React.CSSProperties;
 
         return (
@@ -91,9 +98,11 @@ export const AmbientTwinkleDots: React.FC<AmbientTwinkleDotsProps> = React.memo(
             key={dot.id}
             style={dotStyle}
             className={`absolute rounded-full animate-ambient-twinkle transition-colors duration-700 ${
-              dot.accented
-                ? accentDotClass
-                : 'bg-zinc-700/45 dark:bg-white/95 shadow-[0_0_6px_rgba(0,0,0,0.16)] dark:shadow-[0_0_9px_rgba(255,255,255,0.8)]'
+              isDefaultGlow
+                ? ''
+                : dot.accented
+                  ? accentDotClass
+                  : 'bg-zinc-700/45 dark:bg-white/95 shadow-[0_0_6px_rgba(0,0,0,0.16)] dark:shadow-[0_0_9px_rgba(255,255,255,0.8)]'
             }`}
           />
         );
