@@ -15,6 +15,7 @@ export interface TranslationDict {
   qualityLabels: Record<string, { label: string; sub: string }>;
   downloadNow: string;
   prepareDownload: string;
+  cancelDownload: string;
   downloadingToApp: string;
   processingMedia: string;
   saveFromSite: string;
@@ -306,6 +307,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     },
     downloadNow: 'Save to Device',
     prepareDownload: 'Download to App',
+    cancelDownload: 'Cancel',
     downloadingToApp: 'Downloading in app...',
     processingMedia: 'Processing file...',
     saveFromSite: 'Download File to Device',
@@ -592,6 +594,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     },
     downloadNow: 'ذخیره در حافظه گوشی',
     prepareDownload: 'دانلود فایل در برنامه',
+    cancelDownload: 'لغو دانلود',
     downloadingToApp: 'در حال دانلود در برنامه...',
     processingMedia: 'در حال آماده‌سازی فایل...',
     saveFromSite: 'دانلود از سایت در حافظه گوشی',
@@ -879,6 +882,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     },
     downloadNow: 'Сохранить на устройство',
     prepareDownload: 'Загрузить в приложение',
+    cancelDownload: 'Отмена',
     downloadingToApp: 'Загрузка в приложение...',
     processingMedia: 'Обработка файла...',
     saveFromSite: 'Скачать файл на устройство',
@@ -1166,6 +1170,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     },
     downloadNow: '保存到设备',
     prepareDownload: '下载到应用',
+    cancelDownload: '取消下载',
     downloadingToApp: '正在下载到应用...',
     processingMedia: '正在处理文件...',
     saveFromSite: '从网站保存到设备',

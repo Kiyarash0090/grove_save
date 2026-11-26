@@ -242,7 +242,7 @@ interface DownloadJob {
   audioFormatId?: string;
   ext: DownloadFileExt;
   mimeType: string;
-  status: 'downloading' | 'processing' | 'ready' | 'error';
+  status: 'downloading' | 'processing' | 'ready' | 'cancelled' | 'error';
   progress: number;
   downloadedBytes: number;
   totalBytes: number | null;
@@ -258,6 +258,8 @@ interface DownloadJob {
   telegramUploadError?: string;
   ownerUserId?: string | null;
   author?: string;
+  cancelled?: boolean;
+  cancelHandlers?: Array<() => void>;
 }
 
 interface MediaAudioTrack {
@@ -276,6 +278,40 @@ interface MediaSubtitleTrack {
 }
 
 const downloadJobs = new Map<string, DownloadJob>();
+
+function registerJobCancel(job: DownloadJob, fn: () => void): () => void {
+  if (!job.cancelHandlers) job.cancelHandlers = [];
+  if (job.cancelled) {
+    try {
+      fn();
+    } catch {}
+    return () => {};
+  }
+  job.cancelHandlers.push(fn);
+  return () => {
+    if (!job.cancelHandlers) return;
+    const idx = job.cancelHandlers.indexOf(fn);
+    if (idx >= 0) job.cancelHandlers.splice(idx, 1);
+  };
+}
+
+function cancelDownloadJob(job: DownloadJob): void {
+  if (job.cancelled || job.status === 'ready') return;
+  job.cancelled = true;
+  job.status = 'cancelled';
+  job.error = 'Download cancelled';
+  const handlers = job.cancelHandlers ? [...job.cancelHandlers] : [];
+  job.cancelHandlers = [];
+  for (const fn of handlers) {
+    try {
+      fn();
+    } catch {}
+  }
+  if (job.filePath) {
+    fs.promises.rm(job.filePath, { force: true }).catch(() => {});
+  }
+  appendAppLog('info', 'download', `Job cancelled by user: ${job.title} [${job.quality}]`);
+}
 
 function cleanupExpiredJobs(): void {
   const cutoff = Date.now() - 30 * 60 * 1000;
@@ -1036,7 +1072,7 @@ const TELEGRAM_BOT_MAX_BYTES = 50 * 1024 * 1024;
  */
 function isFatalTelegramUploadError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '');
-  return /over the 50 MB Telegram bot upload limit|Telegram upload is not enabled/i.test(msg);
+  return /over the 50 MB Telegram bot upload limit|Telegram upload is not enabled|Download cancelled/i.test(msg);
 }
 
 function telegramIsConfigured(cfg: AdminTelegramConfig): boolean {
@@ -1783,7 +1819,16 @@ async function uploadStreamJobToTelegram(
     }
   };
 
+  const unregisterStreamCancel = registerJobCancel(job, () => {
+    try {
+      readable.destroy(new Error('Download cancelled'));
+    } catch {}
+  });
+
   try {
+    if (job.cancelled) {
+      throw new Error('Download cancelled');
+    }
     let chatId = cfg.channel;
     let messageId = 0;
     let botFileId: string | null = null;
@@ -1810,6 +1855,9 @@ async function uploadStreamJobToTelegram(
         knownTotalBytes,
         onReadProgress: reportReadProgress,
       });
+      if (job.cancelled) {
+        throw new Error('Download cancelled');
+      }
       job.status = 'processing';
       job.progress = 98;
       const sent = (await client.sendFile(cfg.channel, {
@@ -1838,6 +1886,10 @@ async function uploadStreamJobToTelegram(
           chatId = cfg.channel;
         }
       }
+    }
+
+    if (job.cancelled) {
+      throw new Error('Download cancelled');
     }
 
     const resolvedChatId = chatId || cfg.channel;
@@ -1882,10 +1934,14 @@ async function uploadStreamJobToTelegram(
     job.progress = 100;
     job.status = 'ready';
   } catch (err) {
+    if (job.cancelled) {
+      throw err;
+    }
     const safeMsg = sanitizeTelegramError(err, cfg.botToken);
     job.telegramUploadError = safeMsg;
     throw new Error(safeMsg);
   } finally {
+    unregisterStreamCancel();
     job.telegramUploading = false;
   }
 }
@@ -8700,6 +8756,10 @@ async function startServer() {
   }
 
   async function finalizeJobFile(job: DownloadJob): Promise<void> {
+    if (job.cancelled) {
+      await fs.promises.rm(job.filePath, { force: true }).catch(() => {});
+      return;
+    }
     const stat = await fs.promises.stat(job.filePath);
     job.totalBytes = stat.size;
     job.downloadedBytes = stat.size;
@@ -8713,6 +8773,10 @@ async function startServer() {
       await uploadJobToTelegram(job, job.ownerUserId ?? null, job.author || 'grove save');
     }
 
+    if (job.cancelled) {
+      await fs.promises.rm(job.filePath, { force: true }).catch(() => {});
+      return;
+    }
     job.progress = 100;
     job.status = 'ready';
     appendAppLog('info', 'download', `Job ready: ${job.title} [${job.quality}.${job.ext}] (${job.totalBytes ?? 0} bytes)`);
@@ -9358,6 +9422,10 @@ async function startServer() {
         mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
       });
     } catch (err) {
+      if (job.cancelled) {
+        job.status = 'cancelled';
+        return;
+      }
       job.status = 'error';
       job.error = sanitizeTelegramError(err, adminConfig.telegram.botToken);
       appendAppLog('error', 'download', `Telegram upload job failed (${job.title}): ${job.error}`);
@@ -9560,7 +9628,25 @@ async function startServer() {
           );
 
           await new Promise<void>((resolve, reject) => {
+            if (job.cancelled) {
+              reject(new Error('Download cancelled'));
+              return;
+            }
             const child = spawn(runner.cmd, [...runner.baseArgs, ...finalArgs], { shell: false, env });
+            const unregisterCancel = registerJobCancel(job, () => {
+              if (child.exitCode === null && !child.killed) {
+                try {
+                  child.kill('SIGTERM');
+                } catch {}
+                setTimeout(() => {
+                  if (child.exitCode === null) {
+                    try {
+                      child.kill('SIGKILL');
+                    } catch {}
+                  }
+                }, 300).unref();
+              }
+            });
             let stderr = '';
             child.stdout.on('data', (data) => {
               const output = data.toString();
@@ -9574,6 +9660,11 @@ async function startServer() {
               stderr += data.toString();
             });
             child.on('close', async (code) => {
+              unregisterCancel();
+              if (job.cancelled) {
+                reject(new Error('Download cancelled'));
+                return;
+              }
               if (code === 0) {
                 await finalizeJobFile(job);
                 resolve();
@@ -9585,7 +9676,10 @@ async function startServer() {
                 reject(err);
               }
             });
-            child.on('error', reject);
+            child.on('error', (err) => {
+              unregisterCancel();
+              reject(err);
+            });
           });
           return;
         } catch (ytdlpErr) {
@@ -9986,6 +10080,11 @@ async function startServer() {
 
       await finalizeJobFile(job);
     } catch (err) {
+      if (job.cancelled) {
+        job.status = 'cancelled';
+        fs.promises.rm(job.filePath, { force: true }).catch(() => {});
+        return;
+      }
       job.status = 'error';
       job.error = err instanceof Error ? err.message : 'Download failed';
       appendAppLog('error', 'download', `Download job failed (${job.title}): ${job.error}`);
@@ -10122,6 +10221,25 @@ async function startServer() {
     });
   });
 
+  app.post('/api/media/jobs/:jobId/cancel', (req: Request, res: Response) => {
+    const jobId = typeof req.params.jobId === 'string' ? req.params.jobId : '';
+    if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
+      res.status(400).json({ error: 'Invalid job identifier.' });
+      return;
+    }
+    const job = downloadJobs.get(jobId);
+    if (!job) {
+      res.status(404).json({ error: 'Download job not found or expired.' });
+      return;
+    }
+    if (job.status === 'ready') {
+      res.status(409).json({ error: 'Download already completed.' });
+      return;
+    }
+    cancelDownloadJob(job);
+    res.json({ ok: true, status: job.status });
+  });
+
   app.get('/api/media/files/:jobId', async (req: Request, res: Response) => {
     const jobId = typeof req.params.jobId === 'string' ? req.params.jobId : '';
     if (!/^[0-9a-f-]{36}$/i.test(jobId)) {
@@ -10234,8 +10352,13 @@ async function startServer() {
     inputs: StreamInputSpec[],
     baseEnv: NodeJS.ProcessEnv,
     req: Request,
-    res: Response
+    res: Response,
+    startSeconds = 0
   ): Promise<void> {
+    const safeStart =
+      Number.isFinite(startSeconds) && startSeconds > 0 && startSeconds < 86400
+        ? Math.floor(startSeconds * 100) / 100
+        : 0;
     const ffArgs: string[] = [];
     for (const inp of inputs) {
       const proto = (inp.protocol || '').toLowerCase();
@@ -10263,6 +10386,9 @@ async function startServer() {
       if (headerLines.length > 0) {
         ffArgs.push('-headers', headerLines.join(''));
       }
+      if (safeStart > 0) {
+        ffArgs.push('-ss', safeStart.toFixed(2), '-noaccurate_seek');
+      }
       ffArgs.push('-i', inp.url);
     }
 
@@ -10283,6 +10409,7 @@ async function startServer() {
       'aac',
       '-b:a',
       '160k',
+      ...(safeStart > 0 ? ['-avoid_negative_ts', 'make_zero'] : []),
       '-movflags',
       'frag_keyframe+empty_moov+default_base_moof',
       '-f',
@@ -10389,6 +10516,11 @@ async function startServer() {
     const quality = rawQuality === 'audio' ? '360p' : rawQuality;
     const audioFormatId = validateAudioFormatId(req.query.audioFormatId);
     const requestedJobId = typeof req.query.jobId === 'string' ? req.query.jobId.trim() : '';
+    const rawStart = typeof req.query.start === 'string' ? Number(req.query.start) : 0;
+    const startSeconds =
+      Number.isFinite(rawStart) && rawStart > 0 && rawStart < 86400
+        ? Math.floor(rawStart * 100) / 100
+        : 0;
 
     const parsed = await validatePublicUrl(rawUrl);
     if (!parsed) {
@@ -10398,15 +10530,17 @@ async function startServer() {
 
     // 0. If a matching prepared/ready file already exists in cache or Telegram, stream it directly with full Range seeking
     const matchingJob =
-      (requestedJobId && /^[0-9a-f-]{36}$/i.test(requestedJobId) ? downloadJobs.get(requestedJobId) : undefined) ||
-      Array.from(downloadJobs.values()).find(
-        (j) =>
-          j.status === 'ready' &&
-          j.ext === 'mp4' &&
-          j.url === parsed.toString() &&
-          j.quality === quality &&
-          (j.audioFormatId || '') === (audioFormatId || '')
-      );
+      startSeconds === 0
+        ? (requestedJobId && /^[0-9a-f-]{36}$/i.test(requestedJobId) ? downloadJobs.get(requestedJobId) : undefined) ||
+          Array.from(downloadJobs.values()).find(
+            (j) =>
+              j.status === 'ready' &&
+              j.ext === 'mp4' &&
+              j.url === parsed.toString() &&
+              j.quality === quality &&
+              (j.audioFormatId || '') === (audioFormatId || '')
+          )
+        : undefined;
     if (matchingJob && matchingJob.status === 'ready' && matchingJob.ext === 'mp4') {
       if (matchingJob.telegramFileId) {
         const stored = lookupTelegramFile(matchingJob.telegramFileId);
@@ -10642,6 +10776,10 @@ async function startServer() {
 
         if (resolvedEntry.mode === 'proxy' && resolvedEntry.inputs[0]) {
           try {
+            if (startSeconds > 0) {
+              await spawnFfmpegStream([resolvedEntry.inputs[0]], env, req, res, startSeconds);
+              return;
+            }
             await proxyRemoteMediaWithRange(resolvedEntry.inputs[0].url, req, res, resolvedEntry.inputs[0].headers);
             return;
           } catch (proxyErr) {
@@ -10652,7 +10790,7 @@ async function startServer() {
         }
         if (resolvedEntry.mode === 'ffmpeg' && resolvedEntry.inputs.length > 0) {
           try {
-            await spawnFfmpegStream(resolvedEntry.inputs, env, req, res);
+            await spawnFfmpegStream(resolvedEntry.inputs, env, req, res, startSeconds);
             return;
           } catch (ffErr) {
             streamResolveCache.delete(cacheKey);
@@ -10714,6 +10852,16 @@ async function startServer() {
           .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a))[0];
 
         if (!customAudio && muxed?.url && (targetH <= 360 || getVideoFormatResolution(muxed) >= Math.min(targetH, 720))) {
+          if (startSeconds > 0) {
+            await spawnFfmpegStream(
+              [{ url: muxed.url, headers: buildUpstreamHeaders(), ext: muxed.container || 'mp4' }],
+              process.env,
+              req,
+              res,
+              startSeconds
+            );
+            return;
+          }
           await proxyRemoteMediaWithRange(muxed.url, req, res);
           return;
         }
@@ -10737,11 +10885,22 @@ async function startServer() {
             ],
             process.env,
             req,
-            res
+            res,
+            startSeconds
           );
           return;
         }
         if (muxed?.url) {
+          if (startSeconds > 0) {
+            await spawnFfmpegStream(
+              [{ url: muxed.url, headers: buildUpstreamHeaders(), ext: muxed.container || 'mp4' }],
+              process.env,
+              req,
+              res,
+              startSeconds
+            );
+            return;
+          }
           await proxyRemoteMediaWithRange(muxed.url, req, res);
           return;
         }

@@ -24,6 +24,7 @@ import {
   X,
 } from 'lucide-react';
 import type { TranslationDict } from '../i18n';
+import { CustomVideoPlayer } from './CustomVideoPlayer';
 
 export interface MediaAudioTrack {
   formatId: string;
@@ -276,10 +277,13 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   const [useYoutubeEmbed, setUseYoutubeEmbed] = useState(false);
   const [embedYoutubeId, setEmbedYoutubeId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const resumeTimeRef = useRef<number>(0);
+  const playbackPositionRef = useRef<number>(0);
+  const [resumeStartSeconds, setResumeStartSeconds] = useState<number>(0);
 
   const lastInspectedRef = useRef<string>('');
   const pollTimerRef = useRef<number | null>(null);
+  const activeJobIdRef = useRef<string | null>(null);
+  const [cancellingJob, setCancellingJob] = useState(false);
 
   const [adminLogs, setAdminLogs] = useState<AdminLogEntry[]>([]);
   const [adminLogLevel, setAdminLogLevel] = useState<'all' | 'info' | 'warn' | 'error'>('all');
@@ -458,7 +462,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     setSelectedSubtitle(null);
     setSubFilter('');
     setShowAutoSubs(false);
-    resumeTimeRef.current = 0;
+    playbackPositionRef.current = 0;
+    setResumeStartSeconds(0);
 
     try {
       const res = await fetch(`${apiBase}/api/media/inspect`, {
@@ -566,8 +571,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   };
 
   const handleQualitySelect = (q: string) => {
-    if (videoRef.current && showPlayer) {
-      resumeTimeRef.current = videoRef.current.currentTime || 0;
+    if (showPlayer) {
+      const pos = Math.max(playbackPositionRef.current || 0, videoRef.current?.currentTime || 0);
+      setResumeStartSeconds(Math.floor(pos));
     }
     setPlayerError(null);
     setUseYoutubeEmbed(false);
@@ -581,8 +587,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   };
 
   const handleAudioTrackSelect = (formatId: string) => {
-    if (videoRef.current && showPlayer) {
-      resumeTimeRef.current = videoRef.current.currentTime || 0;
+    if (showPlayer) {
+      const pos = Math.max(playbackPositionRef.current || 0, videoRef.current?.currentTime || 0);
+      setResumeStartSeconds(Math.floor(pos));
     }
     setPlayerError(null);
     setUseYoutubeEmbed(false);
@@ -637,6 +644,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       }
 
       const jobId = data.jobId;
+      activeJobIdRef.current = jobId;
       pollTimerRef.current = window.setInterval(async () => {
         try {
           const statusRes = await fetch(`${apiBase}/api/media/jobs/${encodeURIComponent(jobId)}`);
@@ -644,7 +652,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             throw new Error('Status failed');
           }
           const job = (await statusRes.json()) as {
-            status: 'downloading' | 'processing' | 'ready' | 'error';
+            status: 'downloading' | 'processing' | 'ready' | 'cancelled' | 'error';
             progress: number;
             downloadedBytes: number;
             totalBytes: number | null;
@@ -662,6 +670,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             setJobStage('downloading');
           } else if (job.status === 'ready') {
             stopPolling();
+            activeJobIdRef.current = null;
             const finalSize = job.totalBytes || job.downloadedBytes || 0;
             const completed: ReadyJob = {
               jobId,
@@ -690,21 +699,52 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
               thumbnail: thumb,
               savedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             });
+          } else if (job.status === 'cancelled') {
+            stopPolling();
+            activeJobIdRef.current = null;
+            setCancellingJob(false);
+            setJobStage('idle');
+            setJobProgress(0);
+            setJobBytes(0);
           } else if (job.status === 'error') {
             stopPolling();
+            activeJobIdRef.current = null;
             setJobStage('idle');
             setErrorMsg(job.error || t.downloadFailed);
           }
         } catch {
           stopPolling();
+          activeJobIdRef.current = null;
           setJobStage('idle');
           setErrorMsg(t.downloadFailed);
         }
       }, 350);
     } catch {
+      activeJobIdRef.current = null;
       setJobStage('idle');
       setErrorMsg(t.downloadFailed);
     }
+  };
+
+  const cancelActiveDownload = async () => {
+    const currentJobId = activeJobIdRef.current;
+    setCancellingJob(true);
+    stopPolling();
+    activeJobIdRef.current = null;
+    if (currentJobId) {
+      try {
+        await fetch(`${apiBase}/api/media/jobs/${encodeURIComponent(currentJobId)}/cancel`, {
+          method: 'POST',
+        });
+      } catch {
+        // Reset UI cleanly even if request fails
+      }
+    }
+    setCancellingJob(false);
+    setJobStage('idle');
+    setJobProgress(0);
+    setJobBytes(0);
+    setReadyJob(null);
   };
 
   const isTelegramReady = Boolean(readyJob?.fileId);
@@ -1032,7 +1072,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
-              className="rounded-2xl p-4 sm:p-5 bg-zinc-50 dark:bg-[#0A0A0A] border border-black/15 dark:border-white/20 space-y-5"
+              className="rounded-2xl p-4 sm:p-5 backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] space-y-5"
             >
               <div className="flex items-start gap-4">
                 <button
@@ -1220,51 +1260,29 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                         }
                       />
                     ) : (
-                      <video
-                        ref={videoRef}
+                      <CustomVideoPlayer
                         key={`${media.url}|${effectiveStreamQuality}|${selectedAudioFormatId}|${playerRetryNonce}`}
                         src={streamSrc}
                         poster={media.thumbnail || undefined}
-                        controls
-                        playsInline
-                        autoPlay
+                        title={media.title}
+                        durationSeconds={media.durationSeconds}
+                        initialStartSeconds={resumeStartSeconds}
+                        isVertical={isVerticalVideo}
                         crossOrigin={selectedSubtitle ? 'anonymous' : undefined}
+                        selectedSubtitle={selectedSubtitle}
+                        apiBase={apiBase}
+                        mediaUrl={media.url}
                         onLoadedData={() => setPlayerError(null)}
                         onCanPlay={() => setPlayerError(null)}
-                        onLoadedMetadata={() => {
+                        onTimePositionChange={(sec) => {
+                          playbackPositionRef.current = sec;
+                        }}
+                        onResumeInit={(vid) => {
+                          videoRef.current = vid;
                           setPlayerError(null);
-                          if (videoRef.current && resumeTimeRef.current > 0) {
-                            try {
-                              videoRef.current.currentTime = resumeTimeRef.current;
-                            } catch {}
-                            resumeTimeRef.current = 0;
-                          }
-                          if (videoRef.current && selectedSubtitle && videoRef.current.textTracks[0]) {
-                            videoRef.current.textTracks[0].mode = 'showing';
-                          }
                         }}
                         onError={() => void handleVideoError()}
-                        className={
-                          isVerticalVideo
-                            ? 'w-full max-h-[72vh] bg-black object-contain'
-                            : 'w-full aspect-video bg-black'
-                        }
-                      >
-                        {selectedSubtitle && (
-                          <track
-                            key={`${selectedSubtitle.lang}-${selectedSubtitle.isAuto ? 'a' : 'm'}`}
-                            kind="subtitles"
-                            srcLang={selectedSubtitle.lang}
-                            label={selectedSubtitle.label}
-                            src={`${apiBase}/api/media/subtitle?url=${encodeURIComponent(
-                              media.url
-                            )}&lang=${encodeURIComponent(selectedSubtitle.lang)}&auto=${
-                              selectedSubtitle.isAuto ? '1' : '0'
-                            }`}
-                            default
-                          />
-                        )}
-                      </video>
+                      />
                     )}
                     {playerError && !useYoutubeEmbed && (
                       <div className="px-3 py-2.5 text-xs text-red-300 bg-red-950/60 border-t border-red-900/50 flex flex-wrap items-center justify-between gap-2">
@@ -1635,46 +1653,61 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     </span>
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    disabled={isBusy}
-                    onClick={() =>
-                      startAppDownload(
-                        media.url,
-                        media.title,
-                        effectiveDownloadQuality,
-                        media.thumbnail,
-                        media.author,
-                        selectedAudioFormatId || undefined
-                      )
-                    }
-                    className={`w-full min-h-[54px] px-6 rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2.5 transition active:scale-[0.98] disabled:opacity-80 ${
-                      providerGlow === 'red'
-                        ? 'bg-red-600 text-white shadow-[0_0_28px_rgba(220,38,38,0.45)] hover:bg-red-500'
-                        : providerGlow === 'instagram'
-                          ? 'bg-gradient-to-r from-[#f58529] via-[#dd2a7b] to-[#8134af] text-white shadow-[0_0_28px_rgba(221,42,123,0.45)] hover:brightness-110'
-                          : providerGlow === 'tiktok'
-                            ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee] text-black dark:text-white shadow-[0_0_28px_rgba(37,244,238,0.45)] hover:brightness-110'
-                            : providerGlow === 'x'
-                              ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2] text-white shadow-[0_0_28px_rgba(29,161,242,0.45)] hover:brightness-110'
-                              : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.3)] hover:opacity-90'
-                    }`}
-                  >
-                    {isBusy ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        <span className="font-mono tabular-nums">
-                          {jobStage === 'processing' ? t.processingMedia : t.downloadingToApp}{' '}
-                          {jobProgress}%{jobBytes > 0 ? ` · ${formatBytes(jobBytes)}` : ''}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        <CloudDownload className="w-5 h-5" />
-                        <span>{t.prepareDownload}</span>
-                      </>
+                  <div className="flex items-stretch gap-2">
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() =>
+                        startAppDownload(
+                          media.url,
+                          media.title,
+                          effectiveDownloadQuality,
+                          media.thumbnail,
+                          media.author,
+                          selectedAudioFormatId || undefined
+                        )
+                      }
+                      className={`flex-1 min-w-0 min-h-[54px] px-5 rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2.5 transition active:scale-[0.98] disabled:opacity-80 ${
+                        providerGlow === 'red'
+                          ? 'bg-red-600 text-white shadow-[0_0_28px_rgba(220,38,38,0.45)] hover:bg-red-500'
+                          : providerGlow === 'instagram'
+                            ? 'bg-gradient-to-r from-[#f58529] via-[#dd2a7b] to-[#8134af] text-white shadow-[0_0_28px_rgba(221,42,123,0.45)] hover:brightness-110'
+                            : providerGlow === 'tiktok'
+                              ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee] text-black dark:text-white shadow-[0_0_28px_rgba(37,244,238,0.45)] hover:brightness-110'
+                              : providerGlow === 'x'
+                                ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2] text-white shadow-[0_0_28px_rgba(29,161,242,0.45)] hover:brightness-110'
+                                : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.3)] hover:opacity-90'
+                      }`}
+                    >
+                      {isBusy ? (
+                        <>
+                          <Loader2 className="w-5 h-5 animate-spin shrink-0" />
+                          <span className="font-mono tabular-nums truncate">
+                            {jobStage === 'processing' ? t.processingMedia : t.downloadingToApp}{' '}
+                            {jobProgress}%{jobBytes > 0 ? ` · ${formatBytes(jobBytes)}` : ''}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <CloudDownload className="w-5 h-5 shrink-0" />
+                          <span>{t.prepareDownload}</span>
+                        </>
+                      )}
+                    </button>
+
+                    {isBusy && (
+                      <button
+                        type="button"
+                        disabled={cancellingJob}
+                        onClick={() => void cancelActiveDownload()}
+                        aria-label={t.cancelDownload}
+                        className="min-h-[54px] px-4 rounded-2xl border border-red-500/35 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 font-semibold text-xs sm:text-sm inline-flex items-center justify-center gap-1.5 shrink-0 transition active:scale-[0.98] disabled:opacity-60"
+                      >
+                        <X className="w-4 h-4 shrink-0" />
+                        <span>{t.cancelDownload}</span>
+                      </button>
                     )}
-                  </button>
+                  </div>
                 )}
 
                 {jobStage === 'ready' && readyJob && (
