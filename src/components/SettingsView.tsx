@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  Check,
   CheckCircle2,
   ChevronRight,
   ChevronLeft,
@@ -16,6 +17,7 @@ import {
   LogOut,
   Megaphone,
   Moon,
+  Pencil,
   Play,
   Plus,
   Send,
@@ -27,6 +29,7 @@ import {
   Trash2,
   Upload,
   User,
+  X,
 } from 'lucide-react';
 import type { AppLanguage, AppTheme, TranslationDict } from '../i18n';
 import type { AuthUser } from './AuthModal';
@@ -47,6 +50,7 @@ interface SettingsViewProps {
   authToken: string | null;
   onOpenAuth: () => void;
   onSignOut: () => void;
+  onUpdateDisplayName: (nextName: string) => Promise<{ ok: boolean; error?: string }>;
   apiBase: string;
   announcements: AnnouncementItem[];
   onAnnouncementsChange: (items: AnnouncementItem[]) => void;
@@ -75,6 +79,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   authToken,
   onOpenAuth,
   onSignOut,
+  onUpdateDisplayName,
   apiBase,
   announcements,
   onAnnouncementsChange,
@@ -82,6 +87,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const [clearedFeedback, setClearedFeedback] = useState(false);
+
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameFeedback, setNameFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const [adminPage, setAdminPage] = useState<'main' | 'xray' | 'pot' | 'telegram' | 'announcements'>('main');
   const [announcementTitle, setAnnouncementTitle] = useState('');
@@ -1205,6 +1215,51 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setAnnouncementMessage({ type: 'error', text: t.downloadFailed });
     } finally {
       setAnnouncementBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    setEditingName(false);
+    setNameFeedback(null);
+  }, [user?.id]);
+
+  const startEditingName = () => {
+    if (!user) return;
+    setNameDraft(user.displayName);
+    setNameFeedback(null);
+    setEditingName(true);
+  };
+
+  const cancelEditingName = () => {
+    setEditingName(false);
+    setNameDraft('');
+    setNameFeedback(null);
+  };
+
+  const submitNameChange = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!user || nameSaving) return;
+    const trimmed = nameDraft.replace(/\s+/g, ' ').trim().slice(0, 48);
+    if (!trimmed) {
+      setNameFeedback({ type: 'error', text: t.displayNameRequiredError });
+      return;
+    }
+    if (trimmed === user.displayName) {
+      setEditingName(false);
+      return;
+    }
+    setNameSaving(true);
+    setNameFeedback(null);
+    const result = await onUpdateDisplayName(trimmed);
+    setNameSaving(false);
+    if (result.ok) {
+      setEditingName(false);
+      setNameFeedback({ type: 'success', text: t.displayNameSaved });
+      setTimeout(() => {
+        setNameFeedback((prev) => (prev?.type === 'success' ? null : prev));
+      }, 2400);
+    } else {
+      setNameFeedback({ type: 'error', text: result.error || t.displayNameUpdateFailed });
     }
   };
 
@@ -2441,14 +2496,100 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {user ? user.displayName.charAt(0).toUpperCase() : <User className="w-5 h-5" />}
             </div>
             <div className="min-w-0 flex-1">
-              <div className="text-base font-semibold text-black dark:text-white truncate">
+              <div className="text-base font-semibold text-black dark:text-white truncate" dir="auto">
                 {user ? user.displayName : t.guestName}
               </div>
               <div className="text-xs text-zinc-500 dark:text-zinc-400 truncate mt-0.5">
                 {user ? `${t.signedInAs} · ${user.email}` : t.guestSubtitle}
               </div>
             </div>
+            {user && !editingName && (
+              <button
+                type="button"
+                onClick={startEditingName}
+                aria-label={t.editDisplayName}
+                title={t.editDisplayName}
+                className="min-h-[44px] px-3 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition whitespace-nowrap shrink-0"
+              >
+                <Pencil className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{t.editDisplayName}</span>
+              </button>
+            )}
           </div>
+
+          {user && editingName && (
+            <>
+              <div className="h-px bg-black/10 dark:bg-white/10 ms-16" />
+              <form onSubmit={submitNameChange} className="p-4 space-y-2.5 bg-black/[0.02] dark:bg-white/[0.02]">
+                <label
+                  htmlFor="account-display-name-input"
+                  className="block text-xs font-medium text-zinc-600 dark:text-zinc-400"
+                >
+                  {t.displayNameLabel}
+                </label>
+                <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+                  <input
+                    id="account-display-name-input"
+                    type="text"
+                    dir="auto"
+                    autoFocus
+                    maxLength={48}
+                    value={nameDraft}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.preventDefault();
+                        cancelEditingName();
+                      }
+                    }}
+                    placeholder={t.displayNamePlaceholder}
+                    disabled={nameSaving}
+                    className="flex-1 min-w-0 w-full sm:w-auto min-h-[44px] px-3.5 rounded-xl bg-white dark:bg-black border border-black/15 dark:border-white/20 text-sm text-black dark:text-white placeholder:text-zinc-400 focus:outline-none focus:border-black dark:focus:border-white"
+                  />
+                  <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto">
+                    <button
+                      type="submit"
+                      disabled={nameSaving || !nameDraft.trim()}
+                      className="flex-1 sm:flex-initial min-h-[44px] px-4 rounded-xl bg-black text-white dark:bg-white dark:text-black text-xs font-semibold inline-flex items-center justify-center gap-1.5 hover:opacity-90 active:scale-95 transition disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {nameSaving ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                      ) : (
+                        <Check className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                      <span>{t.saveNameBtn}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelEditingName}
+                      disabled={nameSaving}
+                      className="flex-1 sm:flex-initial min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-zinc-700 dark:text-zinc-300 text-xs font-semibold inline-flex items-center justify-center gap-1.5 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition disabled:opacity-50 whitespace-nowrap"
+                    >
+                      <X className="w-3.5 h-3.5 shrink-0" />
+                      <span>{t.cancelBtn}</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </>
+          )}
+
+          {user && nameFeedback && (
+            <div
+              className={`mx-4 mb-3 rounded-xl px-3.5 py-2 text-xs flex items-center gap-2 ${
+                nameFeedback.type === 'success'
+                  ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25'
+                  : 'bg-red-500/10 text-red-700 dark:text-red-300 border border-red-500/25'
+              }`}
+            >
+              {nameFeedback.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 shrink-0" />
+              )}
+              <span className="min-w-0 break-words">{nameFeedback.text}</span>
+            </div>
+          )}
 
           <div className="h-px bg-black/10 dark:bg-white/10 ms-16" />
 
@@ -2597,47 +2738,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
-      {/* Section 4: App */}
-      <section aria-labelledby="settings-engine">
-        <h2
-          id="settings-engine"
-          className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
-        >
-          {t.sectionAppServer}
-        </h2>
-        <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
-          {!isInstalled && (isInstallable || isIOS) && (
-            <>
-              <button
-                type="button"
-                onClick={() => (isInstallable ? install() : setShowIOSGuide(true))}
-                className="w-full min-h-[52px] px-4 flex items-center justify-between gap-3 text-start hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-              >
-                <span className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
-                  <Smartphone className="w-4 h-4" />
-                  <span>{t.installAppLabel}</span>
-                </span>
-                <span className="flex items-center gap-1.5 text-xs font-semibold text-black dark:text-white">
-                  <Download className="w-3.5 h-3.5" />
-                  <span>{isInstallable ? t.installAppAction : t.installIOSAction}</span>
-                </span>
-              </button>
-              <div className="h-px bg-black/10 dark:bg-white/10 ms-11" />
-            </>
-          )}
-
-          <div className="min-h-[52px] px-4 flex items-center justify-between gap-3">
-            <span className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
-              <ShieldCheck className="w-4 h-4" />
-              <span>{t.aboutLabel}</span>
-            </span>
-            <span className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-              <HardDrive className="w-3.5 h-3.5" />
-              <span>{t.aboutValue}</span>
-            </span>
+      {/* Section 4: App (only shown when installable) */}
+      {!isInstalled && (isInstallable || isIOS) && (
+        <section aria-labelledby="settings-engine">
+          <h2
+            id="settings-engine"
+            className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400"
+          >
+            {t.sectionAppServer}
+          </h2>
+          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => (isInstallable ? install() : setShowIOSGuide(true))}
+              className="w-full min-h-[52px] px-4 flex items-center justify-between gap-3 text-start hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+            >
+              <span className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
+                <Smartphone className="w-4 h-4" />
+                <span>{t.installAppLabel}</span>
+              </span>
+              <span className="flex items-center gap-1.5 text-xs font-semibold text-black dark:text-white">
+                <Download className="w-3.5 h-3.5" />
+                <span>{isInstallable ? t.installAppAction : t.installIOSAction}</span>
+              </span>
+            </button>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Admin-Only Navigation Buttons (Hidden completely from guests and standard users; open full pages, never popups) */}
       {isAdmin && (

@@ -531,6 +531,14 @@ function updateUserPreferencesInDb(
   `).run(prefs.theme, prefs.language, normalizeQualityValue(prefs.defaultQuality), Date.now(), userId);
 }
 
+function updateUserDisplayNameInDb(userId: string, displayName: string): void {
+  db.prepare(`
+    UPDATE users
+    SET display_name = ?, updated_at = ?
+    WHERE id = ?
+  `).run(displayName, Date.now(), userId);
+}
+
 function getFirstAdminPreferences(): { youtubeCookies?: string; youtubePoToken?: string } {
   try {
     if (fs.existsSync(USERS_FILE)) {
@@ -1327,18 +1335,27 @@ async function uploadStreamToTelegramMtproto(
   client: TelegramClient,
   readable: Readable,
   fileName: string,
-  onProgress?: (uploadedBytes: number) => void
+  onProgress?: (uploadedBytes: number) => void,
+  options?: { knownTotalBytes?: number | null; onReadProgress?: (readBytes: number) => void }
 ): Promise<{ inputFile: Api.InputFile | Api.InputFileBig; sizeBytes: number }> {
   const PART_SIZE = 512 * 1024;
   const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB (20 parts of 512 KB)
-  const WORKERS = 4;
+  const WORKERS = 8;
 
   const rawId = crypto.randomBytes(8).readBigInt64LE(0);
   const fileId = bigInt(rawId.toString());
+  const dcId = client.session.dcId;
 
-  await client.getSender(client.session.dcId);
-
+  let cachedSender = await client.getSender(dcId);
   let uploadedBytes = 0;
+
+  const getActiveSender = async () => {
+    if (!cachedSender || !cachedSender.isConnected()) {
+      cachedSender = await client.getSender(dcId);
+    }
+    return cachedSender;
+  };
+
   const sendPart = async (
     isLarge: boolean,
     partIndex: number,
@@ -1348,7 +1365,7 @@ async function uploadStreamToTelegramMtproto(
     for (let attempt = 0; attempt < 6; attempt += 1) {
       let sender: Awaited<ReturnType<TelegramClient['getSender']>> | undefined;
       try {
-        sender = await client.getSender(client.session.dcId);
+        sender = await getActiveSender();
         await sender.send(
           isLarge
             ? new Api.upload.SaveBigFilePart({
@@ -1373,7 +1390,8 @@ async function uploadStreamToTelegramMtproto(
           continue;
         }
         if (sender && !sender.isConnected()) {
-          await new Promise((r) => setTimeout(r, 1000));
+          cachedSender = await client.getSender(dcId);
+          await new Promise((r) => setTimeout(r, 500));
           continue;
         }
         if (attempt < 3 && /timeout|ECONNRESET|EPIPE|disconnect/i.test(String(errAny?.message || ''))) {
@@ -1401,12 +1419,23 @@ async function uploadStreamToTelegramMtproto(
   let accChunks: Buffer[] = [];
   let accLen = 0;
   const takeExact = (n: number): Buffer => {
+    if (accChunks.length === 1 && accChunks[0].length === n) {
+      const exact = accChunks[0];
+      accChunks = [];
+      accLen = 0;
+      return exact;
+    }
     const joined = accChunks.length === 1 ? accChunks[0] : Buffer.concat(accChunks, accLen);
     const slice = joined.subarray(0, n);
     const rest = joined.subarray(n);
-    accChunks = rest.length > 0 ? [rest] : [];
+    if (accChunks.length === 1) {
+      accChunks = rest.length > 0 ? [rest] : [];
+      accLen = rest.length;
+      return Buffer.from(slice);
+    }
+    accChunks = rest.length > 0 ? [Buffer.from(rest)] : [];
     accLen = rest.length;
-    return Buffer.from(slice);
+    return slice;
   };
   const drainRemaining = (): Buffer | null => {
     if (accLen === 0) return null;
@@ -1417,7 +1446,9 @@ async function uploadStreamToTelegramMtproto(
   };
 
   let totalBytes = 0;
-  let streamingBig = false;
+  // When exact Content-Length is known to exceed 10 MB, start streaming SaveBigFilePart from part 0
+  // without buffering the first 10 MB in memory.
+  let streamingBig = Boolean(options?.knownTotalBytes && options.knownTotalBytes > LARGE_FILE_THRESHOLD);
   let nextPartIndex = 0;
   const initialParts: Buffer[] = [];
   let heldBigChunk: Buffer | null = null;
@@ -1441,6 +1472,7 @@ async function uploadStreamToTelegramMtproto(
       const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
       if (chunk.length === 0) continue;
       totalBytes += chunk.length;
+      if (options?.onReadProgress) options.onReadProgress(totalBytes);
       accChunks.push(chunk);
       accLen += chunk.length;
 
@@ -1671,7 +1703,7 @@ async function uploadStreamJobToTelegram(
   job: DownloadJob,
   readable: Readable,
   knownTotalBytes: number | null,
-  options?: { ext?: DownloadFileExt; mimeType?: string; fileName?: string }
+  options?: { ext?: DownloadFileExt; mimeType?: string; fileName?: string; estimatedTotalBytes?: number | null }
 ): Promise<void> {
   const cfg = adminConfig.telegram;
   if (!telegramEnabledForUploads(cfg)) {
@@ -1700,6 +1732,8 @@ async function uploadStreamJobToTelegram(
   job.fileName = fileName;
   if (knownTotalBytes && knownTotalBytes > 0) {
     job.totalBytes = knownTotalBytes;
+  } else if (options?.estimatedTotalBytes && options.estimatedTotalBytes > 0) {
+    job.totalBytes = options.estimatedTotalBytes;
   }
 
   const caption = `${job.title}\n${job.quality.toUpperCase()} · grove save`;
@@ -1707,11 +1741,25 @@ async function uploadStreamJobToTelegram(
   job.status = 'downloading';
 
   const reportProgress = (bytes: number) => {
-    job.downloadedBytes = bytes;
+    job.downloadedBytes = Math.max(job.downloadedBytes, bytes);
     if (job.totalBytes && job.totalBytes > 0) {
-      job.progress = Math.min(97, Math.max(5, Math.floor((bytes / job.totalBytes) * 97)));
+      const pct = Math.min(97, Math.max(5, Math.floor((bytes / job.totalBytes) * 97)));
+      job.progress = Math.max(job.progress, pct);
     } else {
-      job.progress = Math.min(94, 5 + Math.floor(Math.log2(1 + bytes / (512 * 1024)) * 11));
+      const pct = Math.min(94, 5 + Math.floor(Math.log2(1 + bytes / (512 * 1024)) * 11));
+      job.progress = Math.max(job.progress, pct);
+    }
+  };
+
+  const reportReadProgress = (readBytes: number) => {
+    job.downloadedBytes = Math.max(job.downloadedBytes, readBytes);
+    if (job.totalBytes && job.totalBytes > 0) {
+      // Reserve upper half of bar for actual MTProto send when buffering <= 10 MB
+      const pct = Math.min(48, Math.max(5, Math.floor((readBytes / job.totalBytes) * 48)));
+      job.progress = Math.max(job.progress, pct);
+    } else {
+      const pct = Math.min(45, 5 + Math.floor(Math.log2(1 + readBytes / (512 * 1024)) * 6));
+      job.progress = Math.max(job.progress, pct);
     }
   };
 
@@ -1720,6 +1768,7 @@ async function uploadStreamJobToTelegram(
     let messageId = 0;
     let botFileId: string | null = null;
     let sizeBytes = 0;
+    let sentMessage: any = null;
 
     if (telegramUsesBotHttpApi(cfg)) {
       const result = await uploadStreamToTelegramBotApi(
@@ -1737,7 +1786,10 @@ async function uploadStreamJobToTelegram(
       sizeBytes = result.sizeBytes;
     } else {
       const client = await getTelegramClient();
-      const uploadedStream = await uploadStreamToTelegramMtproto(client, readable, fileName, reportProgress);
+      const uploadedStream = await uploadStreamToTelegramMtproto(client, readable, fileName, reportProgress, {
+        knownTotalBytes,
+        onReadProgress: reportReadProgress,
+      });
       job.status = 'processing';
       job.progress = 98;
       const sent = (await client.sendFile(cfg.channel, {
@@ -1746,18 +1798,29 @@ async function uploadStreamJobToTelegram(
         forceDocument: true,
         supportsStreaming: false,
         attributes: [new Api.DocumentAttributeFilename({ fileName })],
-      })) as { id: number };
+      })) as { id: number; peerId?: unknown; media?: unknown };
+      sentMessage = sent;
       messageId = sent.id;
       sizeBytes = uploadedStream.sizeBytes;
 
-      try {
-        const inputPeer = await client.getInputEntity(cfg.channel);
-        chatId = tgUtils.getPeerId(inputPeer as never);
-      } catch {
-        chatId = cfg.channel;
+      if (sent.peerId) {
+        try {
+          chatId = tgUtils.getPeerId(sent.peerId as never);
+        } catch {
+          // Fall back to resolving channel below
+        }
+      }
+      if (!chatId || chatId === cfg.channel) {
+        try {
+          const inputPeer = await client.getInputEntity(cfg.channel);
+          chatId = tgUtils.getPeerId(inputPeer as never);
+        } catch {
+          chatId = cfg.channel;
+        }
       }
     }
 
+    const resolvedChatId = chatId || cfg.channel;
     const recordId = recordTelegramFile({
       userId: job.ownerUserId ?? null,
       jobId: job.id,
@@ -1765,7 +1828,7 @@ async function uploadStreamJobToTelegram(
       title: job.title,
       author: job.author || 'grove save',
       quality: job.quality,
-      chatId: chatId || cfg.channel,
+      chatId: resolvedChatId,
       messageId,
       botFileId,
       fileName,
@@ -1773,9 +1836,26 @@ async function uploadStreamJobToTelegram(
       sizeBytes,
     });
 
+    if (sentMessage) {
+      try {
+        const loc = telegramFileLocation(sentMessage);
+        setBoundedCache(
+          telegramResolvedFileCache,
+          `${recordId}:${resolvedChatId}:${messageId}`,
+          {
+            value: { message: sentMessage, dcId: loc.dcId, location: loc.location, size: loc.size || sizeBytes },
+            expiresAt: Date.now() + TELEGRAM_RESOLVED_CACHE_TTL_MS,
+          },
+          200
+        );
+      } catch {
+        // Cache warm-up is best-effort only
+      }
+    }
+
     job.telegramFileId = recordId;
     job.telegramMessageId = messageId;
-    job.telegramChatId = chatId || cfg.channel;
+    job.telegramChatId = resolvedChatId;
     job.telegramUploadError = undefined;
     job.totalBytes = sizeBytes;
     job.downloadedBytes = sizeBytes;
@@ -1866,16 +1946,46 @@ function telegramFileLocation(message: any): { dcId: number; location: any; size
   return { dcId, location: info.location, size };
 }
 
-async function resolveTelegramFile(client: TelegramClient, row: TelegramFileRow): Promise<ResolvedTelegramFile> {
-  // File references expire, so the message is re-fetched on every request
-  // instead of persisting the reference bytes in the database.
+const TELEGRAM_RESOLVED_CACHE_TTL_MS = 45 * 1000;
+const telegramResolvedFileCache = new Map<string, { value: ResolvedTelegramFile; expiresAt: number }>();
+
+async function resolveTelegramFile(
+  client: TelegramClient,
+  row: TelegramFileRow,
+  forceRefresh = false
+): Promise<ResolvedTelegramFile> {
+  const cacheKey = `${row.id}:${row.chat_id}:${row.message_id}`;
+  if (!forceRefresh) {
+    const cached = telegramResolvedFileCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+    if (cached) telegramResolvedFileCache.delete(cacheKey);
+  } else {
+    telegramResolvedFileCache.delete(cacheKey);
+  }
+
+  // File references expire, so the message is refreshed when stale or absent.
   const messages = await client.getMessages(row.chat_id, { ids: row.message_id });
   const message = (Array.isArray(messages) ? messages[0] : undefined) as any;
   if (!message || message.className === 'MessageEmpty' || message.id === undefined) {
     throw new Error('The stored Telegram message no longer exists in the channel.');
   }
   const { dcId, location, size } = telegramFileLocation(message);
-  return { message, dcId, location, size: size || row.size_bytes };
+  const resolved: ResolvedTelegramFile = { message, dcId, location, size: size || row.size_bytes };
+  setBoundedCache(
+    telegramResolvedFileCache,
+    cacheKey,
+    { value: resolved, expiresAt: Date.now() + TELEGRAM_RESOLVED_CACHE_TTL_MS },
+    200
+  );
+  return resolved;
+}
+
+class TelegramCdnRedirectError extends Error {
+  constructor() {
+    super('CDN redirect requires iterDownload fallback');
+  }
 }
 
 /**
@@ -2065,20 +2175,36 @@ async function streamTelegramFile(
   };
   res.on('close', onClose);
 
-  const CHUNK = 256 * 1024;
+  const CHUNK = 512 * 1024;
+  const PREFETCH_WORKERS = 5;
 
-  // Streams [cursor, end] with the current file reference. Throws when Telegram
-  // drops the reference; the caller refreshes it and resumes from `cursor`.
+  // Streams [cursor, end] with pipelined 512 KB prefetch requests ordered into `res`.
+  // Falls back to `iterDownload` on CDN redirect, and refreshes file references on expiry.
   let cursor = start;
-  const pump = async (): Promise<void> => {
-    if (cursor > end) return;
+  const writeSliceToRes = async (slice: Buffer): Promise<void> => {
+    if (aborted) return;
+    if (!res.write(slice)) {
+      await new Promise<void>((done) => {
+        const release = () => {
+          res.off('drain', release);
+          res.off('close', release);
+          done();
+        };
+        res.once('drain', release);
+        res.once('close', release);
+      });
+    }
+  };
+
+  const pumpSequentialFallback = async (): Promise<void> => {
+    const fallbackChunk = 256 * 1024;
     const iterator = client.iterDownload({
       file: resolved.location,
       dcId: resolved.dcId,
       offset: bigInt(cursor),
       fileSize: bigInt(total),
-      requestSize: CHUNK,
-      limit: Math.ceil((end + 1 - cursor) / CHUNK),
+      requestSize: fallbackChunk,
+      limit: Math.ceil((end + 1 - cursor) / fallbackChunk),
     });
     for await (const chunk of iterator) {
       if (aborted || cursor > end) return;
@@ -2087,17 +2213,129 @@ async function streamTelegramFile(
       const slice = buf.length > room ? buf.subarray(0, room) : buf;
       if (slice.length === 0) break;
       cursor += slice.length;
-      if (!res.write(slice)) {
-        await new Promise<void>((done) => {
-          const release = () => {
-            res.off('drain', release);
-            res.off('close', release);
-            done();
-          };
-          res.once('drain', release);
-          res.once('close', release);
-        });
+      await writeSliceToRes(slice);
+    }
+  };
+
+  const pump = async (): Promise<void> => {
+    if (cursor > end) return;
+    const alignedStart = Math.floor(cursor / CHUNK) * CHUNK;
+    const lastAlignedIdx = Math.floor(end / CHUNK) - Math.floor(alignedStart / CHUNK);
+    const totalChunks = lastAlignedIdx + 1;
+
+    let currentDcId = resolved.dcId;
+    let cachedSender = await client.getSender(currentDcId);
+    const getDlSender = async () => {
+      if (!cachedSender || !cachedSender.isConnected()) {
+        cachedSender = await client.getSender(currentDcId);
       }
+      return cachedSender;
+    };
+
+    const fetchChunk = async (chunkOffset: number): Promise<Buffer> => {
+      let timedOutOnce = false;
+      for (let retry = 0; retry < 4; retry += 1) {
+        if (aborted) return Buffer.alloc(0);
+        try {
+          const sender = await getDlSender();
+          const result = await client.invokeWithSender(
+            new Api.upload.GetFile({
+              location: resolved.location,
+              offset: bigInt(chunkOffset),
+              limit: CHUNK,
+            }),
+            sender
+          );
+          if (result instanceof Api.upload.FileCdnRedirect) {
+            throw new TelegramCdnRedirectError();
+          }
+          const rawBytes = (result as { bytes?: Buffer | Uint8Array }).bytes;
+          if (!rawBytes) return Buffer.alloc(0);
+          return Buffer.isBuffer(rawBytes) ? rawBytes : Buffer.from(rawBytes);
+        } catch (err: unknown) {
+          if (err instanceof TelegramCdnRedirectError) throw err;
+          const errAny = err as { errorMessage?: string; message?: string; newDc?: number; seconds?: number };
+          const code = String(errAny?.errorMessage || errAny?.message || '');
+          if (typeof errAny?.newDc === 'number' && errAny.newDc > 0) {
+            currentDcId = errAny.newDc;
+            cachedSender = await client.getSender(currentDcId);
+            continue;
+          }
+          if (code === 'TIMEOUT') {
+            if (timedOutOnce) throw err;
+            timedOutOnce = true;
+            await new Promise((r) => setTimeout(r, 500));
+            continue;
+          }
+          const floodSeconds = errAny?.seconds;
+          if (typeof floodSeconds === 'number' && floodSeconds > 0) {
+            await new Promise((r) => setTimeout(r, (floodSeconds + 1) * 1000));
+            continue;
+          }
+          throw err;
+        }
+      }
+      throw new Error('Failed to fetch file chunk from Telegram.');
+    };
+
+    const inflight = new Map<number, Promise<Buffer>>();
+    let nextScheduleIdx = 0;
+    let nextWriteIdx = 0;
+    let eofReached = false;
+
+    const fillWindow = () => {
+      while (!aborted && !eofReached && nextScheduleIdx < totalChunks && nextScheduleIdx - nextWriteIdx < PREFETCH_WORKERS) {
+        const idx = nextScheduleIdx++;
+        const offset = alignedStart + idx * CHUNK;
+        const p = fetchChunk(offset);
+        // Prevent unhandled rejection noise if an earlier chunk fails first.
+        p.catch(() => {});
+        inflight.set(idx, p);
+      }
+    };
+
+    try {
+      while (!aborted && !eofReached && cursor <= end && nextWriteIdx < totalChunks) {
+        fillWindow();
+        const pending = inflight.get(nextWriteIdx);
+        if (!pending) break;
+        const buf = await pending;
+        inflight.delete(nextWriteIdx);
+
+        if (aborted || cursor > end) break;
+        if (buf.length === 0) {
+          eofReached = true;
+          break;
+        }
+
+        const chunkOffset = alignedStart + nextWriteIdx * CHUNK;
+        const skip = cursor - chunkOffset;
+        const avail = buf.length - skip;
+        if (avail <= 0) {
+          eofReached = true;
+          break;
+        }
+        const room = end + 1 - cursor;
+        const take = Math.min(avail, room);
+        const slice = skip === 0 && take === buf.length ? buf : buf.subarray(skip, skip + take);
+
+        cursor += slice.length;
+        nextWriteIdx += 1;
+        await writeSliceToRes(slice);
+
+        if (buf.length < CHUNK) {
+          eofReached = true;
+          break;
+        }
+      }
+    } catch (err) {
+      if (err instanceof TelegramCdnRedirectError && cursor === start) {
+        await Promise.allSettled(inflight.values());
+        await pumpSequentialFallback();
+        return;
+      }
+      await Promise.allSettled(inflight.values());
+      throw err;
     }
   };
 
@@ -2114,7 +2352,7 @@ async function streamTelegramFile(
         // File references expire mid-stream. Fetch a fresh one and continue from
         // the exact byte already sent, so the client never receives duplicates.
         try {
-          resolved = await resolveTelegramFile(client, row);
+          resolved = await resolveTelegramFile(client, row, true);
         } catch {
           break;
         }
@@ -2747,18 +2985,121 @@ async function validatePublicUrl(rawUrl: string): Promise<URL | null> {
 function extractYouTubeId(parsed: URL): string | null {
   const host = parsed.hostname.toLowerCase();
   if (host === 'youtu.be' || host.endsWith('.youtu.be')) {
-    const id = parsed.pathname.split('/').filter(Boolean)[0];
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    const id =
+      (parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live' || parts[0] === 'v' || parts[0] === 'vi') &&
+      parts[1]
+        ? parts[1]
+        : parts[0];
     return id && /^[a-zA-Z0-9_-]{6,15}$/.test(id) ? id : null;
   }
   if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
     const v = parsed.searchParams.get('v');
     if (v && /^[a-zA-Z0-9_-]{6,15}$/.test(v)) return v;
     const parts = parsed.pathname.split('/').filter(Boolean);
-    if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live') && parts[1]) {
+    if (
+      (parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live' || parts[0] === 'v' || parts[0] === 'vi') &&
+      parts[1]
+    ) {
       return /^[a-zA-Z0-9_-]{6,15}$/.test(parts[1]) ? parts[1] : null;
     }
   }
   return null;
+}
+
+function isYouTubeShortsUrl(parsed: URL): boolean {
+  const host = parsed.hostname.toLowerCase();
+  if (
+    !host.includes('youtube.com') &&
+    !host.includes('youtube-nocookie.com') &&
+    host !== 'youtu.be' &&
+    !host.endsWith('.youtu.be')
+  ) {
+    return false;
+  }
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  return parts[0] === 'shorts' && Boolean(parts[1]);
+}
+
+function getVideoFormatResolution(fmt: { width?: number | null; height?: number | null }): number {
+  const w = typeof fmt.width === 'number' && Number.isFinite(fmt.width) ? fmt.width : 0;
+  const h = typeof fmt.height === 'number' && Number.isFinite(fmt.height) ? fmt.height : 0;
+  if (w > 0 && h > 0) return Math.min(w, h);
+  return h || w || 0;
+}
+
+function buildYtDlpVideoFormatSelector(
+  targetH: number | string,
+  opts?: { audioFid?: string; isTikTok?: boolean; forStream?: boolean }
+): string {
+  const h = String(targetH);
+  const audioFid = opts?.audioFid;
+  if (audioFid) {
+    return [
+      `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+${audioFid}`,
+      `bestvideo[width<=${h}][aspect_ratio<1]+${audioFid}`,
+      `bestvideo[height<=${h}][vcodec^=avc]+${audioFid}`,
+      `bestvideo[height<=${h}]+${audioFid}`,
+      `best[width<=${h}][aspect_ratio<1]`,
+      `best[height<=${h}]`,
+      'best',
+    ].join('/');
+  }
+  if (opts?.isTikTok) {
+    return [
+      `best[width<=${h}][aspect_ratio<1][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]`,
+      `best[height<=${h}][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]`,
+      `best[width<=${h}][aspect_ratio<1][format_id!*=-watermarked]`,
+      `best[height<=${h}][format_id!*=-watermarked]`,
+      `best[width<=${h}][aspect_ratio<1][vcodec^=avc][acodec^=mp4a]`,
+      `best[height<=${h}][vcodec^=avc][acodec^=mp4a]`,
+      `best[width<=${h}][aspect_ratio<1]`,
+      `best[height<=${h}]`,
+      'best',
+    ].join('/');
+  }
+  if (opts?.forStream) {
+    const hNum = Number(h) || 1080;
+    if (hNum <= 360) {
+      return [
+        `best[width<=${h}][aspect_ratio<1][ext=mp4][vcodec^=avc][acodec^=mp4a]`,
+        `best[height<=360][ext=mp4][vcodec^=avc][acodec^=mp4a]`,
+        `best[width<=${h}][aspect_ratio<1][ext=mp4][vcodec!=none][acodec!=none]`,
+        `best[height<=360][ext=mp4][vcodec!=none][acodec!=none]`,
+        `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
+        `bestvideo[height<=360][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
+        `bestvideo[width<=${h}][aspect_ratio<1]+bestaudio`,
+        `bestvideo[height<=360]+bestaudio`,
+        `best[width<=${h}][aspect_ratio<1]`,
+        `best[height<=360]`,
+        'best',
+      ].join('/');
+    }
+    return [
+      `best[width<=${h}][width>=480][aspect_ratio<1][ext=mp4][vcodec!=none][acodec!=none]`,
+      `best[height<=${h}][height>=480][ext=mp4][vcodec!=none][acodec!=none]`,
+      `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[height<=${h}][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[width<=${h}][aspect_ratio<1]+bestaudio`,
+      `bestvideo[height<=${h}]+bestaudio`,
+      `best[width<=${h}][aspect_ratio<1][ext=mp4]`,
+      `best[height<=${h}][ext=mp4]`,
+      `best[width<=${h}][aspect_ratio<1]`,
+      `best[height<=${h}]`,
+      'best',
+    ].join('/');
+  }
+  return [
+    `best[width<=${h}][aspect_ratio<1][vcodec^=avc][acodec^=mp4a]`,
+    `best[height<=${h}][vcodec^=avc][acodec^=mp4a]`,
+    `best[width<=${h}][aspect_ratio<1][vcodec^=avc]`,
+    `best[height<=${h}][vcodec^=avc]`,
+    `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
+    `bestvideo[height<=${h}][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
+    `best[width<=${h}][aspect_ratio<1]`,
+    `best[height<=${h}]`,
+    'best',
+  ].join('/');
 }
 
 interface ParthDlFormat {
@@ -4797,6 +5138,7 @@ interface StreamInputSpecGlobal {
   vcodec?: string;
   acodec?: string;
   ext?: string;
+  filesize?: number;
 }
 
 interface ResolvedStreamEntryGlobal {
@@ -5019,6 +5361,12 @@ function resolveYouTubeStreamFromRawInfo(
   const toSpec = (fmt: Record<string, unknown>): StreamInputSpecGlobal | null => {
     const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
     if (!/^https?:\/\//i.test(u)) return null;
+    const rawSize =
+      typeof fmt.filesize === 'number' && Number.isFinite(fmt.filesize) && fmt.filesize > 0
+        ? fmt.filesize
+        : typeof fmt.filesize_approx === 'number' && Number.isFinite(fmt.filesize_approx) && fmt.filesize_approx > 0
+          ? fmt.filesize_approx
+          : undefined;
     return {
       url: u,
       headers: buildHeaders(
@@ -5031,30 +5379,37 @@ function resolveYouTubeStreamFromRawInfo(
       vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
       acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
       ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
+      ...(rawSize ? { filesize: rawSize } : {}),
     };
   };
 
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   const str = (v: unknown): string => (typeof v === 'string' ? v.toLowerCase() : '');
+  const effectiveRes = (f: Record<string, unknown>): number => {
+    const w = num(f.width);
+    const h = num(f.height);
+    if (w > 0 && h > 0) return Math.min(w, h);
+    return h || w || 0;
+  };
 
   const muxed = validFormats
     .filter((f) => {
       const vc = str(f.vcodec);
       const ac = str(f.acodec);
-      const h = num(f.height);
-      return vc !== 'none' && vc !== '' && ac !== 'none' && ac !== '' && h > 0 && h <= targetH;
+      const r = effectiveRes(f);
+      return vc !== 'none' && vc !== '' && ac !== 'none' && ac !== '' && r > 0 && r <= targetH;
     })
     .sort((a, b) => {
       const mp4Diff = (str(b.ext) === 'mp4' ? 1 : 0) - (str(a.ext) === 'mp4' ? 1 : 0);
       if (mp4Diff !== 0) return mp4Diff;
-      const hDiff = num(b.height) - num(a.height);
-      if (hDiff !== 0) return hDiff;
+      const rDiff = effectiveRes(b) - effectiveRes(a);
+      if (rDiff !== 0) return rDiff;
       return num(b.tbr) - num(a.tbr);
     });
 
   if (!audioFormatId) {
     const bestMuxed = muxed[0];
-    if (bestMuxed && str(bestMuxed.ext) === 'mp4' && (targetH <= 360 || num(bestMuxed.height) >= 480)) {
+    if (bestMuxed && str(bestMuxed.ext) === 'mp4' && (targetH <= 360 || effectiveRes(bestMuxed) >= 480)) {
       const spec = toSpec(bestMuxed);
       if (spec && !isManifest(spec)) {
         return { mode: 'proxy', inputs: [spec], expiresAt: Date.now() + 4 * 60 * 1000 };
@@ -5066,13 +5421,13 @@ function resolveYouTubeStreamFromRawInfo(
     .filter((f) => {
       const vc = str(f.vcodec);
       const ac = str(f.acodec);
-      const h = num(f.height);
-      return vc !== 'none' && vc !== '' && (ac === 'none' || ac === '') && h > 0 && h <= targetH;
+      const r = effectiveRes(f);
+      return vc !== 'none' && vc !== '' && (ac === 'none' || ac === '') && r > 0 && r <= targetH;
     })
     .sort((a, b) => {
       const avcDiff = (str(b.vcodec).startsWith('avc') ? 1 : 0) - (str(a.vcodec).startsWith('avc') ? 1 : 0);
-      const hDiff = num(b.height) - num(a.height);
-      if (hDiff !== 0) return hDiff;
+      const rDiff = effectiveRes(b) - effectiveRes(a);
+      if (rDiff !== 0) return rDiff;
       if (avcDiff !== 0) return avcDiff;
       return num(b.tbr) - num(a.tbr);
     });
@@ -5114,6 +5469,68 @@ function resolveYouTubeStreamFromRawInfo(
   }
 
   return null;
+}
+
+function resolveYouTubeAudioFromRawInfo(
+  rawInfo: Record<string, unknown>,
+  audioFormatId: string | undefined,
+  buildHeaders: (customHeaders?: Record<string, string>, cookieStr?: string) => Record<string, string>,
+  extractCookie: (rawCookies: unknown) => string
+): StreamInputSpecGlobal | null {
+  const formats = Array.isArray(rawInfo.formats) ? (rawInfo.formats as Array<Record<string, unknown>>) : [];
+  if (formats.length === 0) return null;
+
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const str = (v: unknown): string => (typeof v === 'string' ? v.toLowerCase() : '');
+
+  const valid = formats.filter((f) => {
+    const u = typeof f.url === 'string' ? f.url.trim() : '';
+    const ext = str(f.ext);
+    const proto = str(f.protocol);
+    const ac = str(f.acodec);
+    if (!/^https?:\/\//i.test(u)) return false;
+    if (ext === 'mhtml' || proto === 'mhtml') return false;
+    return ac !== '' && ac !== 'none';
+  });
+  if (valid.length === 0) return null;
+
+  const chosen =
+    (audioFormatId ? valid.find((f) => String(f.format_id || '') === audioFormatId) : undefined) ||
+    valid
+      .slice()
+      .sort((a, b) => {
+        const aAudioOnly = str(a.vcodec) === 'none' || str(a.vcodec) === '' ? 1 : 0;
+        const bAudioOnly = str(b.vcodec) === 'none' || str(b.vcodec) === '' ? 1 : 0;
+        if (bAudioOnly !== aAudioOnly) return bAudioOnly - aAudioOnly;
+        const aM4a = str(a.acodec).includes('mp4a') || str(a.ext) === 'm4a' ? 1 : 0;
+        const bM4a = str(b.acodec).includes('mp4a') || str(b.ext) === 'm4a' ? 1 : 0;
+        if (bM4a !== aM4a) return bM4a - aM4a;
+        return num(b.abr || b.tbr) - num(a.abr || a.tbr);
+      })[0];
+
+  if (!chosen) return null;
+  const u = typeof chosen.url === 'string' ? chosen.url.trim() : '';
+  if (!/^https?:\/\//i.test(u)) return null;
+  const rawSize =
+    typeof chosen.filesize === 'number' && Number.isFinite(chosen.filesize) && chosen.filesize > 0
+      ? chosen.filesize
+      : typeof chosen.filesize_approx === 'number' && Number.isFinite(chosen.filesize_approx) && chosen.filesize_approx > 0
+        ? chosen.filesize_approx
+        : undefined;
+  return {
+    url: u,
+    headers: buildHeaders(
+      chosen.http_headers && typeof chosen.http_headers === 'object'
+        ? (chosen.http_headers as Record<string, string>)
+        : undefined,
+      extractCookie(chosen.cookies)
+    ),
+    protocol: typeof chosen.protocol === 'string' ? chosen.protocol : undefined,
+    vcodec: typeof chosen.vcodec === 'string' ? chosen.vcodec : undefined,
+    acodec: typeof chosen.acodec === 'string' ? chosen.acodec : undefined,
+    ext: typeof chosen.ext === 'string' ? chosen.ext : undefined,
+    ...(rawSize ? { filesize: rawSize } : {}),
+  };
 }
 
 function sanitizeFilename(name: string): string {
@@ -5427,6 +5844,26 @@ async function startServer() {
       user.preferences.defaultQuality = body.defaultQuality;
     }
     updateUserPreferencesInDb(user.id, user.preferences);
+    res.json({ user: publicUserView(user) });
+  });
+
+  app.put('/api/user/profile', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = getUserById(req.authUser!.id) || req.authUser!;
+    const body = (req.body || {}) as { displayName?: unknown };
+    const rawName = typeof body.displayName === 'string' ? body.displayName : '';
+    const cleanName = rawName
+      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 48);
+
+    if (!cleanName) {
+      res.status(400).json({ error: 'Display name cannot be empty.' });
+      return;
+    }
+
+    user.displayName = cleanName;
+    updateUserDisplayNameInDb(user.id, cleanName);
     res.json({ user: publicUserView(user) });
   });
 
@@ -7558,12 +7995,17 @@ async function startServer() {
               typeof info.thumbnail === 'string' && info.thumbnail
                 ? info.thumbnail
                 : `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
+            const infoWidth = typeof info.width === 'number' ? info.width : 0;
+            const infoHeight = typeof info.height === 'number' ? info.height : 0;
+            const isVertical =
+              isYouTubeShortsUrl(parsed) || (infoWidth > 0 && infoHeight > 0 && infoHeight > infoWidth);
             const payload: Record<string, unknown> = {
               title: info.title || 'Media Stream',
               author: info.uploader || info.channel || info.creator || parsed.hostname,
               durationSeconds: typeof info.duration === 'number' ? info.duration : null,
               thumbnail: maybeProxySocialThumbnail(rawThumb, parsed),
               providerGlow: 'red',
+              isVertical,
               qualities: ['2160p', '1080p', '720p', '480p', '360p'],
               engineMode: 'live',
               audioTracks: tracks.audioTracks,
@@ -7613,7 +8055,7 @@ async function startServer() {
         const info = await ytdl.getInfo(watchUrl);
         const details = info.videoDetails;
         const maxHeight = info.formats.reduce(
-          (max: number, f: VideoFormat) => Math.max(max, f.height || 0),
+          (max: number, f: VideoFormat) => Math.max(max, getVideoFormatResolution(f)),
           0
         );
         const qualities = ['2160p', '1080p', '720p', '480p', '360p'].filter((q) => {
@@ -7624,6 +8066,9 @@ async function startServer() {
         const thumbs = details.thumbnails || [];
         const bestThumb = thumbs[thumbs.length - 1]?.url || `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
         const tracks = extractYtdlTracks(info);
+        const isVertical =
+          isYouTubeShortsUrl(parsed) ||
+          info.formats.some((f: VideoFormat) => (f.width || 0) > 0 && (f.height || 0) > (f.width || 0));
 
         res.json({
           title: details.title || `Media Clip (${ytId})`,
@@ -7631,6 +8076,7 @@ async function startServer() {
           durationSeconds: Number(details.lengthSeconds) || null,
           thumbnail: bestThumb,
           providerGlow: 'red',
+          isVertical,
           qualities,
           engineMode: 'live',
           audioTracks: tracks.audioTracks,
@@ -7667,6 +8113,7 @@ async function startServer() {
           durationSeconds: null,
           thumbnail,
           providerGlow: 'red',
+          isVertical: isYouTubeShortsUrl(parsed),
           qualities: ['2160p', '1080p', '720p', '480p', '360p'],
           engineMode: 'preview',
           audioTracks: [],
@@ -8055,7 +8502,9 @@ async function startServer() {
       onSpawn?: (child: ChildProcess) => void;
     }
   ): Readable {
-    const out = new PassThrough();
+    // 2 MB stream buffer prevents upstream ffmpeg/yt-dlp from stalling every 16 KB
+    // while MTProto upload workers flush 512 KB chunks.
+    const out = new PassThrough({ highWaterMark: 2 * 1024 * 1024 });
     const child = spawn(cmd, args, {
       shell: false,
       ...(env ? { env } : {}),
@@ -8115,7 +8564,7 @@ async function startServer() {
   }
 
   function buildFfmpegStreamArgs(inputs: StreamInputSpec[], isAudio: boolean, title: string): string[] {
-    const ffArgs: string[] = [];
+    const ffArgs: string[] = ['-hide_banner', '-loglevel', 'error'];
     for (const inp of inputs) {
       const proto = (inp.protocol || '').toLowerCase();
       const lowerUrl = inp.url.toLowerCase();
@@ -8127,6 +8576,14 @@ async function startServer() {
       if (!isManifest) {
         ffArgs.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
       }
+      ffArgs.push(
+        '-probesize',
+        isAudio ? '524288' : '1048576',
+        '-analyzeduration',
+        isAudio ? '500000' : '1000000',
+        '-thread_queue_size',
+        '1024'
+      );
       const ua = inp.headers['User-Agent'] || inp.headers['user-agent'];
       if (ua) {
         ffArgs.push('-user_agent', sanitizeHttpHeaderValue(ua));
@@ -8173,11 +8630,21 @@ async function startServer() {
       ffArgs.push('-c:v', 'copy');
     }
 
+    const audioSpec = inputs.length >= 2 ? inputs[1] : inputs[0];
+    const audioAcodec = (audioSpec?.acodec || '').toLowerCase();
+    const audioExt = (audioSpec?.ext || '').toLowerCase();
+    const canCopyAudio =
+      audioAcodec.includes('mp4a') ||
+      audioAcodec.includes('aac') ||
+      (audioExt === 'm4a' && (!audioAcodec || audioAcodec === 'unknown'));
+
+    if (canCopyAudio) {
+      ffArgs.push('-c:a', 'copy');
+    } else {
+      ffArgs.push('-c:a', 'aac', '-b:a', '160k');
+    }
+
     ffArgs.push(
-      '-c:a',
-      'aac',
-      '-b:a',
-      '160k',
       '-movflags',
       'frag_keyframe+empty_moov+default_base_moof',
       '-f',
@@ -8340,13 +8807,14 @@ async function startServer() {
         }
         try {
           const targetH = String(selectTargetHeight(job.quality));
+          const targetHNum = selectTargetHeight(job.quality);
           const audioFid = job.audioFormatId;
           const isTikTok = isTikTokUrl(parsed);
-          const videoFmtSelector = audioFid
-            ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFid}/bestvideo[height<=${targetH}]+${audioFid}/best[height<=${targetH}]/best`
-            : isTikTok
-              ? `best[height<=${targetH}][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}]/best`
-              : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`;
+          const videoFmtSelector = buildYtDlpVideoFormatSelector(targetH, {
+            audioFid,
+            isTikTok,
+            forStream: Boolean(ytId),
+          });
           const audioFmtSelector = audioFid ? `${audioFid}/bestaudio/best` : 'bestaudio/best';
           const { extraArgs, env } = await getYtDlpAuthAndProxy();
 
@@ -8368,61 +8836,134 @@ async function startServer() {
             extraArgs
           );
 
+          const streamCacheKey = `${targetUrlForDl}::${targetH}::${audioFid || ''}::${fp}`;
+
+          const resolveFreshInputs = async (): Promise<StreamInputSpec[]> => {
+            const execDump = () =>
+              execFileAsync(runner.cmd, [...runner.baseArgs, ...dumpArgs], {
+                timeout: 30000,
+                maxBuffer: 8 * 1024 * 1024,
+                env,
+              });
+            const { stdout } = ytId ? await runPacedYouTubeTask(execDump) : await execDump();
+            const rawJson = JSON.parse(stdout) as Record<string, unknown> & {
+              entries?: Array<Record<string, unknown>>;
+            };
+            const entry =
+              Array.isArray(rawJson.entries) && rawJson.entries.length > 0 ? rawJson.entries[0] : rawJson;
+            if (ytId && Array.isArray(entry.formats) && entry.formats.length > 0) {
+              setBoundedCache(
+                youtubeRawInfoCache,
+                `${ytId}::${fp}`,
+                { info: entry, expiresAt: Date.now() + YOUTUBE_RAW_INFO_CACHE_TTL_MS },
+                80
+              );
+            }
+            const toSpec = (fmt: Record<string, unknown>): StreamInputSpec | null => {
+              const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
+              if (!/^https?:\/\//i.test(u)) return null;
+              const rawSize =
+                typeof fmt.filesize === 'number' && Number.isFinite(fmt.filesize) && fmt.filesize > 0
+                  ? fmt.filesize
+                  : typeof fmt.filesize_approx === 'number' &&
+                      Number.isFinite(fmt.filesize_approx) &&
+                      fmt.filesize_approx > 0
+                    ? fmt.filesize_approx
+                    : undefined;
+              return {
+                url: u,
+                headers: buildUpstreamHeaders(
+                  fmt.http_headers && typeof fmt.http_headers === 'object'
+                    ? (fmt.http_headers as Record<string, string>)
+                    : undefined,
+                  extractCookieHeaderFromYtDlp(fmt.cookies)
+                ),
+                protocol: typeof fmt.protocol === 'string' ? fmt.protocol : undefined,
+                vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
+                acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
+                ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
+                ...(rawSize ? { filesize: rawSize } : {}),
+              };
+            };
+            const reqFmts = Array.isArray(entry.requested_formats)
+              ? (entry.requested_formats as Array<Record<string, unknown>>)
+              : null;
+            let resolved: StreamInputSpec[] = [];
+            if (reqFmts && reqFmts.length >= 2) {
+              resolved = reqFmts.map(toSpec).filter((x): x is StreamInputSpec => x !== null);
+            } else if (reqFmts && reqFmts.length === 1) {
+              const one = toSpec(reqFmts[0]);
+              if (one) resolved = [one];
+            } else {
+              const one = toSpec(entry);
+              if (one) resolved = [one];
+            }
+            if (!isAudio && ytId && resolved.length > 0) {
+              setBoundedCache(
+                streamResolveCache,
+                streamCacheKey,
+                {
+                  mode: resolved.length >= 2 || isManifestOrIncompatibleFormat(resolved[0]) ? 'ffmpeg' : 'proxy',
+                  inputs: resolved,
+                  expiresAt: Date.now() + 4 * 60 * 1000,
+                },
+                100
+              );
+            }
+            return resolved;
+          };
+
           let inputs: StreamInputSpec[] = [];
+          let usedCachedInputs = false;
           let fatalBotError: unknown = null;
 
-          // Reuse recently resolved stream URLs when available (avoids double-scraping YouTube)
-          if (!isAudio && ytId) {
-            const streamCacheKey = `${targetUrlForDl}::${targetH}::${audioFid || ''}::${fp}`;
-            const cachedStream = streamResolveCache.get(streamCacheKey);
-            if (cachedStream && cachedStream.expiresAt > Date.now() && cachedStream.inputs.length > 0) {
-              inputs = cachedStream.inputs;
+          // Reuse cached stream URLs or raw inspect metadata first so we don't re-scrape YouTube.
+          if (ytId) {
+            if (!isAudio) {
+              const cachedStream = streamResolveCache.get(streamCacheKey);
+              if (cachedStream && cachedStream.expiresAt > Date.now() && cachedStream.inputs.length > 0) {
+                inputs = cachedStream.inputs;
+                usedCachedInputs = true;
+              }
+            }
+            if (inputs.length === 0) {
+              const cachedRaw = youtubeRawInfoCache.get(`${ytId}::${fp}`);
+              if (cachedRaw && cachedRaw.expiresAt > Date.now()) {
+                if (isAudio) {
+                  const audioSpec = resolveYouTubeAudioFromRawInfo(
+                    cachedRaw.info,
+                    audioFid,
+                    buildUpstreamHeaders,
+                    extractCookieHeaderFromYtDlp
+                  );
+                  if (audioSpec) {
+                    inputs = [audioSpec];
+                    usedCachedInputs = true;
+                  }
+                } else {
+                  const fromRaw = resolveYouTubeStreamFromRawInfo(
+                    cachedRaw.info,
+                    targetHNum,
+                    audioFid,
+                    buildUpstreamHeaders,
+                    extractCookieHeaderFromYtDlp,
+                    isManifestOrIncompatibleFormat
+                  );
+                  if (fromRaw && fromRaw.inputs.length > 0) {
+                    setBoundedCache(streamResolveCache, streamCacheKey, fromRaw, 100);
+                    inputs = fromRaw.inputs;
+                    usedCachedInputs = true;
+                  }
+                }
+              } else if (cachedRaw) {
+                youtubeRawInfoCache.delete(`${ytId}::${fp}`);
+              }
             }
           }
 
           if (inputs.length === 0) {
             try {
-              const execDump = () =>
-                execFileAsync(runner.cmd, [...runner.baseArgs, ...dumpArgs], {
-                  timeout: 30000,
-                  maxBuffer: 8 * 1024 * 1024,
-                  env,
-                });
-              const { stdout } = ytId ? await runPacedYouTubeTask(execDump) : await execDump();
-              const rawJson = JSON.parse(stdout) as Record<string, unknown> & {
-                entries?: Array<Record<string, unknown>>;
-              };
-              const entry =
-                Array.isArray(rawJson.entries) && rawJson.entries.length > 0 ? rawJson.entries[0] : rawJson;
-              const toSpec = (fmt: Record<string, unknown>): StreamInputSpec | null => {
-                const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
-                if (!/^https?:\/\//i.test(u)) return null;
-                return {
-                  url: u,
-                  headers: buildUpstreamHeaders(
-                    fmt.http_headers && typeof fmt.http_headers === 'object'
-                      ? (fmt.http_headers as Record<string, string>)
-                      : undefined,
-                    extractCookieHeaderFromYtDlp(fmt.cookies)
-                  ),
-                  protocol: typeof fmt.protocol === 'string' ? fmt.protocol : undefined,
-                  vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
-                  acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
-                  ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
-                };
-              };
-              const reqFmts = Array.isArray(entry.requested_formats)
-                ? (entry.requested_formats as Array<Record<string, unknown>>)
-                : null;
-              if (reqFmts && reqFmts.length >= 2) {
-                inputs = reqFmts.map(toSpec).filter((x): x is StreamInputSpec => x !== null);
-              } else if (reqFmts && reqFmts.length === 1) {
-                const one = toSpec(reqFmts[0]);
-                if (one) inputs = [one];
-              } else {
-                const one = toSpec(entry);
-                if (one) inputs = [one];
-              }
+              inputs = await resolveFreshInputs();
             } catch (dumpErr) {
               if (ytId && isYouTubeBotOrRateLimitError(dumpErr)) {
                 recordYouTubeRateLimit(fp);
@@ -8436,37 +8977,65 @@ async function startServer() {
             throw fatalBotError;
           }
 
-          if (inputs.length === 1 && !isAudio && !isManifestOrIncompatibleFormat(inputs[0])) {
-            try {
-              const opened = await openRemoteMediaReadable(inputs[0].url, { headers: inputs[0].headers });
-              await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
-                ext: 'mp4',
-                mimeType: 'video/mp4',
-              });
-              return;
-            } catch (openErr) {
-              if (isFatalTelegramUploadError(openErr)) throw openErr;
+          const streamInputsToTelegram = async (specs: StreamInputSpec[]): Promise<boolean> => {
+            if (specs.length === 1 && !isAudio && !isManifestOrIncompatibleFormat(specs[0])) {
+              try {
+                const opened = await openRemoteMediaReadable(specs[0].url, { headers: specs[0].headers });
+                await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+                  ext: 'mp4',
+                  mimeType: 'video/mp4',
+                  estimatedTotalBytes: specs[0].filesize ?? null,
+                });
+                return true;
+              } catch (openErr) {
+                if (isFatalTelegramUploadError(openErr)) throw openErr;
+              }
             }
+
+            if (specs.length > 0) {
+              const estBytes = specs.reduce((acc, s) => acc + (s.filesize || 0), 0) || null;
+              try {
+                const ffArgs = buildFfmpegStreamArgs(specs, isAudio, job.title);
+                const ffStream = spawnChildToReadable('ffmpeg', ffArgs, buildFfmpegProxyEnv(env));
+                await uploadStreamJobToTelegram(job, ffStream, null, {
+                  ext: isAudio ? 'mp3' : 'mp4',
+                  mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+                  estimatedTotalBytes: isAudio ? null : estBytes,
+                });
+                return true;
+              } catch (muxErr) {
+                if (isFatalTelegramUploadError(muxErr)) throw muxErr;
+              }
+            }
+            return false;
+          };
+
+          if (await streamInputsToTelegram(inputs)) {
+            return;
           }
 
-          if (inputs.length > 0) {
+          // If cached YouTube CDN URLs went stale (e.g. 403/410), invalidate and re-resolve once cleanly.
+          if (usedCachedInputs && ytId) {
+            streamResolveCache.delete(streamCacheKey);
+            youtubeRawInfoCache.delete(`${ytId}::${fp}`);
             try {
-              const ffArgs = buildFfmpegStreamArgs(inputs, isAudio, job.title);
-              const ffStream = spawnChildToReadable('ffmpeg', ffArgs, buildFfmpegProxyEnv(env));
-              await uploadStreamJobToTelegram(job, ffStream, null, {
-                ext: isAudio ? 'mp3' : 'mp4',
-                mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-              });
-              return;
-            } catch (muxErr) {
-              if (isFatalTelegramUploadError(muxErr)) throw muxErr;
+              const fresh = await resolveFreshInputs();
+              if (await streamInputsToTelegram(fresh)) {
+                return;
+              }
+            } catch (retryErr) {
+              if (isFatalTelegramUploadError(retryErr)) throw retryErr;
+              if (isYouTubeBotOrRateLimitError(retryErr)) {
+                recordYouTubeRateLimit(fp);
+                throw retryErr;
+              }
             }
           }
 
           // Fallback: stream yt-dlp directly to stdout -> ffmpeg -> Telegram (zero disk)
           const singleFmt = isAudio
             ? audioFmtSelector
-            : `best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`;
+            : `best[width<=${targetH}][aspect_ratio<1][ext=mp4]/best[height<=${targetH}][ext=mp4]/best[width<=${targetH}][aspect_ratio<1]/best[height<=${targetH}]/best`;
           const ytdlpArgs = insertBeforeDoubleDash(
             buildYtDlpArgs(
               ['-f', singleFmt, '--no-playlist', '--playlist-items', '1', '-o', '-', '--', targetUrlForDl],
@@ -8614,11 +9183,11 @@ async function startServer() {
             ? info.formats.find((f: VideoFormat) => f.itag === customAudioItag && f.hasAudio)
             : undefined;
           const muxedFormats = info.formats
-            .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
-            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+            .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && getVideoFormatResolution(f) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a));
 
           const bestMuxed = muxedFormats[0];
-          if (!customAudioFormat && bestMuxed && (bestMuxed.height || 0) >= targetH && bestMuxed.container === 'mp4') {
+          if (!customAudioFormat && bestMuxed && getVideoFormatResolution(bestMuxed) >= targetH && bestMuxed.container === 'mp4') {
             const totalHint = Number(bestMuxed.contentLength) || null;
             const stream = ytdl.download(info, { format: bestMuxed });
             await uploadStreamJobToTelegram(job, stream, totalHint, { ext: 'mp4', mimeType: 'video/mp4' });
@@ -8626,8 +9195,8 @@ async function startServer() {
           }
 
           const videoCandidates = info.formats
-            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && (f.height || 0) <= targetH)
-            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && getVideoFormatResolution(f) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a));
           const videoFormat = videoCandidates[0] || bestMuxed;
           const audioFormat =
             customAudioFormat ||
@@ -8639,19 +9208,27 @@ async function startServer() {
           if (videoFormat && audioFormat && !videoFormat.hasAudio) {
             const vStream = ytdl.download(info, { format: videoFormat });
             const aStream = ytdl.download(info, { format: audioFormat });
+            const canCopyYtdlAudio =
+              Boolean(audioFormat.audioCodec && audioFormat.audioCodec.toLowerCase().includes('mp4a')) ||
+              audioFormat.container === 'mp4' ||
+              audioFormat.container === 'm4a';
             const ffStream = spawnChildToReadable(
               'ffmpeg',
               [
+                '-hide_banner',
+                '-loglevel',
+                'error',
+                '-thread_queue_size',
+                '1024',
                 '-i',
                 'pipe:3',
+                '-thread_queue_size',
+                '1024',
                 '-i',
                 'pipe:4',
                 '-c:v',
                 'copy',
-                '-c:a',
-                'aac',
-                '-b:a',
-                '192k',
+                ...(canCopyYtdlAudio ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
                 '-movflags',
                 'frag_keyframe+empty_moov+default_base_moof',
                 '-f',
@@ -8677,7 +9254,13 @@ async function startServer() {
                 },
               }
             );
-            await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp4', mimeType: 'video/mp4' });
+            const estYtdlBytes =
+              (Number(videoFormat.contentLength) || 0) + (Number(audioFormat.contentLength) || 0) || null;
+            await uploadStreamJobToTelegram(job, ffStream, null, {
+              ext: 'mp4',
+              mimeType: 'video/mp4',
+              estimatedTotalBytes: estYtdlBytes,
+            });
             return;
           } else if (videoFormat) {
             const stream = ytdl.download(info, { format: videoFormat });
@@ -8912,11 +9495,7 @@ async function startServer() {
           const targetH = String(selectTargetHeight(job.quality));
           const audioFid = job.audioFormatId;
           const isTikTok = isTikTokUrl(parsed);
-          const videoFmtSelector = audioFid
-            ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFid}/bestvideo[height<=${targetH}]+${audioFid}/best[height<=${targetH}]/best`
-            : isTikTok
-              ? `best[height<=${targetH}][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}]/best`
-              : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`;
+          const videoFmtSelector = buildYtDlpVideoFormatSelector(targetH, { audioFid, isTikTok });
           const audioFmtSelector = audioFid ? `${audioFid}/bestaudio/best` : undefined;
           const baseArgs = isAudio
             ? [
@@ -9191,11 +9770,11 @@ async function startServer() {
             ? info.formats.find((f: VideoFormat) => f.itag === customAudioItag && f.hasAudio)
             : undefined;
           const muxedFormats = info.formats
-            .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
-            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+            .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && getVideoFormatResolution(f) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a));
 
           const bestMuxed = muxedFormats[0];
-          if (!customAudioFormat && bestMuxed && (bestMuxed.height || 0) >= targetH && bestMuxed.container === 'mp4') {
+          if (!customAudioFormat && bestMuxed && getVideoFormatResolution(bestMuxed) >= targetH && bestMuxed.container === 'mp4') {
             const totalHint = Number(bestMuxed.contentLength) || null;
             job.totalBytes = totalHint;
             const stream = ytdl.download(info, { format: bestMuxed });
@@ -9213,8 +9792,8 @@ async function startServer() {
           }
 
           const videoCandidates = info.formats
-            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && (f.height || 0) <= targetH)
-            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && getVideoFormatResolution(f) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a));
           const videoFormat = videoCandidates[0] || bestMuxed;
           const audioFormat =
             customAudioFormat ||
@@ -9928,13 +10507,11 @@ async function startServer() {
           let inflight = streamInflightMap.get(cacheKey);
           if (!inflight) {
             const resolveTask = async (): Promise<ResolvedStreamEntry> => {
-              const formatSelector = audioFormatId
-                ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFormatId}/bestvideo[height<=${targetH}]+${audioFormatId}/best[height<=${targetH}]`
-                : isTikTok
-                  ? `best[height<=${targetH}][format_id!*=-watermarked][ext=mp4][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][ext=mp4][vcodec!=none][acodec!=none]/best[height<=${targetH}]/best`
-                  : targetH <= 360
-                    ? `best[height<=360][ext=mp4][vcodec^=avc][acodec^=mp4a]/best[height<=360][ext=mp4][vcodec!=none][acodec!=none]/bestvideo[height<=360][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=360]+bestaudio/best[height<=360]/best`
-                    : `best[height<=${targetH}][height>=480][ext=mp4][vcodec!=none][acodec!=none]/bestvideo[height<=${targetH}][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=${targetH}]+bestaudio/best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`;
+              const formatSelector = buildYtDlpVideoFormatSelector(targetH, {
+                audioFid: audioFormatId,
+                isTikTok,
+                forStream: true,
+              });
 
               const args = insertBeforeDoubleDash(
                 buildYtDlpArgs(
@@ -10102,18 +10679,18 @@ async function startServer() {
           ? info.formats.find((f: VideoFormat) => f.itag === customItag && f.hasAudio)
           : undefined;
         const muxed = info.formats
-          .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
-          .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0))[0];
+          .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && getVideoFormatResolution(f) <= targetH)
+          .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a))[0];
 
-        if (!customAudio && muxed?.url && (targetH <= 360 || (muxed.height || 0) >= Math.min(targetH, 720))) {
+        if (!customAudio && muxed?.url && (targetH <= 360 || getVideoFormatResolution(muxed) >= Math.min(targetH, 720))) {
           await proxyRemoteMediaWithRange(muxed.url, req, res);
           return;
         }
 
         const videoFmt =
           info.formats
-            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && (f.height || 0) <= targetH)
-            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0))[0] || muxed;
+            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && getVideoFormatResolution(f) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a))[0] || muxed;
         const audioFmt =
           customAudio ||
           chooseFormat(info.formats, {
@@ -10498,9 +11075,7 @@ async function startServer() {
         ? ['-x', '--audio-format', 'mp3', '-o', '-', '--', dlTargetUrl]
         : [
             '-f',
-            isTikTokDl
-              ? `best[height<=${targetH}][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}]/best`
-              : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`,
+            buildYtDlpVideoFormatSelector(targetH, { isTikTok: isTikTokDl }),
             '--recode-video',
             'mp4',
             '-o',
@@ -10579,12 +11154,12 @@ async function startServer() {
 
         const targetH = selectTargetHeight(quality);
         const muxedFormats = info.formats
-          .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
-          .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+          .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && getVideoFormatResolution(f) <= targetH)
+          .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a));
 
         // If muxed format already hits exact requested height (e.g. 720p or 360p), stream directly
         const bestMuxed = muxedFormats[0];
-        if (bestMuxed && (bestMuxed.height || 0) >= targetH && bestMuxed.container === 'mp4') {
+        if (bestMuxed && getVideoFormatResolution(bestMuxed) >= targetH && bestMuxed.container === 'mp4') {
           res.setHeader('Content-Type', 'video/mp4');
           if (bestMuxed.contentLength) {
             res.setHeader('Content-Length', String(bestMuxed.contentLength));
@@ -10602,8 +11177,8 @@ async function startServer() {
 
         // Otherwise fetch best video <= targetH + best audio and mux with ffmpeg
         const videoCandidates = info.formats
-          .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && (f.height || 0) <= targetH)
-          .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+          .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && getVideoFormatResolution(f) <= targetH)
+          .sort((a: VideoFormat, b: VideoFormat) => getVideoFormatResolution(b) - getVideoFormatResolution(a));
         const videoFormat = videoCandidates[0] || bestMuxed;
         const audioFormat = chooseFormat(info.formats, {
           quality: Quality.HighestAudio,

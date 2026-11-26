@@ -169,8 +169,32 @@
   animation: radiantFloat 7s cubic-bezier(0.16, 1, 0.3, 1) infinite;
 }
 
+@keyframes ambientTwinkle {
+  0%, 100% {
+    opacity: var(--dot-min, 0.12);
+    transform: translate3d(0, 0, 0) scale(0.78);
+  }
+  45% {
+    opacity: var(--dot-max, 0.78);
+    transform: translate3d(0, -3px, 0) scale(1.18);
+  }
+  70% {
+    opacity: var(--dot-mid, 0.35);
+    transform: translate3d(0, -1px, 0) scale(0.95);
+  }
+}
+
+.animate-ambient-twinkle {
+  animation-name: ambientTwinkle;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  will-change: transform, opacity;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .animate-radiant-float {
+  .animate-radiant-float,
+  .animate-ambient-twinkle {
     animation: none;
   }
 }
+

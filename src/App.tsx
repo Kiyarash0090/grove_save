@@ -6,6 +6,7 @@ import { DownloaderView, type ProviderGlow, type SavedItem } from './components/
 import { InfoView, type AnnouncementItem } from './components/InfoView';
 import { SettingsView } from './components/SettingsView';
 import { AuthModal, type AuthUser } from './components/AuthModal';
+import { AmbientTwinkleDots } from './components/AmbientTwinkleDots';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 
 type TabIndex = 0 | 1 | 2;
@@ -352,6 +353,32 @@ export default function App() {
     clearGuestHistory();
   };
 
+  const handleUpdateDisplayName = async (
+    nextName: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!user) return { ok: false, error: t.displayNameUpdateFailed };
+    const cleanName = nextName.replace(/\s+/g, ' ').trim().slice(0, 48);
+    if (!cleanName) {
+      return { ok: false, error: t.displayNameRequiredError };
+    }
+    try {
+      const res = await fetch(`${apiBase}/api/user/profile`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: buildAuthHeaders(true),
+        body: JSON.stringify({ displayName: cleanName }),
+      });
+      const data = (await res.json().catch(() => null)) as { user?: AuthUser; error?: string } | null;
+      if (!res.ok || !data?.user) {
+        return { ok: false, error: data?.error || t.displayNameUpdateFailed };
+      }
+      setUser(data.user);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: t.displayNameUpdateFailed };
+    }
+  };
+
   const switchTab = (next: TabIndex) => {
     if (next === activeTab) return;
     setSwipeDir(next > activeTab ? 1 : -1);
@@ -416,6 +443,9 @@ export default function App() {
           }`}
         />
       </div>
+
+      {/* Slow Twinkling Luminous Background Dots */}
+      <AmbientTwinkleDots providerGlow={providerGlow} />
 
       {/* Modern Minimalist Frosted Glass Header */}
       <header className="sticky top-0 z-30 backdrop-blur-2xl backdrop-saturate-150 bg-white/50 dark:bg-black/45 border-b border-black/[0.07] dark:border-white/[0.12] shadow-[0_4px_24px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.7)] dark:shadow-[0_8px_28px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.1)] transition-colors duration-300">
@@ -545,6 +575,7 @@ export default function App() {
                 authToken={authToken}
                 onOpenAuth={() => setAuthModalOpen(true)}
                 onSignOut={handleSignOut}
+                onUpdateDisplayName={handleUpdateDisplayName}
                 apiBase={apiBase}
                 announcements={announcements}
                 onAnnouncementsChange={setAnnouncements}

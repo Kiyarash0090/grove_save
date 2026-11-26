@@ -49,6 +49,7 @@ export interface MediaMetadata {
   durationSeconds: number | null;
   thumbnail: string | null;
   providerGlow: ProviderGlow;
+  isVertical?: boolean;
   mediaKind?: string;
   hasVideo?: boolean;
   itemCount?: number;
@@ -108,14 +109,22 @@ export function extractClientYouTubeId(raw: string): string | null {
     const parsed = new URL(raw.trim().startsWith('http') ? raw.trim() : `https://${raw.trim()}`);
     const host = parsed.hostname.toLowerCase();
     if (host === 'youtu.be' || host.endsWith('.youtu.be')) {
-      const id = parsed.pathname.split('/').filter(Boolean)[0];
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      const id =
+        (parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live' || parts[0] === 'v' || parts[0] === 'vi') &&
+        parts[1]
+          ? parts[1]
+          : parts[0];
       return id && /^[a-zA-Z0-9_-]{6,15}$/.test(id) ? id : null;
     }
     if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
       const v = parsed.searchParams.get('v');
       if (v && /^[a-zA-Z0-9_-]{6,15}$/.test(v)) return v;
       const parts = parsed.pathname.split('/').filter(Boolean);
-      if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live') && parts[1]) {
+      if (
+        (parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live' || parts[0] === 'v' || parts[0] === 'vi') &&
+        parts[1]
+      ) {
         return /^[a-zA-Z0-9_-]{6,15}$/.test(parts[1]) ? parts[1] : null;
       }
     }
@@ -123,6 +132,25 @@ export function extractClientYouTubeId(raw: string): string | null {
     return null;
   }
   return null;
+}
+
+export function isYouTubeShortsUrlString(raw: string): boolean {
+  try {
+    const parsed = new URL(raw.trim().startsWith('http') ? raw.trim() : `https://${raw.trim()}`);
+    const host = parsed.hostname.toLowerCase();
+    if (
+      !host.includes('youtube.com') &&
+      !host.includes('youtube-nocookie.com') &&
+      host !== 'youtu.be' &&
+      !host.endsWith('.youtu.be')
+    ) {
+      return false;
+    }
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    return parts[0] === 'shorts' && Boolean(parts[1]);
+  } catch {
+    return /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)\/shorts\//i.test(raw);
+  }
 }
 
 export function isYouTubeUrlString(raw: string): boolean {
@@ -472,6 +500,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
           durationSeconds: data.durationSeconds,
           thumbnail: data.thumbnail,
           providerGlow: nextGlow,
+          isVertical: Boolean(data.isVertical) || isYouTubeShortsUrlString(normalized),
           mediaKind: typeof data.mediaKind === 'string' ? data.mediaKind : undefined,
           hasVideo: typeof data.hasVideo === 'boolean' ? data.hasVideo : true,
           itemCount: typeof data.itemCount === 'number' ? data.itemCount : undefined,
@@ -1173,6 +1202,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                   setPlayerError(detail ? `${t.streamFailed} (${detail})` : t.streamFailed);
                 };
 
+                const isVerticalVideo = Boolean(media.isVertical) || isYouTubeShortsUrlString(media.url);
+
                 return (
                   <div className="rounded-xl overflow-hidden bg-black border border-black/15 dark:border-white/20">
                     {useYoutubeEmbed && ytFallbackId ? (
@@ -1182,7 +1213,11 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                         title={media.title}
                         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
                         allowFullScreen
-                        className="w-full aspect-video bg-black border-0"
+                        className={
+                          isVerticalVideo
+                            ? 'w-full max-w-[360px] mx-auto aspect-[9/16] max-h-[72vh] bg-black border-0 block'
+                            : 'w-full aspect-video bg-black border-0'
+                        }
                       />
                     ) : (
                       <video
@@ -1209,7 +1244,11 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                           }
                         }}
                         onError={() => void handleVideoError()}
-                        className="w-full aspect-video bg-black"
+                        className={
+                          isVerticalVideo
+                            ? 'w-full max-h-[72vh] bg-black object-contain'
+                            : 'w-full aspect-video bg-black'
+                        }
                       >
                         {selectedSubtitle && (
                           <track

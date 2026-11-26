@@ -63,6 +63,13 @@ export interface TranslationDict {
   signedInAs: string;
   signInOrCreate: string;
   signOut: string;
+  editDisplayName: string;
+  displayNamePlaceholder: string;
+  saveNameBtn: string;
+  cancelBtn: string;
+  displayNameSaved: string;
+  displayNameRequiredError: string;
+  displayNameUpdateFailed: string;
   sectionAppearance: string;
   themeLabel: string;
   themeBlack: string;
@@ -348,6 +355,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     signedInAs: 'Signed in',
     signInOrCreate: 'Sign in or Create Account',
     signOut: 'Sign Out',
+    editDisplayName: 'Change name',
+    displayNamePlaceholder: 'Enter your name',
+    saveNameBtn: 'Save',
+    cancelBtn: 'Cancel',
+    displayNameSaved: 'Name updated',
+    displayNameRequiredError: 'Please enter a valid name.',
+    displayNameUpdateFailed: 'Could not update name. Try again.',
     sectionAppearance: 'Appearance & Language',
     themeLabel: 'Theme',
     themeBlack: 'Pure Black',
@@ -627,6 +641,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     signedInAs: 'وارد شده',
     signInOrCreate: 'ورود یا ساخت حساب کاربری',
     signOut: 'خروج از حساب',
+    editDisplayName: 'تغییر نام',
+    displayNamePlaceholder: 'نام جدید خود را وارد کنید',
+    saveNameBtn: 'ذخیره',
+    cancelBtn: 'انصراف',
+    displayNameSaved: 'نام شما به‌روزرسانی شد',
+    displayNameRequiredError: 'لطفاً یک نام معتبر وارد کنید.',
+    displayNameUpdateFailed: 'تغییر نام انجام نشد. دوباره تلاش کنید.',
     sectionAppearance: 'ظاهر و زبان',
     themeLabel: 'تم برنامه',
     themeBlack: 'کاملاً سیاه',
@@ -907,6 +928,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     signedInAs: 'Вход выполнен',
     signInOrCreate: 'Войти или создать аккаунт',
     signOut: 'Выйти',
+    editDisplayName: 'Изменить имя',
+    displayNamePlaceholder: 'Введите новое имя',
+    saveNameBtn: 'Сохранить',
+    cancelBtn: 'Отмена',
+    displayNameSaved: 'Имя обновлено',
+    displayNameRequiredError: 'Введите корректное имя.',
+    displayNameUpdateFailed: 'Не удалось обновить имя.',
     sectionAppearance: 'Оформление и язык',
     themeLabel: 'Тема',
     themeBlack: 'Чисто чёрная',
@@ -1186,6 +1214,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     signedInAs: '已登录',
     signInOrCreate: '登录或创建账号',
     signOut: '退出登录',
+    editDisplayName: '修改昵称',
+    displayNamePlaceholder: '输入新昵称',
+    saveNameBtn: '保存',
+    cancelBtn: '取消',
+    displayNameSaved: '昵称已更新',
+    displayNameRequiredError: '请输入有效昵称。',
+    displayNameUpdateFailed: '无法更新昵称，请重试。',
     sectionAppearance: '外观与语言',
     themeLabel: '主题',
     themeBlack: '纯黑模式',
