@@ -55,6 +55,7 @@ export interface MediaMetadata {
   hasVideo?: boolean;
   itemCount?: number;
   qualities: string[];
+  qualitySizes?: Record<string, number>;
   engineMode?: 'live' | 'preview';
   audioTracks?: MediaAudioTrack[];
   manualSubtitles?: MediaSubtitleTrack[];
@@ -1326,6 +1327,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                 <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                   {availableQualities.map((q) => {
                     const meta = t.qualityLabels[q] || { label: q, sub: '' };
+                    const sizeBytes = media?.qualitySizes?.[q];
+                    const sizeText = sizeBytes && sizeBytes > 0 ? formatBytes(sizeBytes) : meta.sub;
                     const active = !audioOnlyMode && selectedQuality === q;
                     return (
                       <button
@@ -1347,7 +1350,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                             active ? 'opacity-80' : 'text-zinc-500 dark:text-zinc-400'
                           }`}
                         >
-                          {meta.sub}
+                          {sizeText}
                         </span>
                       </button>
                     );

@@ -7716,6 +7716,95 @@ async function startServer() {
     });
   }
 
+  function heightToQualityStr(h: number): string {
+    if (h >= 2160) return '2160p';
+    if (h >= 1440) return '1440p';
+    if (h >= 1080) return '1080p';
+    if (h >= 720) return '720p';
+    if (h >= 480) return '480p';
+    if (h >= 360) return '360p';
+    if (h >= 240) return '240p';
+    return '144p';
+  }
+
+  function extractYtDlpQualitiesAndSizes(info: Record<string, unknown>): {
+    qualities: string[];
+    qualitySizes: Record<string, number>;
+  } {
+    const formats = Array.isArray(info.formats) ? (info.formats as Array<Record<string, unknown>>) : [];
+    const qualitySizes: Record<string, number> = {};
+    const foundHeights = new Set<number>();
+    const duration = typeof info.duration === 'number' ? info.duration : 0;
+
+    for (const f of formats) {
+      const vcodec = typeof f.vcodec === 'string' ? f.vcodec : 'none';
+      if (vcodec === 'none') continue;
+      const h = typeof f.height === 'number' ? f.height : 0;
+      if (h <= 0) continue;
+      foundHeights.add(h);
+
+      const q = heightToQualityStr(h);
+      const fSize = Number(f.filesize || f.filesize_approx || 0);
+      const tbr = Number(f.tbr || f.vbr || 0);
+      const estSize = fSize > 0 ? fSize : (duration > 0 && tbr > 0 ? Math.round((tbr * 1024 / 8) * duration) : 0);
+
+      if (estSize > 0) {
+        if (!qualitySizes[q] || estSize > qualitySizes[q]) {
+          qualitySizes[q] = estSize;
+        }
+      }
+    }
+
+    if (foundHeights.size === 0) {
+      return {
+        qualities: ['1080p', '720p', '480p', '360p'],
+        qualitySizes: {},
+      };
+    }
+
+    const sortedHeights = Array.from(foundHeights).sort((a, b) => b - a);
+    const qualities = Array.from(new Set(sortedHeights.map((h) => heightToQualityStr(h))));
+    return { qualities, qualitySizes };
+  }
+
+  function extractYtdlQualitiesAndSizes(info: Awaited<ReturnType<typeof ytdl.getInfo>>): {
+    qualities: string[];
+    qualitySizes: Record<string, number>;
+  } {
+    const qualitySizes: Record<string, number> = {};
+    const foundHeights = new Set<number>();
+    const duration = Number(info.videoDetails.lengthSeconds) || 0;
+
+    for (const f of info.formats) {
+      if (!f.hasVideo) continue;
+      const h = getVideoFormatResolution(f);
+      if (h <= 0) continue;
+      foundHeights.add(h);
+
+      const q = heightToQualityStr(h);
+      const fSize = Number(f.contentLength || (f as any).fileSize || 0);
+      const bit = Number(f.bitrate || 0);
+      const estSize = fSize > 0 ? fSize : (duration > 0 && bit > 0 ? Math.round((bit * 1024 / 8) * duration) : 0);
+
+      if (estSize > 0) {
+        if (!qualitySizes[q] || estSize > qualitySizes[q]) {
+          qualitySizes[q] = estSize;
+        }
+      }
+    }
+
+    if (foundHeights.size === 0) {
+      return {
+        qualities: ['1080p', '720p', '480p', '360p'],
+        qualitySizes: {},
+      };
+    }
+
+    const sortedHeights = Array.from(foundHeights).sort((a, b) => b - a);
+    const qualities = Array.from(new Set(sortedHeights.map((h) => heightToQualityStr(h))));
+    return { qualities, qualitySizes };
+  }
+
   function extractYtDlpTracks(info: Record<string, unknown>): {
     audioTracks: MediaAudioTrack[];
     manualSubtitles: MediaSubtitleTrack[];
@@ -8437,6 +8526,7 @@ async function startServer() {
               80
             );
             const tracks = extractYtDlpTracks(info);
+            const qs = extractYtDlpQualitiesAndSizes(info);
             const rawThumb =
               typeof info.thumbnail === 'string' && info.thumbnail
                 ? info.thumbnail
@@ -8452,7 +8542,8 @@ async function startServer() {
               thumbnail: maybeProxySocialThumbnail(rawThumb, parsed),
               providerGlow: 'red',
               isVertical,
-              qualities: ['2160p', '1080p', '720p', '480p', '360p'],
+              qualities: qs.qualities,
+              qualitySizes: qs.qualitySizes,
               engineMode: 'live',
               audioTracks: tracks.audioTracks,
               manualSubtitles: tracks.manualSubtitles,
@@ -8500,14 +8591,7 @@ async function startServer() {
       try {
         const info = await ytdl.getInfo(watchUrl);
         const details = info.videoDetails;
-        const maxHeight = info.formats.reduce(
-          (max: number, f: VideoFormat) => Math.max(max, getVideoFormatResolution(f)),
-          0
-        );
-        const qualities = ['2160p', '1080p', '720p', '480p', '360p'].filter((q) => {
-          const h = selectTargetHeight(q);
-          return maxHeight === 0 || h <= maxHeight || h <= 720;
-        });
+        const qs = extractYtdlQualitiesAndSizes(info);
 
         const thumbs = details.thumbnails || [];
         const bestThumb = thumbs[thumbs.length - 1]?.url || `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
@@ -8523,7 +8607,8 @@ async function startServer() {
           thumbnail: bestThumb,
           providerGlow: 'red',
           isVertical,
-          qualities,
+          qualities: qs.qualities,
+          qualitySizes: qs.qualitySizes,
           engineMode: 'live',
           audioTracks: tracks.audioTracks,
           manualSubtitles: tracks.manualSubtitles,
