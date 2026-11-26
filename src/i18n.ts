@@ -176,6 +176,8 @@ export interface TranslationDict {
   telegramEnableDesc: string;
   telegramUploadLabel: string;
   telegramUploadDesc: string;
+  telegramDisklessActive: string;
+  telegramDisklessInactiveHint: string;
   telegramModeLabel: string;
   telegramModeUser: string;
   telegramModeBot: string;
@@ -442,6 +444,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramEnableDesc: 'Publish finished downloads to your Telegram channel instead of the server disk.',
     telegramUploadLabel: 'Upload downloads',
     telegramUploadDesc: 'When on, every finished download is uploaded to the channel and removed from the server disk.',
+    telegramDisklessActive: 'Diskless upload on — files go straight to Telegram.',
+    telegramDisklessInactiveHint: 'Uploads are not active yet — turn on Upload or set a channel.',
     telegramModeLabel: 'Account type',
     telegramModeUser: 'User account',
     telegramModeBot: 'Bot',
@@ -706,6 +710,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramEnableDesc: 'دانلودهای آماده به‌جای دیسک سرور در کانال تلگرام منتشر می‌شوند.',
     telegramUploadLabel: 'آپلود دانلودها',
     telegramUploadDesc: 'وقتی روشن باشد، هر دانلود تمام‌شده به کانال آپلود و از دیسک سرور حذف می‌شود.',
+    telegramDisklessActive: 'آپلود بدون دیسک فعال است — فایل‌ها مستقیم به تلگرام می‌روند.',
+    telegramDisklessInactiveHint: 'آپلود هنوز فعال نیست — گزینه آپلود را روشن کنید یا کانال را تنظیم کنید.',
     telegramModeLabel: 'نوع حساب',
     telegramModeUser: 'حساب کاربری',
     telegramModeBot: 'ربات',
@@ -971,6 +977,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramEnableDesc: 'Публиковать готовые загрузки в канале Telegram вместо диска сервера.',
     telegramUploadLabel: 'Загружать файлы',
     telegramUploadDesc: 'Если включено, каждая готовая загрузка отправляется в канал и удаляется с диска сервера.',
+    telegramDisklessActive: 'Загрузка без диска включена — файлы идут сразу в Telegram.',
+    telegramDisklessInactiveHint: 'Загрузка пока не активна — включите «Загружать файлы» или укажите канал.',
     telegramModeLabel: 'Тип аккаунта',
     telegramModeUser: 'Аккаунт пользователя',
     telegramModeBot: 'Бот',
@@ -1235,6 +1243,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramEnableDesc: '将完成的下载发布到 Telegram 频道，而不是服务器磁盘。',
     telegramUploadLabel: '上传下载文件',
     telegramUploadDesc: '开启后，每个完成的下载都会上传到频道并从服务器磁盘删除。',
+    telegramDisklessActive: '无磁盘上传已开启 — 文件直接发送到 Telegram。',
+    telegramDisklessInactiveHint: '上传尚未启用 — 请开启“上传下载文件”或设置频道。',
     telegramModeLabel: '账户类型',
     telegramModeUser: '用户账户',
     telegramModeBot: '机器人',

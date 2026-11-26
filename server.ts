@@ -11,8 +11,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync, backup as sqliteBackup } from 'node:sqlite';
 import { pipeline } from 'node:stream/promises';
+import { PassThrough, Readable } from 'node:stream';
 import tls from 'node:tls';
 import { promisify } from 'node:util';
+import zlib from 'node:zlib';
 import { Ytdl, chooseFormat, Quality } from '@distube/ytdl-core';
 import type { VideoFormat } from '@distube/ytdl-core';
 import express from 'express';
@@ -335,6 +337,15 @@ try {
     db.exec('ROLLBACK;');
   } catch {}
   console.warn('[db] download_history migration note:', migErr instanceof Error ? migErr.message : migErr);
+}
+
+try {
+  const tgCols = db.prepare("PRAGMA table_info('telegram_files')").all() as Array<{ name?: string }>;
+  if (!tgCols.some((c) => c.name === 'bot_file_id')) {
+    db.exec('ALTER TABLE telegram_files ADD COLUMN bot_file_id TEXT;');
+  }
+} catch {
+  // Ignore migration error if table is newly created
 }
 
 function normalizeQualityValue(raw: unknown): string {
@@ -704,6 +715,9 @@ interface AdminTelegramConfig {
   session: string;
   mode: 'user' | 'bot';
   channel: string;
+  // True when `channel` was filled in automatically from the bot's last chat
+  // rather than typed by the admin. Lets a later phone sign-in discard it.
+  channelAuto?: boolean;
 }
 
 interface AdminConfig {
@@ -833,6 +847,7 @@ function loadAdminConfig(): AdminConfig {
           session: typeof parsed.telegram?.session === 'string' ? parsed.telegram.session.trim() : '',
           mode: parsed.telegram?.mode === 'bot' ? 'bot' : 'user',
           channel: typeof parsed.telegram?.channel === 'string' ? parsed.telegram.channel.trim() : '',
+          channelAuto: parsed.telegram?.channelAuto === true,
         },
       };
     }
@@ -894,14 +909,91 @@ function telegramCredentials(cfg: AdminTelegramConfig): { apiId: number; apiHash
   return { apiId: cfg.apiId, apiHash: cfg.apiHash };
 }
 
+function telegramUsesBotHttpApi(cfg: AdminTelegramConfig): boolean {
+  // A bot token means the Bot HTTP API is the transport, unless a real user
+  // session (phone login) is also present — that always wins over the token.
+  if (!cfg.botToken) return false;
+  if (cfg.mode === 'user' && cfg.session) return false;
+  return true;
+}
+
 function telegramIsConfigured(cfg: AdminTelegramConfig): boolean {
-  if (!telegramCredentials(cfg)) return false;
   if (cfg.mode === 'bot') return Boolean(cfg.botToken);
-  return Boolean(cfg.session);
+  if (!telegramCredentials(cfg)) return Boolean(cfg.botToken);
+  // Credentials alone are not a login; the account must be signed in, or a bot
+  // token must be present to drive the Bot HTTP API.
+  return Boolean(cfg.session) || Boolean(cfg.botToken);
 }
 
 function telegramEnabledForUploads(cfg: AdminTelegramConfig): boolean {
   return Boolean(cfg.enabled && cfg.uploadEnabled && cfg.channel && telegramIsConfigured(cfg));
+}
+
+/**
+ * Once valid Telegram credentials arrive, keep the app on the diskless path by
+ * default: switch storage + uploads on, and for a phone account with no channel
+ * chosen yet, publish to Saved Messages ("me") so a download never touches the
+ * server disk. The admin can still turn either toggle off afterwards; that only
+ * happens on a credential change, so an explicit "off" is respected later.
+ */
+function telegramActivateDiskless(cfg: AdminTelegramConfig): void {
+  if (!telegramIsConfigured(cfg)) return;
+  cfg.enabled = true;
+  cfg.uploadEnabled = true;
+  if (cfg.mode === 'user' && cfg.session && !cfg.channel) {
+    cfg.channel = 'me';
+  }
+}
+
+function sanitizeTelegramError(err: unknown, botToken?: string): string {
+  let msg = err instanceof Error ? err.message : String(err || 'Telegram request failed.');
+  if (botToken) {
+    msg = msg.split(botToken).join('[REDACTED]');
+  }
+  msg = msg.replace(/bot\d+:[A-Za-z0-9_-]+/g, 'bot[REDACTED]');
+  return msg;
+}
+
+async function callTelegramBotApi<T = unknown>(
+  botToken: string,
+  method: string,
+  params?: Record<string, string | number | boolean>
+): Promise<T> {
+  const qs = params
+    ? '?' +
+      Object.entries(params)
+        .filter(([, v]) => v !== undefined && v !== null && v !== '')
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join('&')
+    : '';
+  const url = `https://api.telegram.org/bot${botToken}/${method}${qs}`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    const data = (await res.json()) as { ok?: boolean; result?: T; description?: string };
+    if (!res.ok || !data.ok || data.result === undefined) {
+      throw new Error(data.description || `Telegram Bot API HTTP ${res.status}`);
+    }
+    return data.result;
+  } catch (err) {
+    throw new Error(sanitizeTelegramError(err, botToken));
+  }
+}
+
+/**
+ * Finds a chat id a bot can post into when the admin has only supplied a token.
+ * A brand-new bot has no chat until someone messages it or adds it to a channel,
+ * so this returns null in that case and the admin must set the channel manually.
+ */
+async function telegramDiscoverBotChatId(botToken: string): Promise<string | null> {
+  try {
+    const updates = await callTelegramBotApi<
+      Array<{ message?: { chat?: { id?: number | string } }; channel_post?: { chat?: { id?: number | string } } }>
+    >(botToken, 'getUpdates', { limit: 1, offset: -1, allowed_updates: JSON.stringify(['message', 'channel_post']) });
+    const chatId = updates?.[0]?.message?.chat?.id ?? updates?.[0]?.channel_post?.chat?.id;
+    return chatId === undefined || chatId === null ? null : String(chatId);
+  } catch {
+    return null;
+  }
 }
 
 async function disposeTelegramClient(): Promise<void> {
@@ -988,7 +1080,7 @@ async function getTelegramClient(): Promise<TelegramClient> {
   try {
     return await build;
   } catch (err) {
-    telegramState.lastError = err instanceof Error ? err.message : String(err);
+    telegramState.lastError = sanitizeTelegramError(err, cfg.botToken);
     telegramState.connecting = null;
     throw err;
   } finally {
@@ -999,28 +1091,41 @@ async function getTelegramClient(): Promise<TelegramClient> {
 }
 
 async function telegramClientIfReady(): Promise<TelegramClient | null> {
-  if (!telegramIsConfigured(adminConfig.telegram)) return null;
+  if (!telegramIsConfigured(adminConfig.telegram) || telegramUsesBotHttpApi(adminConfig.telegram)) return null;
   try {
     return await getTelegramClient();
   } catch (err) {
-    telegramState.lastError = err instanceof Error ? err.message : String(err);
+    telegramState.lastError = sanitizeTelegramError(err, adminConfig.telegram.botToken);
     return null;
   }
 }
 
 function telegramStatusView() {
   const cfg = adminConfig.telegram;
+  const usingBotHttpApi = telegramUsesBotHttpApi(cfg);
+  const mtprotoConnected =
+    telegramState.client !== null && telegramState.clientKey.startsWith(`${cfg.apiId || 0}:`);
+  const signedIn =
+    cfg.mode === 'bot'
+      ? usingBotHttpApi
+        ? Boolean(cfg.botToken)
+        : mtprotoConnected || Boolean(cfg.botToken && telegramCredentials(cfg))
+      : mtprotoConnected;
   return {
     enabled: cfg.enabled,
     uploadEnabled: cfg.uploadEnabled,
     mode: cfg.mode,
+    usingBotHttpApi,
     channel: cfg.channel,
     apiId: cfg.apiId,
     hasApiHash: Boolean(cfg.apiHash),
     apiHashMasked: cfg.apiHash ? `${cfg.apiHash.slice(0, 4)}…${cfg.apiHash.slice(-4)}` : '',
     hasBotToken: Boolean(cfg.botToken),
     hasSession: Boolean(cfg.session),
-    signedIn: telegramState.client !== null && telegramState.clientKey.startsWith(`${cfg.apiId || 0}:`),
+    signedIn,
+    // True only when the pipeline will stream straight to Telegram instead of
+    // the server disk (enabled + upload toggle + channel + working credentials).
+    uploadsActive: telegramEnabledForUploads(cfg),
     account: telegramState.selfLabel,
     lastError: telegramState.lastError,
     pendingLogin: Boolean(pendingTelegramLogin),
@@ -1044,6 +1149,7 @@ interface TelegramFileRow {
   quality: string | null;
   chat_id: string;
   message_id: number;
+  bot_file_id?: string | null;
   file_name: string | null;
   mime_type: string | null;
   size_bytes: number;
@@ -1059,6 +1165,7 @@ function recordTelegramFile(row: {
   quality: string;
   chatId: string;
   messageId: number;
+  botFileId?: string | null;
   fileName: string;
   mimeType: string;
   sizeBytes: number;
@@ -1066,8 +1173,8 @@ function recordTelegramFile(row: {
   const id = crypto.randomUUID();
   db.prepare(
     `INSERT INTO telegram_files
-       (id, user_id, job_id, source_url, title, author, quality, chat_id, message_id, file_name, mime_type, size_bytes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, user_id, job_id, source_url, title, author, quality, chat_id, message_id, bot_file_id, file_name, mime_type, size_bytes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     row.userId,
@@ -1078,6 +1185,7 @@ function recordTelegramFile(row: {
     row.quality,
     row.chatId,
     row.messageId,
+    row.botFileId ?? null,
     row.fileName,
     row.mimeType,
     row.sizeBytes,
@@ -1094,6 +1202,468 @@ function lookupTelegramFile(id: string): TelegramFileRow | null {
 }
 
 /**
+ * Streams a Readable directly into Telegram MTProto (`SaveFilePart` for <= 10 MB
+ * or `SaveBigFilePart` with streaming `fileTotalParts = -1` for > 10 MB) with
+ * bounded concurrency and backpressure, never touching the server disk.
+ */
+async function uploadStreamToTelegramMtproto(
+  client: TelegramClient,
+  readable: Readable,
+  fileName: string,
+  onProgress?: (uploadedBytes: number) => void
+): Promise<{ inputFile: Api.InputFile | Api.InputFileBig; sizeBytes: number }> {
+  const PART_SIZE = 512 * 1024;
+  const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB (20 parts of 512 KB)
+  const WORKERS = 4;
+
+  const rawId = crypto.randomBytes(8).readBigInt64LE(0);
+  const fileId = bigInt(rawId.toString());
+
+  await client.getSender(client.session.dcId);
+
+  let uploadedBytes = 0;
+  const sendPart = async (
+    isLarge: boolean,
+    partIndex: number,
+    totalPartsArg: number,
+    bytes: Buffer
+  ): Promise<void> => {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      let sender: Awaited<ReturnType<TelegramClient['getSender']>> | undefined;
+      try {
+        sender = await client.getSender(client.session.dcId);
+        await sender.send(
+          isLarge
+            ? new Api.upload.SaveBigFilePart({
+                fileId,
+                filePart: partIndex,
+                fileTotalParts: totalPartsArg,
+                bytes,
+              })
+            : new Api.upload.SaveFilePart({
+                fileId,
+                filePart: partIndex,
+                bytes,
+              })
+        );
+        uploadedBytes += bytes.length;
+        if (onProgress) onProgress(uploadedBytes);
+        return;
+      } catch (err: unknown) {
+        const errAny = err as { seconds?: number; message?: string };
+        if (typeof errAny?.seconds === 'number' && errAny.seconds > 0) {
+          await new Promise((r) => setTimeout(r, (errAny.seconds! + 1) * 1000));
+          continue;
+        }
+        if (sender && !sender.isConnected()) {
+          await new Promise((r) => setTimeout(r, 1000));
+          continue;
+        }
+        if (attempt < 3 && /timeout|ECONNRESET|EPIPE|disconnect/i.test(String(errAny?.message || ''))) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error('Failed to upload file part to Telegram after retries.');
+  };
+
+  const inFlight = new Set<Promise<void>>();
+  const enqueue = async (task: () => Promise<void>): Promise<void> => {
+    while (inFlight.size >= WORKERS) {
+      await Promise.race(inFlight);
+    }
+    let tracked!: Promise<void>;
+    tracked = task().finally(() => {
+      inFlight.delete(tracked);
+    });
+    inFlight.add(tracked);
+  };
+
+  let accChunks: Buffer[] = [];
+  let accLen = 0;
+  const takeExact = (n: number): Buffer => {
+    const joined = accChunks.length === 1 ? accChunks[0] : Buffer.concat(accChunks, accLen);
+    const slice = joined.subarray(0, n);
+    const rest = joined.subarray(n);
+    accChunks = rest.length > 0 ? [rest] : [];
+    accLen = rest.length;
+    return Buffer.from(slice);
+  };
+  const drainRemaining = (): Buffer | null => {
+    if (accLen === 0) return null;
+    const joined = accChunks.length === 1 ? accChunks[0] : Buffer.concat(accChunks, accLen);
+    accChunks = [];
+    accLen = 0;
+    return joined;
+  };
+
+  let totalBytes = 0;
+  let streamingBig = false;
+  let nextPartIndex = 0;
+  const initialParts: Buffer[] = [];
+  let heldBigChunk: Buffer | null = null;
+
+  const flushInitialToBig = async (holdLast: boolean): Promise<void> => {
+    streamingBig = true;
+    const limit = holdLast ? initialParts.length - 1 : initialParts.length;
+    for (let i = 0; i < limit; i += 1) {
+      const partBuf = initialParts[i];
+      const idx = nextPartIndex++;
+      await enqueue(() => sendPart(true, idx, -1, partBuf));
+    }
+    if (holdLast && initialParts.length > 0) {
+      heldBigChunk = initialParts[initialParts.length - 1];
+    }
+    initialParts.length = 0;
+  };
+
+  try {
+    for await (const raw of readable) {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+      if (chunk.length === 0) continue;
+      totalBytes += chunk.length;
+      accChunks.push(chunk);
+      accLen += chunk.length;
+
+      while (accLen >= PART_SIZE) {
+        const part = takeExact(PART_SIZE);
+        if (!streamingBig) {
+          initialParts.push(part);
+          if (totalBytes > LARGE_FILE_THRESHOLD) {
+            // If there are still bytes in accLen, none of initialParts is the last chunk;
+            // otherwise hold the last full chunk until more bytes or EOF arrive.
+            await flushInitialToBig(accLen === 0);
+          }
+        } else {
+          if (heldBigChunk !== null) {
+            const toSend = heldBigChunk;
+            const idx = nextPartIndex++;
+            await enqueue(() => sendPart(true, idx, -1, toSend));
+          }
+          heldBigChunk = part;
+        }
+      }
+
+      if (!streamingBig && totalBytes > LARGE_FILE_THRESHOLD && initialParts.length > 0 && accLen > 0) {
+        await flushInitialToBig(false);
+      }
+      if (streamingBig && heldBigChunk !== null && accLen > 0) {
+        const toSend = heldBigChunk;
+        heldBigChunk = null;
+        const idx = nextPartIndex++;
+        await enqueue(() => sendPart(true, idx, -1, toSend));
+      }
+    }
+  } catch (err) {
+    await Promise.allSettled(inFlight);
+    throw err;
+  }
+
+  const tail = drainRemaining();
+
+  if (!streamingBig) {
+    if (tail) initialParts.push(tail);
+    if (totalBytes === 0 || initialParts.length === 0) {
+      throw new Error('Media stream was empty.');
+    }
+    const totalParts = initialParts.length;
+    const isLarge = totalBytes > LARGE_FILE_THRESHOLD;
+    for (let i = 0; i < totalParts; i += 1) {
+      const partBuf = initialParts[i];
+      await enqueue(() => sendPart(isLarge, i, totalParts, partBuf));
+    }
+    await Promise.all(inFlight);
+    return {
+      inputFile: isLarge
+        ? new Api.InputFileBig({ id: fileId, parts: totalParts, name: fileName })
+        : new Api.InputFile({ id: fileId, parts: totalParts, name: fileName, md5Checksum: '' }),
+      sizeBytes: totalBytes,
+    };
+  }
+
+  // Wait for all intermediate `-1` parts before sending the final part with exact totalParts.
+  await Promise.all(inFlight);
+
+  if (heldBigChunk !== null && tail !== null) {
+    const midIdx = nextPartIndex++;
+    await sendPart(true, midIdx, -1, heldBigChunk);
+    const finalIdx = nextPartIndex++;
+    const totalParts = finalIdx + 1;
+    await sendPart(true, finalIdx, totalParts, tail);
+    return {
+      inputFile: new Api.InputFileBig({ id: fileId, parts: totalParts, name: fileName }),
+      sizeBytes: totalBytes,
+    };
+  }
+
+  const finalBuf = heldBigChunk ?? tail;
+  if (!finalBuf) {
+    throw new Error('Missing final stream chunk.');
+  }
+  const finalIdx = nextPartIndex++;
+  const totalParts = finalIdx + 1;
+  await sendPart(true, finalIdx, totalParts, finalBuf);
+  return {
+    inputFile: new Api.InputFileBig({ id: fileId, parts: totalParts, name: fileName }),
+    sizeBytes: totalBytes,
+  };
+}
+
+/**
+ * Streams a Readable directly to Telegram Bot HTTP API (`sendDocument`) via
+ * chunked multipart/form-data without saving anything to disk.
+ * Subject to Telegram Bot API's 50 MB upload cap unless MTProto API ID/Hash are configured.
+ */
+async function uploadStreamToTelegramBotApi(
+  botToken: string,
+  channel: string,
+  readable: Readable,
+  fileName: string,
+  mimeType: string,
+  caption: string,
+  onProgress?: (uploadedBytes: number) => void
+): Promise<{ messageId: number; chatId: string; botFileId: string | null; sizeBytes: number }> {
+  const MAX_BOT_API_BYTES = 50 * 1024 * 1024;
+  const boundary = '----GroveSaveTg' + crypto.randomBytes(16).toString('hex');
+  const safeName = fileName.replace(/["\r\n]/g, '_');
+
+  const preamble = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="chat_id"\r\n\r\n${channel}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="document"; filename="${safeName}"\r\n` +
+      `Content-Type: ${mimeType || 'application/octet-stream'}\r\n\r\n`,
+    'utf8'
+  );
+  const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+
+  let sizeBytes = 0;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      readable.destroy();
+      reject(new Error(sanitizeTelegramError(err, botToken)));
+    };
+
+    const req = https.request(
+      {
+        hostname: 'api.telegram.org',
+        port: 443,
+        path: `/bot${botToken}/sendDocument`,
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Transfer-Encoding': 'chunked',
+        },
+        timeout: 180000,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          if (settled) return;
+          settled = true;
+          try {
+            const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+              ok?: boolean;
+              description?: string;
+              result?: {
+                message_id?: number;
+                chat?: { id?: number | string };
+                document?: { file_id?: string };
+                video?: { file_id?: string };
+                audio?: { file_id?: string };
+                photo?: Array<{ file_id?: string }>;
+              };
+            };
+            const r = payload.result;
+            // Narrow on `r` itself so the message id is known to be a number below.
+            if (!payload.ok || !r?.message_id) {
+              reject(new Error(sanitizeTelegramError(payload.description || `Bot API HTTP ${res.statusCode}`, botToken)));
+              return;
+            }
+            const botFileId =
+              r.document?.file_id ||
+              r.video?.file_id ||
+              r.audio?.file_id ||
+              r.photo?.[r.photo.length - 1]?.file_id ||
+              null;
+            resolve({
+              messageId: r.message_id,
+              chatId: String(r.chat?.id ?? channel),
+              botFileId,
+              sizeBytes,
+            });
+          } catch (parseErr) {
+            reject(new Error(sanitizeTelegramError(parseErr, botToken)));
+          }
+        });
+        res.on('error', fail);
+      }
+    );
+
+    req.on('timeout', () => {
+      req.destroy(new Error('Telegram Bot API upload timed out.'));
+    });
+    req.on('error', fail);
+
+    req.write(preamble);
+
+    readable.on('data', (chunk: Buffer) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      sizeBytes += buf.length;
+      if (sizeBytes > MAX_BOT_API_BYTES) {
+        req.destroy(
+          new Error(
+            'File exceeds Telegram Bot HTTP API 50 MB limit. Add API ID & API Hash in Telegram settings to stream up to 2 GB.'
+          )
+        );
+        return;
+      }
+      if (onProgress) onProgress(sizeBytes);
+      if (!req.write(buf)) {
+        readable.pause();
+        req.once('drain', () => {
+          if (!settled) readable.resume();
+        });
+      }
+    });
+    readable.on('error', fail);
+    readable.on('end', () => {
+      if (settled) return;
+      if (sizeBytes === 0) {
+        req.destroy(new Error('Media stream was empty.'));
+        return;
+      }
+      req.end(epilogue);
+    });
+  });
+}
+
+/**
+ * Streams a finished/live Readable directly into the configured Telegram
+ * channel (user MTProto, bot MTProto, or bot HTTP API) without touching disk.
+ */
+async function uploadStreamJobToTelegram(
+  job: DownloadJob,
+  readable: Readable,
+  knownTotalBytes: number | null,
+  options?: { ext?: DownloadFileExt; mimeType?: string; fileName?: string }
+): Promise<void> {
+  const cfg = adminConfig.telegram;
+  if (!telegramEnabledForUploads(cfg)) {
+    throw new Error('Telegram upload is not enabled.');
+  }
+
+  if (options?.ext) {
+    job.ext = options.ext;
+    job.mimeType = options.mimeType || getMimeTypeForExt(options.ext);
+    job.contentDisposition = buildContentDisposition(job.title, job.quality, options.ext);
+  } else if (options?.mimeType) {
+    job.mimeType = options.mimeType;
+  }
+
+  const fileName = options?.fileName || job.fileName || `${sanitizeFilename(`${job.title}-${job.quality}`)}.${job.ext}`;
+  job.fileName = fileName;
+  if (knownTotalBytes && knownTotalBytes > 0) {
+    job.totalBytes = knownTotalBytes;
+  }
+
+  const caption = `${job.title}\n${job.quality.toUpperCase()} · grove save`;
+  job.telegramUploading = true;
+  job.status = 'downloading';
+
+  const reportProgress = (bytes: number) => {
+    job.downloadedBytes = bytes;
+    if (job.totalBytes && job.totalBytes > 0) {
+      job.progress = Math.min(97, Math.max(5, Math.floor((bytes / job.totalBytes) * 97)));
+    } else {
+      job.progress = Math.min(94, 5 + Math.floor(Math.log2(1 + bytes / (512 * 1024)) * 11));
+    }
+  };
+
+  try {
+    let chatId = cfg.channel;
+    let messageId = 0;
+    let botFileId: string | null = null;
+    let sizeBytes = 0;
+
+    if (telegramUsesBotHttpApi(cfg)) {
+      const result = await uploadStreamToTelegramBotApi(
+        cfg.botToken,
+        cfg.channel,
+        readable,
+        fileName,
+        job.mimeType,
+        caption,
+        reportProgress
+      );
+      chatId = result.chatId;
+      messageId = result.messageId;
+      botFileId = result.botFileId;
+      sizeBytes = result.sizeBytes;
+    } else {
+      const client = await getTelegramClient();
+      const uploadedStream = await uploadStreamToTelegramMtproto(client, readable, fileName, reportProgress);
+      job.status = 'processing';
+      job.progress = 98;
+      const sent = (await client.sendFile(cfg.channel, {
+        file: uploadedStream.inputFile,
+        caption,
+        forceDocument: true,
+        supportsStreaming: false,
+        attributes: [new Api.DocumentAttributeFilename({ fileName })],
+      })) as { id: number };
+      messageId = sent.id;
+      sizeBytes = uploadedStream.sizeBytes;
+
+      try {
+        const inputPeer = await client.getInputEntity(cfg.channel);
+        chatId = tgUtils.getPeerId(inputPeer as never);
+      } catch {
+        chatId = cfg.channel;
+      }
+    }
+
+    const recordId = recordTelegramFile({
+      userId: job.ownerUserId ?? null,
+      jobId: job.id,
+      sourceUrl: job.url,
+      title: job.title,
+      author: job.author || 'grove save',
+      quality: job.quality,
+      chatId: chatId || cfg.channel,
+      messageId,
+      botFileId,
+      fileName,
+      mimeType: job.mimeType,
+      sizeBytes,
+    });
+
+    job.telegramFileId = recordId;
+    job.telegramMessageId = messageId;
+    job.telegramChatId = chatId || cfg.channel;
+    job.telegramUploadError = undefined;
+    job.totalBytes = sizeBytes;
+    job.downloadedBytes = sizeBytes;
+    job.progress = 100;
+    job.status = 'ready';
+  } catch (err) {
+    const safeMsg = sanitizeTelegramError(err, cfg.botToken);
+    job.telegramUploadError = safeMsg;
+    throw new Error(safeMsg);
+  } finally {
+    job.telegramUploading = false;
+  }
+}
+
+/**
  * Uploads a finished job's cache file to the configured Telegram channel and
  * records the mapping in the database. On success the local cache file is
  * deleted, because Telegram is the only storage for published downloads.
@@ -1101,15 +1671,6 @@ function lookupTelegramFile(id: string): TelegramFileRow | null {
 async function uploadJobToTelegram(job: DownloadJob, ownerUserId: string | null, author: string): Promise<void> {
   const cfg = adminConfig.telegram;
   if (!telegramEnabledForUploads(cfg)) return;
-
-  let client: TelegramClient;
-  try {
-    client = await getTelegramClient();
-  } catch (err) {
-    job.telegramUploadError = err instanceof Error ? err.message : 'Telegram is unavailable.';
-    console.error('[telegram] upload skipped:', job.telegramUploadError);
-    return;
-  }
 
   let stat: fs.Stats;
   try {
@@ -1119,60 +1680,16 @@ async function uploadJobToTelegram(job: DownloadJob, ownerUserId: string | null,
     return;
   }
 
-  const fileName = job.fileName || sanitizeFilename(`${job.title}-${job.quality}`) + `.${job.ext}`;
-  const caption = `${job.title}\n${job.quality.toUpperCase()} · grove save`;
-
-  job.telegramUploading = true;
+  job.ownerUserId = ownerUserId;
+  job.author = author;
+  const rs = fs.createReadStream(job.filePath);
   try {
-    const uploaded = (await client.sendFile(cfg.channel, {
-      file: new tgClientLib.uploads.CustomFile(fileName, stat.size, job.filePath),
-      caption,
-      forceDocument: true,
-      workers: 4,
-      supportsStreaming: false,
-      progressCallback: (progress: number) => {
-        // Uploading happens after the local download is complete; keep the job at 100%
-        // so the UI never jumps backwards while bytes move to Telegram.
-        job.progress = 100;
-        void progress;
-      },
-    })) as { id: number };
-
-    // Resolve the canonical (marked) chat id so the stored row keeps working
-    // even if the admin later renames the channel username.
-    let chatId = cfg.channel;
-    try {
-      const inputPeer = await client.getInputEntity(cfg.channel);
-      chatId = tgUtils.getPeerId(inputPeer as never);
-    } catch {
-      chatId = cfg.channel;
-    }
-
-    const recordId = recordTelegramFile({
-      userId: ownerUserId,
-      jobId: job.id,
-      sourceUrl: job.url,
-      title: job.title,
-      author,
-      quality: job.quality,
-      chatId: chatId || cfg.channel,
-      messageId: uploaded.id,
-      fileName,
-      mimeType: job.mimeType,
-      sizeBytes: stat.size,
-    });
-
-    job.telegramFileId = recordId;
-    job.telegramMessageId = uploaded.id;
-    job.telegramChatId = chatId || cfg.channel;
-    job.telegramUploadError = undefined;
-
+    await uploadStreamJobToTelegram(job, rs, stat.size);
     await fs.promises.rm(job.filePath, { force: true }).catch(() => {});
   } catch (err) {
-    job.telegramUploadError = err instanceof Error ? err.message : 'Telegram upload failed.';
+    rs.destroy();
+    job.telegramUploadError = sanitizeTelegramError(err, cfg.botToken);
     console.error('[telegram] upload failed:', job.telegramUploadError);
-  } finally {
-    job.telegramUploading = false;
   }
 }
 
@@ -1244,6 +1761,95 @@ async function streamTelegramFile(
   res: Response,
   inline = false
 ): Promise<void> {
+  const cfg = adminConfig.telegram;
+  const fileName = row.file_name || 'grove-save-media';
+  const disposition = (() => {
+    const ascii = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '_');
+    const mode = inline ? 'inline' : 'attachment';
+    return `${mode}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+  })();
+
+  if (telegramUsesBotHttpApi(cfg)) {
+    if (!row.bot_file_id) {
+      if (!res.headersSent) {
+        res.status(503).json({
+          error: 'Add Telegram API ID & API Hash to stream files stored via MTProto.',
+        });
+      }
+      return;
+    }
+    try {
+      const info = await callTelegramBotApi<{ file_path?: string; file_size?: number }>(cfg.botToken, 'getFile', {
+        file_id: row.bot_file_id,
+      });
+      if (!info.file_path) {
+        throw new Error('Telegram Bot API did not return a file path.');
+      }
+      if (req.method === 'HEAD') {
+        const size = info.file_size || row.size_bytes || 0;
+        res.status(200);
+        res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Disposition', disposition);
+        if (size > 0) res.setHeader('Content-Length', String(size));
+        res.end();
+        return;
+      }
+      const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : '';
+      await new Promise<void>((resolve, reject) => {
+        const upstreamReq = https.request(
+          {
+            hostname: 'api.telegram.org',
+            port: 443,
+            path: `/file/bot${cfg.botToken}/${info.file_path}`,
+            method: 'GET',
+            headers: rangeHeader ? { Range: rangeHeader } : {},
+            timeout: 120000,
+          },
+          (upstreamRes) => {
+            const status = upstreamRes.statusCode || 200;
+            if (status >= 400) {
+              upstreamRes.resume();
+              reject(new Error(`Telegram Bot file proxy returned HTTP ${status}`));
+              return;
+            }
+            res.status(status);
+            res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+            res.setHeader('Accept-Ranges', 'bytes');
+            res.setHeader('Content-Disposition', disposition);
+            res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+            for (const h of ['content-length', 'content-range']) {
+              const v = upstreamRes.headers[h];
+              if (v) res.setHeader(h, v);
+            }
+            const onClose = () => upstreamRes.destroy();
+            req.once('close', onClose);
+            upstreamRes.on('error', (err) => {
+              req.off('close', onClose);
+              reject(err);
+            });
+            upstreamRes.on('end', () => {
+              req.off('close', onClose);
+              resolve();
+            });
+            upstreamRes.pipe(res);
+          }
+        );
+        upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('Telegram file stream timed out.')));
+        upstreamReq.on('error', reject);
+        upstreamReq.end();
+      });
+    } catch (err) {
+      const safeErr = sanitizeTelegramError(err, cfg.botToken);
+      if (!res.headersSent) {
+        res.status(503).json({ error: safeErr });
+      } else {
+        res.destroy();
+      }
+    }
+    return;
+  }
+
   // Never let this reject: Express 4 does not catch async handler rejections,
   // and a bad Telegram login would otherwise take the whole server down.
   let client: TelegramClient;
@@ -1254,7 +1860,7 @@ async function streamTelegramFile(
   } catch (err) {
     if (!res.headersSent) {
       res.status(503).json({
-        error: err instanceof Error ? err.message : 'Telegram storage is unavailable.',
+        error: sanitizeTelegramError(err, cfg.botToken),
       });
     } else {
       res.destroy();
@@ -1306,12 +1912,6 @@ async function streamTelegramFile(
   }
 
   const length = Math.max(end - start + 1, 0);
-  const fileName = row.file_name || 'grove-save-media';
-  const disposition = (() => {
-    const ascii = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '_');
-    const mode = inline ? 'inline' : 'attachment';
-    return `${mode}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
-  })();
 
   res.status(partial ? 206 : 200);
   res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
@@ -4492,62 +5092,111 @@ async function startServer() {
     res.json(telegramStatusView());
   });
 
-  app.put('/api/admin/telegram', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  // Express 4 does not catch rejected promises, so wrap the async work and
+  // turn a failure into a normal 500 instead of an unhandled rejection.
+  app.put('/api/admin/telegram', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const user = req.authUser!;
     if (user.role !== 'admin') {
       res.status(403).json({ error: 'Admin access required' });
       return;
     }
-    const body = (req.body || {}) as Record<string, unknown>;
-    const next = adminConfig.telegram;
-    let credentialsChanged = false;
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const next = adminConfig.telegram;
+      let credentialsChanged = false;
 
-    if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
-    if (typeof body.uploadEnabled === 'boolean') next.uploadEnabled = body.uploadEnabled;
-    if (body.mode === 'user' || body.mode === 'bot') {
-      if (next.mode !== body.mode) credentialsChanged = true;
-      next.mode = body.mode;
-    }
-    if (typeof body.channel === 'string') {
-      const channel = body.channel.trim();
-      next.channel = channel.replace(/^https?:\/\/t\.me\//i, '').replace(/^@?/, '@');
-      if (next.channel === '@') next.channel = '';
-    }
-    if (typeof body.apiId === 'number' || typeof body.apiId === 'string') {
-      const parsedId = Number(body.apiId);
-      if (Number.isInteger(parsedId) && parsedId > 0) {
-        if (next.apiId !== parsedId) credentialsChanged = true;
-        next.apiId = parsedId;
-      } else if (body.apiId === '' || body.apiId === null) {
+      if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
+      if (typeof body.uploadEnabled === 'boolean') next.uploadEnabled = body.uploadEnabled;
+      if (body.mode === 'user' || body.mode === 'bot') {
+        if (next.mode !== body.mode) credentialsChanged = true;
+        next.mode = body.mode;
+      }
+      if (typeof body.channel === 'string') {
+        const channel = body.channel.trim();
+        const stripped = channel.replace(/^https?:\/\/t\.me\//i, '').replace(/\/.*$/, '');
+        if (!stripped) {
+          next.channel = '';
+        } else if (/^-?\d+$/.test(stripped)) {
+          next.channel = stripped;
+        } else {
+          next.channel = stripped.startsWith('@') ? stripped : `@${stripped}`;
+        }
+        // Anything the admin types is intentional, so auto-discovery may not
+        // overwrite it from here on.
+        next.channelAuto = false;
+      }
+      if (typeof body.apiId === 'number' || typeof body.apiId === 'string') {
+        const parsedId = Number(body.apiId);
+        if (Number.isInteger(parsedId) && parsedId > 0) {
+          if (next.apiId !== parsedId) credentialsChanged = true;
+          next.apiId = parsedId;
+        } else if (body.apiId === '' || body.apiId === null) {
+          next.apiId = null;
+          credentialsChanged = true;
+        }
+      } else if (body.apiId === null) {
         next.apiId = null;
         credentialsChanged = true;
       }
-    }
-    if (typeof body.apiHash === 'string') {
-      const hash = body.apiHash.trim();
-      // An empty value from the UI means "keep the stored secret".
-      if (hash && hash !== next.apiHash) {
-        next.apiHash = hash;
+      if (typeof body.apiHash === 'string') {
+        const hash = body.apiHash.trim();
+        // An empty value from the UI means "keep the stored secret" unless explicitly cleared.
+        if (hash && hash !== next.apiHash) {
+          next.apiHash = hash;
+          credentialsChanged = true;
+        }
+      }
+      if (body.clearApiCredentials === true) {
+        next.apiId = null;
+        next.apiHash = '';
         credentialsChanged = true;
       }
-    }
-    if (typeof body.botToken === 'string') {
-      const token = body.botToken.trim();
-      if (token && token !== next.botToken) {
-        next.botToken = token;
+      if (typeof body.botToken === 'string') {
+        const token = body.botToken.trim();
+        if (token && token !== next.botToken) {
+          next.botToken = token;
+          credentialsChanged = true;
+        }
+      }
+      if (body.clearSession === true) {
+        next.session = '';
         credentialsChanged = true;
       }
-    }
-    if (body.clearSession === true) {
-      next.session = '';
-      credentialsChanged = true;
-    }
 
-    saveAdminConfig(adminConfig);
-    if (credentialsChanged) {
-      void disposeTelegramClient();
+      // Entering credentials is the intent to use Telegram storage: default the
+      // toggles (and Saved Messages channel) on so uploads actually go diskless.
+      if (credentialsChanged) {
+        telegramActivateDiskless(next);
+      }
+
+      // A bot token with no channel still has nowhere to publish. Reuse the last
+      // chat the bot saw (someone's DM or a channel it was added to) so a token
+      // alone is enough to keep downloads off the disk.
+      if (credentialsChanged && telegramUsesBotHttpApi(next) && !next.channel) {
+        const discovered = await telegramDiscoverBotChatId(next.botToken);
+        if (discovered) {
+          next.channel = discovered;
+          next.channelAuto = true;
+          telegramActivateDiskless(next);
+        }
+      }
+
+      saveAdminConfig(adminConfig);
+      if (credentialsChanged) {
+        void disposeTelegramClient();
+      }
+      if (telegramUsesBotHttpApi(next)) {
+        void callTelegramBotApi<{ username?: string; first_name?: string }>(next.botToken, 'getMe')
+          .then((me) => {
+            telegramState.selfLabel = me.username ? `@${me.username}` : me.first_name || null;
+            telegramState.lastError = null;
+          })
+          .catch(() => {});
+      }
+      res.json({ success: true, ...telegramStatusView() });
+    } catch (err) {
+      res.status(500).json({ error: sanitizeTelegramError(err, adminConfig.telegram.botToken) });
     }
-    res.json({ success: true, ...telegramStatusView() });
   });
 
   app.post('/api/admin/telegram/test', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -4565,6 +5214,24 @@ async function startServer() {
       res.json({ success: false, error: 'Telegram account is not connected yet.' });
       return;
     }
+    if (telegramUsesBotHttpApi(cfg)) {
+      try {
+        const me = await callTelegramBotApi<{ username?: string; first_name?: string }>(cfg.botToken, 'getMe');
+        const label = me.username ? `@${me.username}` : me.first_name || null;
+        telegramState.selfLabel = label;
+        const chat = await callTelegramBotApi<{ title?: string; username?: string }>(cfg.botToken, 'getChat', {
+          chat_id: cfg.channel,
+        });
+        const title = chat.title || (chat.username ? `@${chat.username}` : cfg.channel);
+        telegramState.lastError = null;
+        res.json({ success: true, channel: title, account: label });
+      } catch (err) {
+        const safeErr = sanitizeTelegramError(err, cfg.botToken);
+        telegramState.lastError = safeErr;
+        res.json({ success: false, error: safeErr });
+      }
+      return;
+    }
     try {
       const client = await getTelegramClient();
       const entity = await client.getEntity(cfg.channel);
@@ -4573,7 +5240,7 @@ async function startServer() {
         ((entity as { username?: string }).username ? `@${(entity as { username?: string }).username}` : cfg.channel);
       res.json({ success: true, channel: title, account: telegramState.selfLabel });
     } catch (err) {
-      res.json({ success: false, error: err instanceof Error ? err.message : 'Telegram test failed.' });
+      res.json({ success: false, error: sanitizeTelegramError(err, cfg.botToken) });
     }
   });
 
@@ -4690,7 +5357,15 @@ async function startServer() {
       adminConfig.telegram.apiHash = pending.apiHash;
       adminConfig.telegram.session = sessionString;
       adminConfig.telegram.mode = 'user';
-      adminConfig.telegram.enabled = true;
+      // A channel filled in by bot discovery points at a bot-owned chat that a
+      // phone account cannot post into, so drop it and use Saved Messages.
+      if (adminConfig.telegram.channelAuto) {
+        adminConfig.telegram.channel = '';
+        adminConfig.telegram.channelAuto = false;
+      }
+      // A signed-in phone account is the strongest signal of intent: turn on
+      // diskless uploads and default the target to Saved Messages if unset.
+      telegramActivateDiskless(adminConfig.telegram);
       saveAdminConfig(adminConfig);
 
       const oldClient = pending.client;
@@ -4734,6 +5409,13 @@ async function startServer() {
       res.status(403).json({ error: 'Admin access required' });
       return;
     }
+    if (telegramUsesBotHttpApi(adminConfig.telegram)) {
+      res.json({
+        success: false,
+        error: 'Chat listing requires API ID and API Hash. Enter your @channel or -100... chat ID directly.',
+      });
+      return;
+    }
     try {
       const client = await getTelegramClient();
       const dialogs = await client.getDialogs({ limit: 100 });
@@ -4748,7 +5430,7 @@ async function startServer() {
         .slice(0, 100);
       res.json({ success: true, chats });
     } catch (err) {
-      res.json({ success: false, error: err instanceof Error ? err.message : 'Could not load chats.' });
+      res.json({ success: false, error: sanitizeTelegramError(err, adminConfig.telegram.botToken) });
     }
   });
 
@@ -6431,6 +7113,396 @@ async function startServer() {
     });
   });
 
+  async function openRemoteMediaReadable(
+    remoteUrl: string,
+    options?: { referer?: string; headers?: Record<string, string>; timeoutMs?: number },
+    redirectDepth = 0
+  ): Promise<{ stream: Readable; contentType: string; contentLength: number | null }> {
+    const valid = await validatePublicUrl(remoteUrl);
+    if (!valid) {
+      throw new Error('Disallowed remote media URL.');
+    }
+    const targetPort = valid.port ? Number(valid.port) : valid.protocol === 'https:' ? 443 : 80;
+    const reqHeaders = buildUpstreamHeaders(options?.headers);
+    if (options?.referer && !reqHeaders.Referer && !reqHeaders.referer) {
+      reqHeaders.Referer = options.referer;
+    }
+    const timeoutMs = options?.timeoutMs ?? 120000;
+
+    const handleUpstream = (
+      upstreamRes: http.IncomingMessage,
+      resolve: (v: { stream: Readable; contentType: string; contentLength: number | null }) => void,
+      reject: (err: Error) => void
+    ) => {
+      const status = upstreamRes.statusCode || 200;
+      if (status >= 300 && status < 400 && upstreamRes.headers.location) {
+        const nextLoc = upstreamRes.headers.location;
+        upstreamRes.resume();
+        if (redirectDepth >= 5) {
+          reject(new Error('Too many redirects downloading media.'));
+          return;
+        }
+        let nextAbs = '';
+        try {
+          nextAbs = new URL(nextLoc, valid).toString();
+        } catch {
+          reject(new Error('Invalid redirect location.'));
+          return;
+        }
+        openRemoteMediaReadable(nextAbs, options, redirectDepth + 1)
+          .then(resolve)
+          .catch((e) => reject(e instanceof Error ? e : new Error(String(e))));
+        return;
+      }
+      if (status >= 400) {
+        upstreamRes.destroy();
+        reject(new Error(`Upstream returned HTTP ${status}.`));
+        return;
+      }
+      const ct = String(upstreamRes.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+      const len = Number(upstreamRes.headers['content-length'] || 0) || null;
+      resolve({ stream: upstreamRes, contentType: ct, contentLength: len });
+    };
+
+    if (adminConfig.xray.enabled && xrayState.running) {
+      return new Promise((resolve, reject) => {
+        const connectReq = http.request({
+          host: '127.0.0.1',
+          port: adminConfig.xray.httpPort,
+          method: 'CONNECT',
+          path: `${valid.hostname}:${targetPort}`,
+          timeout: 12000,
+        });
+        connectReq.on('connect', (cRes, socket) => {
+          if (cRes.statusCode !== 200) {
+            socket.destroy();
+            reject(new Error(`Proxy CONNECT ${cRes.statusCode}`));
+            return;
+          }
+          const mod = valid.protocol === 'https:' ? https : http;
+          const createConnection = () =>
+            valid.protocol === 'https:'
+              ? tls.connect({ socket, servername: valid.hostname })
+              : socket;
+          const upstreamReq = mod.request(
+            {
+              hostname: valid.hostname,
+              port: targetPort,
+              path: valid.pathname + valid.search,
+              method: 'GET',
+              createConnection,
+              headers: { ...reqHeaders, Host: valid.host },
+              timeout: timeoutMs,
+            },
+            (upstreamRes) => handleUpstream(upstreamRes, resolve, reject)
+          );
+          upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('Media stream timed out.')));
+          upstreamReq.on('error', reject);
+          upstreamReq.end();
+        });
+        connectReq.on('timeout', () => connectReq.destroy(new Error('Proxy connect timed out.')));
+        connectReq.on('error', reject);
+        connectReq.end();
+      });
+    }
+
+    return new Promise((resolve, reject) => {
+      const mod = valid.protocol === 'https:' ? https : http;
+      const upstreamReq = mod.request(
+        {
+          hostname: valid.hostname,
+          port: targetPort,
+          path: valid.pathname + valid.search,
+          method: 'GET',
+          headers: reqHeaders,
+          timeout: timeoutMs,
+        },
+        (upstreamRes) => handleUpstream(upstreamRes, resolve, reject)
+      );
+      upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('Media stream timed out.')));
+      upstreamReq.on('error', reject);
+      upstreamReq.end();
+    });
+  }
+
+  async function readRemoteBuffer(
+    remoteUrl: string,
+    options?: { referer?: string; headers?: Record<string, string>; maxBytes?: number }
+  ): Promise<{ buffer: Buffer; contentType: string }> {
+    const maxBytes = options?.maxBytes ?? 64 * 1024 * 1024;
+    const { stream, contentType } = await openRemoteMediaReadable(remoteUrl, options);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const raw of stream) {
+      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+      total += buf.length;
+      if (total > maxBytes) {
+        stream.destroy();
+        throw new Error('Carousel item exceeds memory limit.');
+      }
+      chunks.push(buf);
+    }
+    return { buffer: Buffer.concat(chunks, total), contentType };
+  }
+
+  function createStreamingZipReadable(
+    entries: Array<{ baseName: string; fetchEntry: () => Promise<{ buffer: Buffer; ext: string }> }>
+  ): Readable {
+    const out = new PassThrough();
+    const writeChunk = async (buf: Buffer): Promise<void> => {
+      if (out.destroyed) throw new Error('ZIP stream closed');
+      if (!out.write(buf)) {
+        await new Promise<void>((resolve, reject) => {
+          const onDrain = () => {
+            out.off('close', onClose);
+            resolve();
+          };
+          const onClose = () => {
+            out.off('drain', onDrain);
+            reject(new Error('ZIP stream closed'));
+          };
+          out.once('drain', onDrain);
+          out.once('close', onClose);
+        });
+      }
+    };
+
+    void (async () => {
+      const centralRecords: Array<{
+        nameBytes: Buffer;
+        crc: number;
+        size: number;
+        offset: number;
+      }> = [];
+      let offset = 0;
+
+      for (const entry of entries) {
+        const { buffer, ext } = await entry.fetchEntry();
+        const nameBytes = Buffer.from(`${entry.baseName}.${ext}`, 'utf8');
+        const crc = zlib.crc32(buffer) >>> 0;
+        const size = buffer.length;
+
+        const lfh = Buffer.alloc(30);
+        lfh.writeUInt32LE(0x04034b50, 0);
+        lfh.writeUInt16LE(20, 4);
+        lfh.writeUInt16LE(0x0800, 6); // UTF-8 filename
+        lfh.writeUInt16LE(0, 8); // STORE
+        lfh.writeUInt16LE(0, 10);
+        lfh.writeUInt16LE(0, 12);
+        lfh.writeUInt32LE(crc, 14);
+        lfh.writeUInt32LE(size, 18);
+        lfh.writeUInt32LE(size, 22);
+        lfh.writeUInt16LE(nameBytes.length, 26);
+        lfh.writeUInt16LE(0, 28);
+
+        const localHeaderOffset = offset;
+        await writeChunk(lfh);
+        await writeChunk(nameBytes);
+        await writeChunk(buffer);
+        offset += 30 + nameBytes.length + size;
+        centralRecords.push({ nameBytes, crc, size, offset: localHeaderOffset });
+      }
+
+      const cdStart = offset;
+      let cdSize = 0;
+      for (const rec of centralRecords) {
+        const cdfh = Buffer.alloc(46);
+        cdfh.writeUInt32LE(0x02014b50, 0);
+        cdfh.writeUInt16LE(20, 4);
+        cdfh.writeUInt16LE(20, 6);
+        cdfh.writeUInt16LE(0x0800, 8);
+        cdfh.writeUInt16LE(0, 10);
+        cdfh.writeUInt16LE(0, 12);
+        cdfh.writeUInt16LE(0, 14);
+        cdfh.writeUInt32LE(rec.crc, 16);
+        cdfh.writeUInt32LE(rec.size, 20);
+        cdfh.writeUInt32LE(rec.size, 24);
+        cdfh.writeUInt16LE(rec.nameBytes.length, 28);
+        cdfh.writeUInt16LE(0, 30);
+        cdfh.writeUInt16LE(0, 32);
+        cdfh.writeUInt16LE(0, 34);
+        cdfh.writeUInt16LE(0, 36);
+        cdfh.writeUInt32LE(0, 38);
+        cdfh.writeUInt32LE(rec.offset, 42);
+
+        await writeChunk(cdfh);
+        await writeChunk(rec.nameBytes);
+        cdSize += 46 + rec.nameBytes.length;
+      }
+
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(0, 4);
+      eocd.writeUInt16LE(0, 6);
+      eocd.writeUInt16LE(centralRecords.length, 8);
+      eocd.writeUInt16LE(centralRecords.length, 10);
+      eocd.writeUInt32LE(cdSize, 12);
+      eocd.writeUInt32LE(cdStart, 16);
+      eocd.writeUInt16LE(0, 20);
+      await writeChunk(eocd);
+      out.end();
+    })().catch((err) => {
+      out.destroy(err instanceof Error ? err : new Error(String(err)));
+    });
+
+    return out;
+  }
+
+  function spawnChildToReadable(
+    cmd: string,
+    args: string[],
+    env?: NodeJS.ProcessEnv,
+    options?: {
+      stdio?: ('ignore' | 'pipe')[];
+      onSpawn?: (child: ChildProcess) => void;
+    }
+  ): Readable {
+    const out = new PassThrough();
+    const child = spawn(cmd, args, {
+      shell: false,
+      ...(env ? { env } : {}),
+      ...(options?.stdio ? { stdio: options.stdio } : {}),
+    });
+
+    let stderrBuf = '';
+    if (child.stderr) {
+      child.stderr.on('data', (chunk: Buffer) => {
+        if (stderrBuf.length < 4096) stderrBuf += chunk.toString('utf8');
+      });
+    }
+
+    const killChild = () => {
+      if (child.exitCode === null && !child.killed) {
+        try {
+          child.kill('SIGTERM');
+        } catch {}
+      }
+    };
+
+    out.on('close', killChild);
+
+    if (child.stdout) {
+      child.stdout.on('data', (chunk: Buffer) => {
+        if (out.destroyed) return;
+        if (!out.write(chunk)) {
+          child.stdout?.pause();
+          out.once('drain', () => {
+            if (!out.destroyed && child.exitCode === null) child.stdout?.resume();
+          });
+        }
+      });
+    }
+
+    child.on('error', (err) => {
+      out.destroy(err);
+    });
+
+    child.on('close', (code) => {
+      if (out.destroyed) return;
+      if (code === 0) {
+        out.end();
+      } else {
+        const lines = stderrBuf
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+        out.destroy(new Error(lines[lines.length - 1] || `${cmd} exited with code ${code}`));
+      }
+    });
+
+    if (options?.onSpawn) {
+      options.onSpawn(child);
+    }
+    return out;
+  }
+
+  function buildFfmpegStreamArgs(inputs: StreamInputSpec[], isAudio: boolean, title: string): string[] {
+    const ffArgs: string[] = [];
+    for (const inp of inputs) {
+      const proto = (inp.protocol || '').toLowerCase();
+      const lowerUrl = inp.url.toLowerCase();
+      const isManifest =
+        proto.includes('m3u8') ||
+        proto.includes('dash') ||
+        /\.m3u8(\?|$)/i.test(lowerUrl) ||
+        /\.mpd(\?|$)/i.test(lowerUrl);
+      if (!isManifest) {
+        ffArgs.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+      }
+      const ua = inp.headers['User-Agent'] || inp.headers['user-agent'];
+      if (ua) {
+        ffArgs.push('-user_agent', sanitizeHttpHeaderValue(ua));
+      }
+      const headerLines: string[] = [];
+      for (const [k, v] of Object.entries(inp.headers)) {
+        const kl = k.toLowerCase();
+        if (['user-agent', 'host', 'connection', 'content-length', 'accept-encoding', 'range'].includes(kl)) continue;
+        const cleanK = k.replace(/[^a-zA-Z0-9-]/g, '');
+        const cleanV = sanitizeHttpHeaderValue(v);
+        if (cleanK && cleanV) headerLines.push(`${cleanK}: ${cleanV}\r\n`);
+      }
+      if (headerLines.length > 0) {
+        ffArgs.push('-headers', headerLines.join(''));
+      }
+      ffArgs.push('-i', inp.url);
+    }
+
+    if (isAudio) {
+      ffArgs.push(
+        '-vn',
+        '-c:a',
+        'libmp3lame',
+        '-b:a',
+        '192k',
+        '-metadata',
+        `title=${sanitizeFilename(title)}`,
+        '-f',
+        'mp3',
+        'pipe:1'
+      );
+      return ffArgs;
+    }
+
+    const primaryVcodec = (inputs[0]?.vcodec || '').toLowerCase();
+    const primaryExt = (inputs[0]?.ext || '').toLowerCase();
+    const needsVideoTranscode =
+      ['mpeg4', 'msmpeg4', 'divx', 'xvid', 'wmv', 'flv', 'vp6', 'h263'].some((c) => primaryVcodec.includes(c)) ||
+      ['avi', 'wmv', 'flv'].includes(primaryExt);
+
+    if (needsVideoTranscode) {
+      ffArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p');
+    } else {
+      ffArgs.push('-c:v', 'copy');
+    }
+
+    ffArgs.push(
+      '-c:a',
+      'aac',
+      '-b:a',
+      '160k',
+      '-movflags',
+      'frag_keyframe+empty_moov+default_base_moof',
+      '-f',
+      'mp4',
+      'pipe:1'
+    );
+    return ffArgs;
+  }
+
+  function buildFfmpegProxyEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const ffEnv: NodeJS.ProcessEnv = { ...baseEnv };
+    delete ffEnv.ALL_PROXY;
+    delete ffEnv.all_proxy;
+    if (adminConfig.xray.enabled && xrayState.running) {
+      const hp = `http://127.0.0.1:${adminConfig.xray.httpPort}`;
+      ffEnv.http_proxy = hp;
+      ffEnv.https_proxy = hp;
+      ffEnv.HTTP_PROXY = hp;
+      ffEnv.HTTPS_PROXY = hp;
+    }
+    return ffEnv;
+  }
+
   async function finalizeJobFile(job: DownloadJob): Promise<void> {
     const stat = await fs.promises.stat(job.filePath);
     job.totalBytes = stat.size;
@@ -6449,7 +7521,498 @@ async function startServer() {
     job.status = 'ready';
   }
 
+  async function runDirectTelegramDownload(job: DownloadJob, parsed: URL): Promise<void> {
+    const isAudio = job.quality === 'audio';
+    const ytId = extractYouTubeId(parsed);
+
+    try {
+      if (isInstagramUrl(parsed)) {
+        const normalizedIgUrl = normalizeInstagramUrl(parsed);
+        const targetH = selectTargetHeight(job.quality);
+        const info = await runParthDlInfo(normalizedIgUrl);
+        const entries = Array.isArray(info.entries) ? info.entries : [];
+        if (entries.length === 0) {
+          throw new Error('No downloadable media found for this Instagram link.');
+        }
+
+        if (isAudio) {
+          const videoEntry = entries.find((e) => e.kind === 'video' && Array.isArray(e.formats) && e.formats.length > 0);
+          const fmt = videoEntry ? selectInstagramVideoFormat(videoEntry, 1080) : null;
+          if (!fmt?.url) {
+            throw new Error('This Instagram post does not contain a video track for MP3 extraction.');
+          }
+          const { stream } = await openRemoteMediaReadable(fmt.url, { referer: 'https://www.instagram.com/' });
+          const ffStream = spawnChildToReadable(
+            'ffmpeg',
+            ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
+            undefined,
+            {
+              stdio: ['pipe', 'pipe', 'pipe'],
+              onSpawn: (child) => {
+                child.stdin?.on('error', () => {});
+                stream.on('error', () => {
+                  if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+                });
+                if (child.stdin) stream.pipe(child.stdin);
+              },
+            }
+          );
+          await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
+          return;
+        }
+
+        if (entries.length > 1) {
+          const zipEntries = entries.map((entry, idx) => ({
+            baseName: `item_${idx + 1}`,
+            fetchEntry: async () => {
+              if (entry.kind === 'video') {
+                const fmt = selectInstagramVideoFormat(entry, targetH);
+                if (!fmt?.url) throw new Error('Missing video URL in carousel item.');
+                const { buffer } = await readRemoteBuffer(fmt.url, { referer: 'https://www.instagram.com/' });
+                return { buffer, ext: 'mp4' };
+              }
+              const imgUrl = (entry.formats || []).find((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url))?.url;
+              if (!imgUrl) throw new Error('Missing image URL in carousel item.');
+              const { buffer, contentType } = await readRemoteBuffer(imgUrl, { referer: 'https://www.instagram.com/' });
+              const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+              return { buffer, ext };
+            },
+          }));
+          const zipStream = createStreamingZipReadable(zipEntries);
+          await uploadStreamJobToTelegram(job, zipStream, null, { ext: 'zip', mimeType: 'application/zip' });
+          return;
+        }
+
+        const single = entries[0];
+        if (single.kind === 'video') {
+          const fmt = selectInstagramVideoFormat(single, targetH);
+          if (!fmt?.url) throw new Error('No downloadable Instagram video URL found.');
+          let opened;
+          try {
+            opened = await openRemoteMediaReadable(fmt.url, { referer: 'https://www.instagram.com/' });
+          } catch (openErr) {
+            if (/HTTP 403|HTTP 410|HTTP 404/i.test(openErr instanceof Error ? openErr.message : '')) {
+              const refreshed = await runParthDlInfo(normalizedIgUrl, true);
+              const refEntry = (refreshed.entries || []).find((e) => e.kind === 'video');
+              const refFmt = refEntry ? selectInstagramVideoFormat(refEntry, targetH) : null;
+              if (!refFmt?.url) throw openErr;
+              opened = await openRemoteMediaReadable(refFmt.url, { referer: 'https://www.instagram.com/' });
+            } else {
+              throw openErr;
+            }
+          }
+          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+            ext: 'mp4',
+            mimeType: 'video/mp4',
+          });
+          return;
+        }
+
+        const imgUrl = (single.formats || []).find((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url))?.url;
+        if (!imgUrl) throw new Error('No downloadable Instagram image URL found.');
+        const opened = await openRemoteMediaReadable(imgUrl, { referer: 'https://www.instagram.com/' });
+        const imgExt: DownloadFileExt = opened.contentType.includes('png')
+          ? 'png'
+          : opened.contentType.includes('webp')
+            ? 'webp'
+            : 'jpg';
+        await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+          ext: imgExt,
+          mimeType: getMimeTypeForExt(imgExt),
+        });
+        return;
+      }
+
+      const targetUrlForDl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
+      const runner = await getYtDlpRunner();
+      if (runner) {
+        try {
+          const targetH = String(selectTargetHeight(job.quality));
+          const audioFid = job.audioFormatId;
+          const isTikTok = isTikTokUrl(parsed);
+          const videoFmtSelector = audioFid
+            ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFid}/bestvideo[height<=${targetH}]+${audioFid}/best[height<=${targetH}]/best`
+            : isTikTok
+              ? `best[height<=${targetH}][format_id!*=-watermarked][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][format_id!*=-watermarked]/best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}]/best`
+              : `best[height<=${targetH}][vcodec^=avc][acodec^=mp4a]/best[height<=${targetH}][vcodec^=avc]/best[height<=${targetH}]/best`;
+          const audioFmtSelector = audioFid ? `${audioFid}/bestaudio/best` : 'bestaudio/best';
+          const { extraArgs, env } = await getYtDlpAuthAndProxy();
+
+          const dumpArgs = insertBeforeDoubleDash(
+            buildYtDlpArgs([
+              '--dump-single-json',
+              '-f',
+              isAudio ? audioFmtSelector : videoFmtSelector,
+              '--no-playlist',
+              '--playlist-items',
+              '1',
+              '--no-warnings',
+              '--',
+              targetUrlForDl,
+            ]),
+            extraArgs
+          );
+
+          let inputs: StreamInputSpec[] = [];
+          try {
+            const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...dumpArgs], {
+              timeout: 25000,
+              maxBuffer: 8 * 1024 * 1024,
+              env,
+            });
+            const rawJson = JSON.parse(stdout) as Record<string, unknown> & {
+              entries?: Array<Record<string, unknown>>;
+            };
+            const entry =
+              Array.isArray(rawJson.entries) && rawJson.entries.length > 0 ? rawJson.entries[0] : rawJson;
+            const toSpec = (fmt: Record<string, unknown>): StreamInputSpec | null => {
+              const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
+              if (!/^https?:\/\//i.test(u)) return null;
+              return {
+                url: u,
+                headers: buildUpstreamHeaders(
+                  fmt.http_headers && typeof fmt.http_headers === 'object'
+                    ? (fmt.http_headers as Record<string, string>)
+                    : undefined,
+                  extractCookieHeaderFromYtDlp(fmt.cookies)
+                ),
+                protocol: typeof fmt.protocol === 'string' ? fmt.protocol : undefined,
+                vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
+                acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
+                ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
+              };
+            };
+            const reqFmts = Array.isArray(entry.requested_formats)
+              ? (entry.requested_formats as Array<Record<string, unknown>>)
+              : null;
+            if (reqFmts && reqFmts.length >= 2) {
+              inputs = reqFmts.map(toSpec).filter((x): x is StreamInputSpec => x !== null);
+            } else if (reqFmts && reqFmts.length === 1) {
+              const one = toSpec(reqFmts[0]);
+              if (one) inputs = [one];
+            } else {
+              const one = toSpec(entry);
+              if (one) inputs = [one];
+            }
+          } catch {
+            inputs = [];
+          }
+
+          if (inputs.length === 1 && !isAudio && !isManifestOrIncompatibleFormat(inputs[0])) {
+            try {
+              const opened = await openRemoteMediaReadable(inputs[0].url, { headers: inputs[0].headers });
+              await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+                ext: 'mp4',
+                mimeType: 'video/mp4',
+              });
+              return;
+            } catch {
+              // Fall through to ffmpeg or yt-dlp stdout streaming below
+            }
+          }
+
+          if (inputs.length > 0) {
+            try {
+              const ffArgs = buildFfmpegStreamArgs(inputs, isAudio, job.title);
+              const ffStream = spawnChildToReadable('ffmpeg', ffArgs, buildFfmpegProxyEnv(env));
+              await uploadStreamJobToTelegram(job, ffStream, null, {
+                ext: isAudio ? 'mp3' : 'mp4',
+                mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+              });
+              return;
+            } catch {
+              // Fall through to direct yt-dlp stdout pipe
+            }
+          }
+
+          // Fallback: stream yt-dlp directly to stdout -> ffmpeg -> Telegram (zero disk)
+          const singleFmt = isAudio
+            ? audioFmtSelector
+            : `best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`;
+          const ytdlpArgs = insertBeforeDoubleDash(
+            buildYtDlpArgs(['-f', singleFmt, '--no-playlist', '--playlist-items', '1', '-o', '-', '--', targetUrlForDl]),
+            extraArgs
+          );
+          const ytStdout = spawnChildToReadable(runner.cmd, [...runner.baseArgs, ...ytdlpArgs], env);
+          if (isAudio) {
+            const ffStream = spawnChildToReadable(
+              'ffmpeg',
+              ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
+              undefined,
+              {
+                stdio: ['pipe', 'pipe', 'pipe'],
+                onSpawn: (child) => {
+                  child.stdin?.on('error', () => {});
+                  ytStdout.on('error', () => {
+                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+                  });
+                  if (child.stdin) ytStdout.pipe(child.stdin);
+                },
+              }
+            );
+            await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
+          } else {
+            await uploadStreamJobToTelegram(job, ytStdout, null, { ext: 'mp4', mimeType: 'video/mp4' });
+          }
+          return;
+        } catch (ytdlpErr) {
+          if (!isXUrl(parsed) && !isTikTokUrl(parsed)) {
+            throw ytdlpErr;
+          }
+          // Fall through to X / TikTok fallback resolver
+        }
+      }
+
+      if (isXUrl(parsed) || isTikTokUrl(parsed)) {
+        const resolved = isXUrl(parsed)
+          ? await resolveXMediaFallback(parsed)
+          : await resolveTikTokMediaFallback(parsed);
+
+        if (isAudio) {
+          const sourceUrl = resolved.musicUrl || resolved.videos[0]?.url;
+          if (!sourceUrl) {
+            throw new Error('This post does not contain an audio or video stream for MP3 extraction.');
+          }
+          const { stream } = await openRemoteMediaReadable(sourceUrl, { referer: resolved.referer });
+          const ffStream = spawnChildToReadable(
+            'ffmpeg',
+            ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
+            undefined,
+            {
+              stdio: ['pipe', 'pipe', 'pipe'],
+              onSpawn: (child) => {
+                child.stdin?.on('error', () => {});
+                stream.on('error', () => {
+                  if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+                });
+                if (child.stdin) stream.pipe(child.stdin);
+              },
+            }
+          );
+          await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
+          return;
+        }
+
+        if (resolved.videos.length > 0) {
+          const opened = await openRemoteMediaReadable(resolved.videos[0].url, { referer: resolved.referer });
+          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+            ext: 'mp4',
+            mimeType: 'video/mp4',
+          });
+          return;
+        }
+
+        if (resolved.photos.length > 1) {
+          const zipEntries = resolved.photos.map((p, idx) => ({
+            baseName: `photo_${idx + 1}`,
+            fetchEntry: async () => {
+              const { buffer, contentType } = await readRemoteBuffer(p.url, { referer: resolved.referer });
+              const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+              return { buffer, ext };
+            },
+          }));
+          const zipStream = createStreamingZipReadable(zipEntries);
+          await uploadStreamJobToTelegram(job, zipStream, null, { ext: 'zip', mimeType: 'application/zip' });
+          return;
+        }
+
+        if (resolved.photos.length === 1) {
+          const opened = await openRemoteMediaReadable(resolved.photos[0].url, { referer: resolved.referer });
+          const imgExt: DownloadFileExt = opened.contentType.includes('png')
+            ? 'png'
+            : opened.contentType.includes('webp')
+              ? 'webp'
+              : 'jpg';
+          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+            ext: imgExt,
+            mimeType: getMimeTypeForExt(imgExt),
+          });
+          return;
+        }
+      }
+
+      if (ytId) {
+        const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
+        try {
+          const info = await ytdl.getInfo(watchUrl);
+          if (isAudio) {
+            const customAudioItag = job.audioFormatId ? Number(job.audioFormatId) : NaN;
+            const customAudioFormat = Number.isFinite(customAudioItag)
+              ? info.formats.find((f: VideoFormat) => f.itag === customAudioItag && f.hasAudio)
+              : undefined;
+            const audioFormat =
+              customAudioFormat ||
+              chooseFormat(info.formats, {
+                quality: Quality.HighestAudio,
+                filter: { hasAudio: true, hasVideo: false },
+              });
+            const audioStream = ytdl.download(info, { format: audioFormat });
+            const ffStream = spawnChildToReadable(
+              'ffmpeg',
+              ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
+              undefined,
+              {
+                stdio: ['pipe', 'pipe', 'pipe'],
+                onSpawn: (child) => {
+                  child.stdin?.on('error', () => {});
+                  audioStream.on('error', () => {
+                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+                  });
+                  if (child.stdin) audioStream.pipe(child.stdin);
+                },
+              }
+            );
+            await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
+            return;
+          }
+
+          const targetH = selectTargetHeight(job.quality);
+          const customAudioItag = job.audioFormatId ? Number(job.audioFormatId) : NaN;
+          const customAudioFormat = Number.isFinite(customAudioItag)
+            ? info.formats.find((f: VideoFormat) => f.itag === customAudioItag && f.hasAudio)
+            : undefined;
+          const muxedFormats = info.formats
+            .filter((f: VideoFormat) => f.hasVideo && f.hasAudio && (f.height || 0) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+
+          const bestMuxed = muxedFormats[0];
+          if (!customAudioFormat && bestMuxed && (bestMuxed.height || 0) >= targetH && bestMuxed.container === 'mp4') {
+            const totalHint = Number(bestMuxed.contentLength) || null;
+            const stream = ytdl.download(info, { format: bestMuxed });
+            await uploadStreamJobToTelegram(job, stream, totalHint, { ext: 'mp4', mimeType: 'video/mp4' });
+            return;
+          }
+
+          const videoCandidates = info.formats
+            .filter((f: VideoFormat) => f.hasVideo && !f.hasAudio && (f.height || 0) <= targetH)
+            .sort((a: VideoFormat, b: VideoFormat) => (b.height || 0) - (a.height || 0));
+          const videoFormat = videoCandidates[0] || bestMuxed;
+          const audioFormat =
+            customAudioFormat ||
+            chooseFormat(info.formats, {
+              quality: Quality.HighestAudio,
+              filter: { hasAudio: true, hasVideo: false },
+            });
+
+          if (videoFormat && audioFormat && !videoFormat.hasAudio) {
+            const vStream = ytdl.download(info, { format: videoFormat });
+            const aStream = ytdl.download(info, { format: audioFormat });
+            const ffStream = spawnChildToReadable(
+              'ffmpeg',
+              [
+                '-i',
+                'pipe:3',
+                '-i',
+                'pipe:4',
+                '-c:v',
+                'copy',
+                '-c:a',
+                'aac',
+                '-b:a',
+                '192k',
+                '-movflags',
+                'frag_keyframe+empty_moov+default_base_moof',
+                '-f',
+                'mp4',
+                'pipe:1',
+              ],
+              undefined,
+              {
+                stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
+                onSpawn: (child) => {
+                  const pipe3 = child.stdio[3] as NodeJS.WritableStream | null;
+                  const pipe4 = child.stdio[4] as NodeJS.WritableStream | null;
+                  pipe3?.on('error', () => {});
+                  pipe4?.on('error', () => {});
+                  vStream.on('error', () => {
+                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+                  });
+                  aStream.on('error', () => {
+                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
+                  });
+                  if (pipe3) vStream.pipe(pipe3);
+                  if (pipe4) aStream.pipe(pipe4);
+                },
+              }
+            );
+            await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp4', mimeType: 'video/mp4' });
+            return;
+          } else if (videoFormat) {
+            const stream = ytdl.download(info, { format: videoFormat });
+            await uploadStreamJobToTelegram(job, stream, Number(videoFormat.contentLength) || null, {
+              ext: 'mp4',
+              mimeType: 'video/mp4',
+            });
+            return;
+          }
+        } catch {
+          // Fall through to direct URL or preview container
+        }
+      }
+
+      // Check direct video/audio file URL
+      try {
+        const headRes = await fetch(parsed.toString(), {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(4000),
+        });
+        const ct = headRes.headers.get('content-type') || '';
+        if (ct.startsWith('video/') || ct.startsWith('audio/')) {
+          const opened = await openRemoteMediaReadable(parsed.toString());
+          const ext: DownloadFileExt = ct.startsWith('audio/') ? 'mp3' : 'mp4';
+          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+            ext,
+            mimeType: ct.split(';')[0].trim() || getMimeTypeForExt(ext),
+          });
+          return;
+        }
+      } catch {
+        // Fall through to playable container
+      }
+
+      // Fallback playable container streamed directly to Telegram (zero disk)
+      const resMap: Record<string, string> = {
+        '2160p': '1920x1080',
+        '1080p': '1280x720',
+        '720p': '1280x720',
+        '480p': '854x480',
+        '360p': '640x360',
+      };
+      const ffArgs = isAudio
+        ? [
+            '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+            '-metadata', `title=${sanitizeFilename(job.title)}`,
+            '-c:a', 'libmp3lame', '-b:a', '192k',
+            '-f', 'mp3',
+            'pipe:1',
+          ]
+        : [
+            '-f', 'lavfi', '-i', `color=c=black:s=${resMap[job.quality] || '1280x720'}:d=3`,
+            '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+            '-metadata', `title=${sanitizeFilename(job.title)}`,
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+            '-f', 'mp4',
+            'pipe:1',
+          ];
+      const ffStream = spawnChildToReadable('ffmpeg', ffArgs);
+      await uploadStreamJobToTelegram(job, ffStream, null, {
+        ext: isAudio ? 'mp3' : 'mp4',
+        mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+      });
+    } catch (err) {
+      job.status = 'error';
+      job.error = sanitizeTelegramError(err, adminConfig.telegram.botToken);
+    }
+  }
+
   async function runStagedDownload(job: DownloadJob, parsed: URL): Promise<void> {
+    if (telegramEnabledForUploads(adminConfig.telegram)) {
+      await runDirectTelegramDownload(job, parsed);
+      return;
+    }
+
     ensureDataDir();
     const isAudio = job.quality === 'audio';
     const ytId = extractYouTubeId(parsed);
@@ -8363,9 +9926,23 @@ export class ErrorOverlay {}
         await startBgutilPotServer();
       }
       if (telegramIsConfigured(adminConfig.telegram) && adminConfig.telegram.enabled) {
-        await getTelegramClient().catch((err) => {
-          telegramState.lastError = err instanceof Error ? err.message : String(err);
-        });
+        if (telegramUsesBotHttpApi(adminConfig.telegram)) {
+          await callTelegramBotApi<{ username?: string; first_name?: string }>(
+            adminConfig.telegram.botToken,
+            'getMe'
+          )
+            .then((me) => {
+              telegramState.selfLabel = me.username ? `@${me.username}` : me.first_name || null;
+              telegramState.lastError = null;
+            })
+            .catch((err) => {
+              telegramState.lastError = sanitizeTelegramError(err, adminConfig.telegram.botToken);
+            });
+        } else {
+          await getTelegramClient().catch((err) => {
+            telegramState.lastError = sanitizeTelegramError(err, adminConfig.telegram.botToken);
+          });
+        }
       }
     } catch {
       // Non-fatal boot background provisioning error; inspectable via admin panels
