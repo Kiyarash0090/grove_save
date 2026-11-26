@@ -22,6 +22,7 @@ import type { Request, Response, NextFunction } from 'express';
 import {
   TelegramClient,
   Api,
+  Logger,
   sessions,
   utils as tgUtils,
   client as tgClientLib,
@@ -1156,7 +1157,15 @@ async function getTelegramClient(): Promise<TelegramClient> {
 
   const key = `${creds.apiId}:${creds.apiHash}:${cfg.mode}:${cfg.mode === 'bot' ? cfg.botToken : sessionValue}`;
   if (telegramState.client && telegramState.clientKey === key) {
-    return telegramState.client;
+    if (telegramState.client.connected) {
+      return telegramState.client;
+    }
+    try {
+      await telegramState.client.connect();
+      return telegramState.client;
+    } catch {
+      // Fall through and rebuild a fresh client
+    }
   }
   if (telegramState.connecting && telegramState.clientKey === key) {
     return telegramState.connecting;
@@ -1165,10 +1174,12 @@ async function getTelegramClient(): Promise<TelegramClient> {
   const build = (async () => {
     await disposeTelegramClient();
     const session = new sessions.StringSession(sessionValue || '');
+    const tgLogger = new Logger('error' as Parameters<TelegramClient['setLogLevel']>[0]);
     const client = new TelegramClient(session, creds.apiId, creds.apiHash, {
       connectionRetries: 5,
       useWSS: false,
       autoReconnect: true,
+      baseLogger: tgLogger,
       deviceModel: 'Grove Save',
       systemVersion: 'Server',
       appVersion: '1.0.0',
@@ -1346,14 +1357,21 @@ async function uploadStreamToTelegramMtproto(
   const fileId = bigInt(rawId.toString());
   const dcId = client.session.dcId;
 
-  let cachedSender = await client.getSender(dcId);
+  await client.getSender(dcId);
   let uploadedBytes = 0;
 
   const getActiveSender = async () => {
-    if (!cachedSender || !cachedSender.isConnected()) {
-      cachedSender = await client.getSender(dcId);
+    if (!client.connected) {
+      await client.connect().catch(() => {});
     }
-    return cachedSender;
+    // Always borrow through client.getSender so GramJS refreshes the 30s
+    // exported sender release timeout on active transfers.
+    const sender = await client.getSender(dcId);
+    if (!sender.isConnected()) {
+      await new Promise((r) => setTimeout(r, 250));
+      return client.getSender(dcId);
+    }
+    return sender;
   };
 
   const sendPart = async (
@@ -1385,17 +1403,19 @@ async function uploadStreamToTelegramMtproto(
         return;
       } catch (err: unknown) {
         const errAny = err as { seconds?: number; message?: string };
+        const errMsg = String(errAny?.message || '');
         if (typeof errAny?.seconds === 'number' && errAny.seconds > 0) {
           await new Promise((r) => setTimeout(r, (errAny.seconds! + 1) * 1000));
           continue;
         }
-        if (sender && !sender.isConnected()) {
-          cachedSender = await client.getSender(dcId);
-          await new Promise((r) => setTimeout(r, 500));
-          continue;
-        }
-        if (attempt < 3 && /timeout|ECONNRESET|EPIPE|disconnect/i.test(String(errAny?.message || ''))) {
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        if (
+          attempt < 5 &&
+          ((sender && !sender.isConnected()) ||
+            /not connected|connection closed|socket|timeout|ECONNRESET|EPIPE|ECONNABORTED|ETIMEDOUT|disconnect/i.test(
+              errMsg
+            ))
+        ) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
           continue;
         }
         throw err;
@@ -2224,17 +2244,18 @@ async function streamTelegramFile(
     const totalChunks = lastAlignedIdx + 1;
 
     let currentDcId = resolved.dcId;
-    let cachedSender = await client.getSender(currentDcId);
+    await client.getSender(currentDcId);
     const getDlSender = async () => {
-      if (!cachedSender || !cachedSender.isConnected()) {
-        cachedSender = await client.getSender(currentDcId);
+      if (!client.connected) {
+        await client.connect().catch(() => {});
       }
-      return cachedSender;
+      // Refresh GramJS's 30s exported sender release timer on every chunk.
+      return client.getSender(currentDcId);
     };
 
     const fetchChunk = async (chunkOffset: number): Promise<Buffer> => {
       let timedOutOnce = false;
-      for (let retry = 0; retry < 4; retry += 1) {
+      for (let retry = 0; retry < 5; retry += 1) {
         if (aborted) return Buffer.alloc(0);
         try {
           const sender = await getDlSender();
@@ -2258,7 +2279,7 @@ async function streamTelegramFile(
           const code = String(errAny?.errorMessage || errAny?.message || '');
           if (typeof errAny?.newDc === 'number' && errAny.newDc > 0) {
             currentDcId = errAny.newDc;
-            cachedSender = await client.getSender(currentDcId);
+            await client.getSender(currentDcId);
             continue;
           }
           if (code === 'TIMEOUT') {
@@ -2270,6 +2291,15 @@ async function streamTelegramFile(
           const floodSeconds = errAny?.seconds;
           if (typeof floodSeconds === 'number' && floodSeconds > 0) {
             await new Promise((r) => setTimeout(r, (floodSeconds + 1) * 1000));
+            continue;
+          }
+          if (
+            retry < 4 &&
+            /not connected|connection closed|socket|timeout|ECONNRESET|EPIPE|ECONNABORTED|ETIMEDOUT|disconnect/i.test(
+              code
+            )
+          ) {
+            await new Promise((r) => setTimeout(r, 400 * (retry + 1)));
             continue;
           }
           throw err;
@@ -3660,12 +3690,12 @@ function buildYtDlpArgs(
     'extractor:exp=2:20',
   ];
   if (isYouTube) {
-    args.push('--sleep-requests', '1.25');
+    args.push('--sleep-requests', '0.5');
     if (options?.isDownload) {
-      args.push('--concurrent-fragments', '1', '--sleep-interval', '1', '--max-sleep-interval', '3');
+      args.push('--concurrent-fragments', '4');
     }
     if (options?.isSubtitle) {
-      args.push('--sleep-subtitles', '1');
+      args.push('--sleep-subtitles', '0.5');
     }
   }
   const pluginDir = getBgutilPluginDirIfPresent();
@@ -6301,6 +6331,7 @@ async function startServer() {
       const tempClient = new TelegramClient(new sessions.StringSession(''), apiId, apiHash, {
         connectionRetries: 3,
         useWSS: false,
+        baseLogger: new Logger('error' as Parameters<TelegramClient['setLogLevel']>[0]),
         deviceModel: 'Grove Save',
         systemVersion: 'Server',
         appVersion: '1.0.0',
