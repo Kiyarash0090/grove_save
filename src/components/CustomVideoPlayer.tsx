@@ -12,6 +12,9 @@ import {
   Subtitles as SubtitlesIcon,
 } from 'lucide-react';
 
+const isIOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent);
+const isMobile = typeof navigator !== 'undefined' && /Mobi|Android/i.test(navigator.userAgent);
+
 interface CustomVideoPlayerProps {
   src: string;
   poster?: string;
@@ -119,6 +122,17 @@ export const CustomVideoPlayer: React.FC<CustomVideoPlayerProps> = ({
     }
   }, [durationSeconds]);
 
+  // Set webkitPlaysInline on the video element for iOS
+  useEffect(() => {
+    const vid = videoRef.current;
+    if (vid) {
+      // On iOS, use webkit-playsinline attribute
+      if (isIOS) {
+        (vid as HTMLVideoElement & { webkitPlaysInline?: boolean }).webkitPlaysInline = !isMobile && !isFullscreen;
+      }
+    }
+  }, [isMobile, isFullscreen]);
+
   const rawVidDuration =
     videoRef.current && Number.isFinite(videoRef.current.duration) ? videoRef.current.duration : 0;
   const actualCurrentTime = scrubTime !== null ? scrubTime : streamStartOffset + currentTime;
@@ -201,6 +215,35 @@ export const CustomVideoPlayer: React.FC<CustomVideoPlayerProps> = ({
       }, 3000);
     }
   };
+
+  // Touch events for mobile - show controls on tap
+  const handleTouchStart = () => {
+    setShowControls(true);
+    if (controlsTimeoutRef.current) {
+      window.clearTimeout(controlsTimeoutRef.current);
+    }
+    if (isPlaying && !isDraggingRef.current) {
+      controlsTimeoutRef.current = window.setTimeout(() => {
+        setShowControls(false);
+        setShowSpeedMenu(false);
+      }, 3000);
+    }
+  };
+
+  // On mobile fullscreen, keep controls visible longer or permanently
+  useEffect(() => {
+    if (isFullscreen && isMobile && isPlaying) {
+      setShowControls(true);
+      if (controlsTimeoutRef.current) {
+        window.clearTimeout(controlsTimeoutRef.current);
+      }
+      // Longer timeout for mobile fullscreen
+      controlsTimeoutRef.current = window.setTimeout(() => {
+        setShowControls(false);
+        setShowSpeedMenu(false);
+      }, 8000);
+    }
+  }, [isFullscreen, isMobile, isPlaying]);
 
   const togglePlay = () => {
     const vid = videoRef.current;
@@ -325,20 +368,58 @@ export const CustomVideoPlayer: React.FC<CustomVideoPlayerProps> = ({
   };
 
   const toggleFullscreen = () => {
+    const vid = videoRef.current;
     const container = containerRef.current;
-    if (!container) return;
+    if (!vid && !container) return;
+
     if (!document.fullscreenElement) {
-      void container.requestFullscreen().catch(() => {});
+      // On iOS, use webkitEnterFullscreen on the video element
+      if (isIOS && vid && 'webkitEnterFullscreen' in vid) {
+        (vid as HTMLVideoElement & { webkitEnterFullscreen?: () => void }).webkitEnterFullscreen?.();
+        return;
+      }
+      // On other platforms, prefer requesting fullscreen on the video element for native controls
+      // but fall back to container if needed
+      if (vid && typeof vid.requestFullscreen === 'function') {
+        void vid.requestFullscreen().catch(() => {
+          // Fallback to container if video fullscreen fails
+          if (container) {
+            void container.requestFullscreen().catch(() => {});
+          }
+        });
+      } else if (container) {
+        void container.requestFullscreen().catch(() => {});
+      }
     } else {
+      // On iOS, use webkitExitFullscreen
+      if (isIOS && 'webkitExitFullscreen' in document) {
+        (document as Document & { webkitExitFullscreen?: () => void }).webkitExitFullscreen?.();
+        return;
+      }
       void document.exitFullscreen().catch(() => {});
     }
   };
 
   useEffect(() => {
     const onFsChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+      const isFs = Boolean(document.fullscreenElement);
+      // On iOS, also check webkitDisplayingFullscreen
+      const vid = videoRef.current;
+      const isWebkitFs = Boolean(isIOS && vid && (vid as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen);
+      setIsFullscreen(isFs || isWebkitFs);
     };
     document.addEventListener('fullscreenchange', onFsChange);
+    // iOS fullscreen events
+    if (isIOS && videoRef.current) {
+      const vid = videoRef.current;
+      vid.addEventListener('webkitbeginfullscreen', onFsChange);
+      vid.addEventListener('webkitendfullscreen', onFsChange);
+      return () => {
+        document.removeEventListener('fullscreenchange', onFsChange);
+        vid.removeEventListener('webkitbeginfullscreen', onFsChange);
+        vid.removeEventListener('webkitendfullscreen', onFsChange);
+      };
+    }
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
@@ -374,15 +455,27 @@ export const CustomVideoPlayer: React.FC<CustomVideoPlayerProps> = ({
           setShowSpeedMenu(false);
         }
       }}
+      onTouchStart={handleTouchStart}
       className={`relative group overflow-hidden bg-black select-none ${
         isVertical ? 'w-full max-h-[72vh] flex items-center justify-center' : 'w-full aspect-video'
-      }`}
+      } ${isFullscreen ? 'fixed inset-0 z-[9999]' : ''}`}
+      style={{
+        // Safe area handling for notches and home indicators
+        ...(isFullscreen && {
+          paddingTop: 'env(safe-area-inset-top)',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+          paddingLeft: 'env(safe-area-inset-left)',
+          paddingRight: 'env(safe-area-inset-right)',
+        }),
+      }}
     >
       <video
         ref={videoRef}
         src={activeSrc}
         poster={poster}
-        playsInline
+        // Disable playsInline on mobile to allow native fullscreen
+        playsInline={!isMobile && !isFullscreen}
+        // iOS needs webkit-playsinline for inline mode (set via ref)
         autoPlay
         crossOrigin={crossOrigin}
         onLoadedData={() => {
@@ -476,6 +569,14 @@ export const CustomVideoPlayer: React.FC<CustomVideoPlayerProps> = ({
         className={`absolute inset-x-0 bottom-0 z-20 transition-opacity duration-300 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-4 pt-10 pb-3 flex flex-col gap-2.5 ${
           showControls || !isPlaying ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
         }`}
+        style={{
+          // Add safe area padding in fullscreen for mobile devices
+          ...(isFullscreen && isMobile && {
+            paddingBottom: 'calc(3rem + env(safe-area-inset-bottom))',
+            paddingLeft: 'calc(1rem + env(safe-area-inset-left))',
+            paddingRight: 'calc(1rem + env(safe-area-inset-right))',
+          }),
+        }}
       >
         {/* Progress Bar */}
         <div
