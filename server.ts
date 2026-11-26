@@ -917,6 +917,20 @@ function telegramUsesBotHttpApi(cfg: AdminTelegramConfig): boolean {
   return true;
 }
 
+/** Telegram Bot HTTP API's hard upload cap; phone sessions can go far higher. */
+const TELEGRAM_BOT_MAX_BYTES = 50 * 1024 * 1024;
+
+/**
+ * True when an upload error means "stop, another strategy will not help".
+ * The branches of the direct path each try a different way to obtain the media
+ * and fall through on failure — but a rejected Telegram upload must abort the
+ * whole job, or a doomed file is fetched and re-uploaded several times.
+ */
+function isFatalTelegramUploadError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /over the 50 MB Telegram bot upload limit|Telegram upload is not enabled/i.test(msg);
+}
+
 function telegramIsConfigured(cfg: AdminTelegramConfig): boolean {
   if (cfg.mode === 'bot') return Boolean(cfg.botToken);
   if (!telegramCredentials(cfg)) return Boolean(cfg.botToken);
@@ -1126,6 +1140,10 @@ function telegramStatusView() {
     // True only when the pipeline will stream straight to Telegram instead of
     // the server disk (enabled + upload toggle + channel + working credentials).
     uploadsActive: telegramEnabledForUploads(cfg),
+    // Uploads are switched on and credentials exist, but nothing can be
+    // published yet — the UI must say so, because downloads now fail instead
+    // of silently landing on the server disk.
+    needsChannel: Boolean(cfg.uploadEnabled && telegramIsConfigured(cfg) && !cfg.channel),
     account: telegramState.selfLabel,
     lastError: telegramState.lastError,
     pendingLogin: Boolean(pendingTelegramLogin),
@@ -1425,7 +1443,7 @@ async function uploadStreamToTelegramBotApi(
   caption: string,
   onProgress?: (uploadedBytes: number) => void
 ): Promise<{ messageId: number; chatId: string; botFileId: string | null; sizeBytes: number }> {
-  const MAX_BOT_API_BYTES = 50 * 1024 * 1024;
+  const MAX_BOT_API_BYTES = TELEGRAM_BOT_MAX_BYTES;
   const boundary = '----GroveSaveTg' + crypto.randomBytes(16).toString('hex');
   const safeName = fileName.replace(/["\r\n]/g, '_');
 
@@ -1559,6 +1577,16 @@ async function uploadStreamJobToTelegram(
   const cfg = adminConfig.telegram;
   if (!telegramEnabledForUploads(cfg)) {
     throw new Error('Telegram upload is not enabled.');
+  }
+
+  // The Bot HTTP API caps documents at 50 MB. Check before streaming a single
+  // byte: otherwise a doomed upload pushes 50 MB to Telegram, gets rejected,
+  // and every caller that falls through to the next strategy repeats it.
+  // (Callers treat this prefix as fatal — see isFatalTelegramUploadError.)
+  if (telegramUsesBotHttpApi(cfg) && knownTotalBytes && knownTotalBytes > TELEGRAM_BOT_MAX_BYTES) {
+    throw new Error(
+      `This file is ${(knownTotalBytes / (1024 * 1024)).toFixed(1)} MB, over the 50 MB Telegram bot upload limit. Sign in with a phone number to upload files up to 2 GB.`
+    );
   }
 
   if (options?.ext) {
@@ -7706,7 +7734,9 @@ async function startServer() {
                 mimeType: 'video/mp4',
               });
               return;
-            } catch {
+            } catch (openErr) {
+              // A rejected upload will be rejected identically by every retry.
+              if (isFatalTelegramUploadError(openErr)) throw openErr;
               // Fall through to ffmpeg or yt-dlp stdout streaming below
             }
           }
@@ -7720,7 +7750,8 @@ async function startServer() {
                 mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
               });
               return;
-            } catch {
+            } catch (muxErr) {
+              if (isFatalTelegramUploadError(muxErr)) throw muxErr;
               // Fall through to direct yt-dlp stdout pipe
             }
           }
@@ -7756,6 +7787,7 @@ async function startServer() {
           }
           return;
         } catch (ytdlpErr) {
+          if (isFatalTelegramUploadError(ytdlpErr)) throw ytdlpErr;
           if (!isXUrl(parsed) && !isTikTokUrl(parsed)) {
             throw ytdlpErr;
           }
@@ -8010,6 +8042,20 @@ async function startServer() {
   async function runStagedDownload(job: DownloadJob, parsed: URL): Promise<void> {
     if (telegramEnabledForUploads(adminConfig.telegram)) {
       await runDirectTelegramDownload(job, parsed);
+      return;
+    }
+
+    // Telegram was switched on but cannot actually publish yet (most often a
+    // bot token whose bot has never seen a chat, so no channel was discovered).
+    // Fail loudly instead of quietly downloading onto the disk we promised to
+    // leave alone — that is exactly the behaviour the admin turned Telegram on
+    // to avoid.
+    const tg = adminConfig.telegram;
+    if (tg.uploadEnabled && telegramIsConfigured(tg) && !tg.channel) {
+      job.status = 'error';
+      job.error = telegramUsesBotHttpApi(tg)
+        ? 'Telegram upload is on, but the bot has no chat to post into yet. Open a chat with the bot (or add it to a channel) and save the bot token again.'
+        : 'Telegram upload is on, but no channel is set. Pick a channel or use Saved Messages.';
       return;
     }
 
@@ -9483,6 +9529,17 @@ async function startServer() {
   });
 
   app.get('/api/media/download', async (req: Request, res: Response) => {
+    // Legacy endpoint: it downloads to os.tmpdir() with no size bound, which is
+    // exactly the disk usage Telegram storage exists to avoid. The current UI
+    // uses /api/media/prepare + /api/media/stream, so refuse it while diskless
+    // uploads are configured.
+    if (telegramEnabledForUploads(adminConfig.telegram)) {
+      res.status(409).json({
+        error: 'This endpoint writes to the server disk. Use /api/media/prepare and /api/media/stream while Telegram storage is enabled.',
+      });
+      return;
+    }
+
     const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
     const quality = typeof req.query.quality === 'string' ? req.query.quality.trim() : '1080p';
     const rawTitle = typeof req.query.title === 'string' ? req.query.title : 'grove-save-media';

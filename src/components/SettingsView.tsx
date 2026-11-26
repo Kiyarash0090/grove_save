@@ -152,6 +152,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     lastError: string | null;
     pendingLogin: boolean;
     uploadsActive?: boolean;
+    needsChannel?: boolean;
   }
   const [tgStatus, setTgStatus] = useState<TelegramStatus | null>(null);
   const [tgEnabled, setTgEnabled] = useState(false);
@@ -1799,6 +1800,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </div>
                 {tgStatus?.uploadsActive ? (
                   <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">{t.telegramDisklessActive}</p>
+                ) : tgStatus?.needsChannel ? (
+                  <p className="mt-1 text-xs text-rose-600 dark:text-rose-400">{t.telegramNeedsChannel}</p>
                 ) : connected ? (
                   <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{t.telegramDisklessInactiveHint}</p>
                 ) : null}

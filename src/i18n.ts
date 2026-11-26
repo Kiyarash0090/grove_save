@@ -178,6 +178,7 @@ export interface TranslationDict {
   telegramUploadDesc: string;
   telegramDisklessActive: string;
   telegramDisklessInactiveHint: string;
+  telegramNeedsChannel: string;
   telegramModeLabel: string;
   telegramModeUser: string;
   telegramModeBot: string;
@@ -446,6 +447,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramUploadDesc: 'When on, every finished download is uploaded to the channel and removed from the server disk.',
     telegramDisklessActive: 'Diskless upload on — files go straight to Telegram.',
     telegramDisklessInactiveHint: 'Uploads are not active yet — turn on Upload or set a channel.',
+    telegramNeedsChannel: 'Uploads are on but no chat is set — downloads will fail instead of using the disk. Message the bot (or add it to a channel), then save the token again.',
     telegramModeLabel: 'Account type',
     telegramModeUser: 'User account',
     telegramModeBot: 'Bot',
@@ -712,6 +714,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramUploadDesc: 'وقتی روشن باشد، هر دانلود تمام‌شده به کانال آپلود و از دیسک سرور حذف می‌شود.',
     telegramDisklessActive: 'آپلود بدون دیسک فعال است — فایل‌ها مستقیم به تلگرام می‌روند.',
     telegramDisklessInactiveHint: 'آپلود هنوز فعال نیست — گزینه آپلود را روشن کنید یا کانال را تنظیم کنید.',
+    telegramNeedsChannel: 'آپلود فعال است ولی چتی تعیین نشده — دانلودها بهجای دیسک، خطا میدهند. به ربات پیام بدهید (یا آن را به کانال اضافه کنید) و توکن را دوباره ذخیره کنید.',
     telegramModeLabel: 'نوع حساب',
     telegramModeUser: 'حساب کاربری',
     telegramModeBot: 'ربات',
@@ -979,6 +982,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramUploadDesc: 'Если включено, каждая готовая загрузка отправляется в канал и удаляется с диска сервера.',
     telegramDisklessActive: 'Загрузка без диска включена — файлы идут сразу в Telegram.',
     telegramDisklessInactiveHint: 'Загрузка пока не активна — включите «Загружать файлы» или укажите канал.',
+    telegramNeedsChannel: 'Загрузка включена, но чат не задан — загрузки будут завершаться ошибкой, а не писать на диск. Напишите боту (или добавьте его в канал) и сохраните токен снова.',
     telegramModeLabel: 'Тип аккаунта',
     telegramModeUser: 'Аккаунт пользователя',
     telegramModeBot: 'Бот',
@@ -1245,6 +1249,7 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     telegramUploadDesc: '开启后，每个完成的下载都会上传到频道并从服务器磁盘删除。',
     telegramDisklessActive: '无磁盘上传已开启 — 文件直接发送到 Telegram。',
     telegramDisklessInactiveHint: '上传尚未启用 — 请开启“上传下载文件”或设置频道。',
+    telegramNeedsChannel: '上传已启用但未设置聊天 — 下载会报错而不是写入磁盘。请先给机器人发消息（或将其加入频道），然后重新保存令牌。',
     telegramModeLabel: '账户类型',
     telegramModeUser: '用户账户',
     telegramModeBot: '机器人',
