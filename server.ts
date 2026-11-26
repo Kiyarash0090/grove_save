@@ -450,7 +450,23 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_events(created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_activity_type ON activity_events(event_type);
+
+  CREATE TABLE IF NOT EXISTS admin_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
 `);
+
+function ensureAdminSettingsTable(targetDb: DatabaseSync): void {
+  targetDb.exec(`
+    CREATE TABLE IF NOT EXISTS admin_settings (
+      key TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+}
 
 type AnalyticsPlatform = 'youtube' | 'instagram' | 'tiktok' | 'x' | 'pinterest' | 'telegram' | 'other';
 
@@ -1066,6 +1082,67 @@ function defaultAdminConfig(): AdminConfig {
   };
 }
 
+function normalizeTelegramConfig(raw: Partial<AdminTelegramConfig> | null | undefined): AdminTelegramConfig {
+  return {
+    enabled: Boolean(raw?.enabled),
+    uploadEnabled: Boolean(raw?.uploadEnabled),
+    apiId: typeof raw?.apiId === 'number' && Number.isFinite(raw.apiId) ? raw.apiId : null,
+    apiHash: typeof raw?.apiHash === 'string' ? raw.apiHash.trim() : '',
+    botToken: typeof raw?.botToken === 'string' ? raw.botToken.trim() : '',
+    session: typeof raw?.session === 'string' ? raw.session.trim() : '',
+    mode: raw?.mode === 'bot' ? 'bot' : 'user',
+    channel: typeof raw?.channel === 'string' ? raw.channel.trim() : '',
+    channelAuto: raw?.channelAuto === true,
+  };
+}
+
+function syncTelegramConfigToDb(cfg: AdminTelegramConfig, targetDb: DatabaseSync = db): void {
+  try {
+    ensureAdminSettingsTable(targetDb);
+    const normalized = normalizeTelegramConfig(cfg);
+    targetDb
+      .prepare(
+        `INSERT INTO admin_settings (key, value_json, updated_at)
+         VALUES ('telegram', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           value_json = excluded.value_json,
+           updated_at = excluded.updated_at`
+      )
+      .run(JSON.stringify(normalized), Date.now());
+  } catch {
+    // Best-effort sync to SQLite
+  }
+}
+
+function readTelegramConfigFromDb(targetDb: DatabaseSync = db): AdminTelegramConfig | null {
+  try {
+    ensureAdminSettingsTable(targetDb);
+    const row = targetDb
+      .prepare('SELECT value_json FROM admin_settings WHERE key = ?')
+      .get('telegram') as { value_json?: string } | undefined;
+    if (!row || typeof row.value_json !== 'string' || !row.value_json.trim()) {
+      return null;
+    }
+    const parsed = JSON.parse(row.value_json) as Partial<AdminTelegramConfig>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return normalizeTelegramConfig(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function hasAnyTelegramData(cfg: AdminTelegramConfig): boolean {
+  return Boolean(
+    cfg.enabled ||
+      cfg.uploadEnabled ||
+      cfg.apiId ||
+      cfg.apiHash ||
+      cfg.botToken ||
+      cfg.session ||
+      cfg.channel
+  );
+}
+
 function loadAdminConfig(): AdminConfig {
   ensureDataDir();
   try {
@@ -1151,20 +1228,7 @@ function loadAdminConfig(): AdminConfig {
               ? Boolean(parsed.potProvider.ejsRemoteComponents)
               : true,
         },
-        telegram: {
-          enabled: Boolean(parsed.telegram?.enabled),
-          uploadEnabled: Boolean(parsed.telegram?.uploadEnabled),
-          apiId:
-            typeof parsed.telegram?.apiId === 'number' && Number.isFinite(parsed.telegram.apiId)
-              ? parsed.telegram.apiId
-              : null,
-          apiHash: typeof parsed.telegram?.apiHash === 'string' ? parsed.telegram.apiHash.trim() : '',
-          botToken: typeof parsed.telegram?.botToken === 'string' ? parsed.telegram.botToken.trim() : '',
-          session: typeof parsed.telegram?.session === 'string' ? parsed.telegram.session.trim() : '',
-          mode: parsed.telegram?.mode === 'bot' ? 'bot' : 'user',
-          channel: typeof parsed.telegram?.channel === 'string' ? parsed.telegram.channel.trim() : '',
-          channelAuto: parsed.telegram?.channelAuto === true,
-        },
+        telegram: normalizeTelegramConfig(parsed.telegram),
       };
     }
   } catch {
@@ -1174,6 +1238,10 @@ function loadAdminConfig(): AdminConfig {
   const legacyAdminPrefs = getFirstAdminPreferences();
   if (legacyAdminPrefs.youtubeCookies) migrated.youtubeCookies = legacyAdminPrefs.youtubeCookies;
   if (legacyAdminPrefs.youtubePoToken) migrated.youtubePoToken = legacyAdminPrefs.youtubePoToken;
+  const dbTelegram = readTelegramConfigFromDb();
+  if (dbTelegram) {
+    migrated.telegram = dbTelegram;
+  }
   saveAdminConfig(migrated);
   return migrated;
 }
@@ -1181,9 +1249,21 @@ function loadAdminConfig(): AdminConfig {
 function saveAdminConfig(cfg: AdminConfig): void {
   ensureDataDir();
   fs.writeFileSync(ADMIN_CONFIG_FILE, JSON.stringify(cfg, null, 2), { encoding: 'utf8', mode: 0o600 });
+  syncTelegramConfigToDb(cfg.telegram);
 }
 
 const adminConfig: AdminConfig = loadAdminConfig();
+if (!hasAnyTelegramData(adminConfig.telegram)) {
+  const dbTelegram = readTelegramConfigFromDb();
+  if (dbTelegram && hasAnyTelegramData(dbTelegram)) {
+    adminConfig.telegram = dbTelegram;
+    saveAdminConfig(adminConfig);
+  } else {
+    syncTelegramConfigToDb(adminConfig.telegram);
+  }
+} else {
+  syncTelegramConfigToDb(adminConfig.telegram);
+}
 
 /* ------------------------------------------------------------------ *
  * Telegram storage backend
@@ -1437,6 +1517,26 @@ async function telegramClientIfReady(): Promise<TelegramClient | null> {
   } catch (err) {
     telegramState.lastError = sanitizeTelegramError(err, adminConfig.telegram.botToken);
     return null;
+  }
+}
+
+async function reconnectTelegramFromConfig(): Promise<void> {
+  const cfg = adminConfig.telegram;
+  if (!telegramIsConfigured(cfg)) return;
+  if (telegramUsesBotHttpApi(cfg)) {
+    try {
+      const me = await callTelegramBotApi<{ username?: string; first_name?: string }>(cfg.botToken, 'getMe');
+      telegramState.selfLabel = me.username ? `@${me.username}` : me.first_name || null;
+      telegramState.lastError = null;
+    } catch (err) {
+      telegramState.lastError = sanitizeTelegramError(err, cfg.botToken);
+    }
+    return;
+  }
+  try {
+    await getTelegramClient();
+  } catch (err) {
+    telegramState.lastError = sanitizeTelegramError(err, cfg.botToken);
   }
 }
 
@@ -9729,11 +9829,20 @@ async function startServer() {
 
   /* -------------------- Telegram storage (admin only) -------------------- */
 
-  app.get('/api/admin/telegram', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/admin/telegram', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     const user = req.authUser!;
     if (user.role !== 'admin') {
       res.status(403).json({ error: 'Admin access required' });
       return;
+    }
+    if (
+      telegramIsConfigured(adminConfig.telegram) &&
+      !telegramUsesBotHttpApi(adminConfig.telegram) &&
+      !telegramState.client &&
+      !telegramState.connecting &&
+      !telegramState.lastError
+    ) {
+      await Promise.race([reconnectTelegramFromConfig(), new Promise((r) => setTimeout(r, 2500))]);
     }
     res.json(telegramStatusView());
   });
@@ -10232,6 +10341,7 @@ async function startServer() {
     if (!target.startsWith(BACKUP_DIR + path.sep)) {
       throw new Error('Invalid backup path.');
     }
+    syncTelegramConfigToDb(adminConfig.telegram);
     await sqliteBackup(db, target);
     try {
       fs.chmodSync(target, 0o600);
@@ -10360,10 +10470,43 @@ async function startServer() {
         const tempRestorePath = path.resolve(DATA_DIR, `restore-temp-${Date.now()}.db`);
         fs.writeFileSync(tempRestorePath, buffer);
 
+        // Validate that the uploaded file is a readable Grove Save SQLite DB before replacing the live DB
+        let checkDb: DatabaseSync | null = null;
+        try {
+          checkDb = new DatabaseSync(tempRestorePath);
+          const usersTbl = checkDb
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+            .get() as { name?: string } | undefined;
+          if (!usersTbl?.name) {
+            throw new Error('Backup does not contain a valid Grove Save database schema.');
+          }
+        } catch (valErr) {
+          try {
+            checkDb?.close();
+          } catch {}
+          try {
+            fs.rmSync(tempRestorePath, { force: true });
+          } catch {}
+          res.status(400).json({
+            success: false,
+            error: valErr instanceof Error ? valErr.message : 'Invalid or corrupted SQLite database file.',
+          });
+          return;
+        }
+        try {
+          checkDb.close();
+        } catch {}
+
         try {
           db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
           db.close();
         } catch {}
+
+        for (const sidecar of [`${DB_FILE}-wal`, `${DB_FILE}-shm`]) {
+          try {
+            fs.rmSync(sidecar, { force: true });
+          } catch {}
+        }
 
         fs.copyFileSync(tempRestorePath, DB_FILE);
         try {
@@ -10375,8 +10518,35 @@ async function startServer() {
           PRAGMA journal_mode = WAL;
           PRAGMA foreign_keys = ON;
         `);
+        ensureAdminSettingsTable(db);
 
-        res.json({ success: true, message: 'Database restored successfully' });
+        // Restore Telegram Storage config (session, API ID/hash, bot token, channel, toggles) if stored in the backup
+        const restoredTelegram = readTelegramConfigFromDb(db);
+        let telegramRestored = false;
+        if (restoredTelegram) {
+          if (pendingTelegramLogin) {
+            await pendingTelegramLogin.client.disconnect().catch(() => {});
+            pendingTelegramLogin = null;
+          }
+          await disposeTelegramClient();
+          telegramState.lastError = null;
+          telegramState.selfLabel = null;
+          adminConfig.telegram = restoredTelegram;
+          saveAdminConfig(adminConfig);
+          telegramRestored = true;
+          if (telegramIsConfigured(adminConfig.telegram)) {
+            await Promise.race([reconnectTelegramFromConfig(), new Promise((r) => setTimeout(r, 4000))]);
+          }
+        } else {
+          // Ensure older backups still get the current config synced forward if needed
+          syncTelegramConfigToDb(adminConfig.telegram, db);
+        }
+
+        res.json({
+          success: true,
+          message: 'Database restored successfully',
+          telegramRestored,
+        });
       } catch (err) {
         res.status(500).json({
           success: false,
@@ -17720,23 +17890,7 @@ export class ErrorOverlay {}
         await startBgutilPotServer();
       }
       if (telegramIsConfigured(adminConfig.telegram) && adminConfig.telegram.enabled) {
-        if (telegramUsesBotHttpApi(adminConfig.telegram)) {
-          await callTelegramBotApi<{ username?: string; first_name?: string }>(
-            adminConfig.telegram.botToken,
-            'getMe'
-          )
-            .then((me) => {
-              telegramState.selfLabel = me.username ? `@${me.username}` : me.first_name || null;
-              telegramState.lastError = null;
-            })
-            .catch((err) => {
-              telegramState.lastError = sanitizeTelegramError(err, adminConfig.telegram.botToken);
-            });
-        } else {
-          await getTelegramClient().catch((err) => {
-            telegramState.lastError = sanitizeTelegramError(err, adminConfig.telegram.botToken);
-          });
-        }
+        await reconnectTelegramFromConfig();
       }
     } catch {
       // Non-fatal boot background provisioning error; inspectable via admin panels
