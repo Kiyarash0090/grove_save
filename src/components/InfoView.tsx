@@ -283,7 +283,7 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
           )}
         </div>
 
-        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
+        <div className="rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] overflow-hidden transition-colors duration-300">
           {announcements.length === 0 ? (
             <div className="px-4 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
               {t.announcementsEmpty}
@@ -325,7 +325,7 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
           <Info className="w-3.5 h-3.5" />
           <span>{t.infoAboutTitle}</span>
         </h2>
-        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 p-4 space-y-3 transition-colors duration-300">
+        <div className="rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] p-4 space-y-3 transition-colors duration-300">
           <div className="flex items-center gap-3">
             <span className="w-10 h-10 rounded-xl bg-black text-white dark:bg-white dark:text-black flex items-center justify-center shrink-0">
               <Sparkles className="w-5 h-5" />
@@ -416,7 +416,7 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
                         {t.infoFeaturesPlatforms.map((platform) => (
                           <div
                             key={platform.id}
-                            className="rounded-xl bg-white dark:bg-black/60 border border-black/10 dark:border-white/10 p-3.5 space-y-2.5"
+                            className="rounded-xl bg-white/50 dark:bg-white/[0.04] backdrop-blur-md border border-black/10 dark:border-white/10 p-3.5 space-y-2.5"
                           >
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-2.5 min-w-0">
@@ -463,7 +463,7 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
                         {t.infoFeaturesGeneral.map((group) => (
                           <div
                             key={group.id}
-                            className="rounded-xl bg-white dark:bg-black/60 border border-black/10 dark:border-white/10 p-3.5 space-y-2"
+                            className="rounded-xl bg-white/50 dark:bg-white/[0.04] backdrop-blur-md border border-black/10 dark:border-white/10 p-3.5 space-y-2"
                           >
                             <div className="flex items-center gap-2.5">
                               <span className="w-7 h-7 rounded-lg bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
@@ -511,7 +511,7 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
           href={CREATOR_CHANNEL_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="theme-surface group block rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 p-4 hover:border-black/30 dark:hover:border-white/35 transition-colors"
+          className="group block rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] p-4 hover:border-black/30 dark:hover:border-white/35 transition-colors"
         >
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
@@ -552,7 +552,7 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
           </p>
         </div>
 
-        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden divide-y divide-black/10 dark:divide-white/10 transition-colors duration-300">
+        <div className="rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] overflow-hidden divide-y divide-black/10 dark:divide-white/10 transition-colors duration-300">
           {TELEGRAM_BOTS.map((bot) => (
             <a
               key={bot.url}

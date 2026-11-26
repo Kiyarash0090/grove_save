@@ -249,7 +249,7 @@ export default function App() {
       const state = event.state as Partial<NavHistoryState> | null;
       if (state && state.groveNav) {
         const targetTab: TabIndex = state.tab === 1 || state.tab === 2 ? state.tab : 0;
-        const targetAdmin: AdminPage = targetTab === 2 && state.adminPage ? state.adminPage : 'main';
+        const targetAdmin: AdminPage = targetTab === 1 && state.adminPage ? state.adminPage : 'main';
 
         navDepthRef.current = typeof state.depth === 'number' ? state.depth : 0;
 
@@ -333,7 +333,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (activeTab === 1 && latestAnnouncementKey && seenAnnouncementKey !== latestAnnouncementKey) {
+    if (activeTab === 2 && latestAnnouncementKey && seenAnnouncementKey !== latestAnnouncementKey) {
       setSeenAnnouncementKey(latestAnnouncementKey);
       try {
         localStorage.setItem(SEEN_ANNOUNCEMENT_KEY, latestAnnouncementKey);
@@ -497,7 +497,7 @@ export default function App() {
         window.history.pushState(
           {
             groveNav: true,
-            tab: 2,
+            tab: 1,
             adminPage: nextPage,
             authModal: false,
             iosGuide: false,
@@ -510,7 +510,7 @@ export default function App() {
         window.history.replaceState(
           {
             groveNav: true,
-            tab: 2,
+            tab: 1,
             adminPage: nextPage,
             authModal: false,
             iosGuide: false,
@@ -616,7 +616,7 @@ export default function App() {
 
   const switchTab = (next: TabIndex) => {
     if (next === activeTab) {
-      if (next === 2 && adminPage !== 'main') {
+      if (next === 1 && adminPage !== 'main') {
         handleAdminPageChange('main');
       }
       return;
@@ -788,7 +788,7 @@ export default function App() {
 
             <button
               type="button"
-              onClick={() => (user ? switchTab(2) : openAuthModal())}
+              onClick={() => (user ? switchTab(1) : openAuthModal())}
               aria-label={t.sectionAccount}
               className={`min-h-[44px] flex items-center justify-center gap-2 rounded-xl transition active:scale-95 whitespace-nowrap shrink-0 ${
                 user
@@ -844,20 +844,6 @@ export default function App() {
             </motion.div>
           ) : activeTab === 1 ? (
             <motion.div
-              key="tab-info"
-              initial={{ opacity: 0, x: swipeDir * 24 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: swipeDir * -24 }}
-              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-            >
-              <InfoView
-                t={t}
-                language={language}
-                announcements={announcements}
-              />
-            </motion.div>
-          ) : (
-            <motion.div
               key="tab-settings"
               initial={{ opacity: 0, x: swipeDir * 24 }}
               animate={{ opacity: 1, x: 0 }}
@@ -888,6 +874,20 @@ export default function App() {
                 onShowIOSGuideChange={handleIosGuideChange}
               />
             </motion.div>
+          ) : (
+            <motion.div
+              key="tab-info"
+              initial={{ opacity: 0, x: swipeDir * 24 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: swipeDir * -24 }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+            >
+              <InfoView
+                t={t}
+                language={language}
+                announcements={announcements}
+              />
+            </motion.div>
           )}
         </AnimatePresence>
       </main>
@@ -900,7 +900,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Floating White-Neon Footer Dock (Download Tab + Info Tab + Settings Tab) */}
+      {/* Floating White-Neon Footer Dock (Download Tab + Settings Tab + Info Tab) */}
       <nav
         aria-label="Primary Navigation"
         className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 h-14 px-2.5 rounded-full bg-white/55 dark:bg-white/[0.08] backdrop-blur-2xl backdrop-saturate-150 border border-white/75 dark:border-white/20 ring-1 ring-inset ring-black/[0.04] dark:ring-white/[0.1] neon-dock flex items-center gap-2"
@@ -922,10 +922,24 @@ export default function App() {
         <button
           type="button"
           onClick={() => switchTab(1)}
-          aria-label={t.tabInfoLabel}
+          aria-label={t.tabSettingsLabel}
           aria-current={activeTab === 1 ? 'page' : undefined}
           className={`relative min-h-[44px] min-w-[56px] rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${
             activeTab === 1
+              ? 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_20px_rgba(255,255,255,0.45)]'
+              : 'text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+          }`}
+        >
+          <Settings className="w-5 h-5" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => switchTab(2)}
+          aria-label={t.tabInfoLabel}
+          aria-current={activeTab === 2 ? 'page' : undefined}
+          className={`relative min-h-[44px] min-w-[56px] rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${
+            activeTab === 2
               ? 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_20px_rgba(255,255,255,0.45)]'
               : 'text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white'
           }`}
@@ -937,20 +951,6 @@ export default function App() {
               className="absolute top-2 end-3 w-2 h-2 rounded-full bg-black dark:bg-white shadow-[0_0_6px_rgba(0,0,0,0.45)] dark:shadow-[0_0_8px_rgba(255,255,255,0.9)]"
             />
           )}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => switchTab(2)}
-          aria-label={t.tabSettingsLabel}
-          aria-current={activeTab === 2 ? 'page' : undefined}
-          className={`relative min-h-[44px] min-w-[56px] rounded-full flex items-center justify-center transition-all duration-200 active:scale-95 ${
-            activeTab === 2
-              ? 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_20px_rgba(255,255,255,0.45)]'
-              : 'text-zinc-500 dark:text-zinc-400 hover:text-black dark:hover:text-white'
-          }`}
-        >
-          <Settings className="w-5 h-5" />
         </button>
       </nav>
 

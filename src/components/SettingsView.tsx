@@ -1525,7 +1525,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             type="button"
             onClick={() => openAdminPage('main')}
-            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+            className="theme-surface min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
           >
             <BackArrowIcon className="w-4 h-4 shrink-0" />
             <span>{t.backToSettings}</span>
@@ -1543,7 +1543,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         <section aria-label={t.sectionXray}>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <div className="px-4 py-4 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
               <div className="min-w-0">
                 <div className="text-sm font-medium text-black dark:text-white">
@@ -1586,7 +1586,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div className="p-4 sm:p-5 space-y-5">
               {!xrayBinaryInstalled && (
-                <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
+                <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white/55 dark:bg-white/[0.04] backdrop-blur-md border border-black/10 dark:border-white/15">
                   <span className="text-xs text-zinc-600 dark:text-zinc-300">
                     {t.xrayStatusNotInstalled}
                   </span>
@@ -1747,10 +1747,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       return (
                         <div
                           key={profile.id}
-                          className={`p-3 rounded-xl border transition-colors ${
+                          className={`p-3 rounded-xl border backdrop-blur-md transition-colors ${
                             isActive
-                              ? 'bg-white dark:bg-black border-black dark:border-white'
-                              : 'bg-white/70 dark:bg-black/60 border-black/10 dark:border-white/15'
+                              ? 'bg-white/70 dark:bg-white/[0.09] border-black dark:border-white'
+                              : 'bg-white/45 dark:bg-white/[0.04] border-black/10 dark:border-white/15'
                           }`}
                         >
                           <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1865,7 +1865,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             type="button"
             onClick={() => openAdminPage('main')}
-            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+            className="theme-surface min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
           >
             <BackArrowIcon className="w-4 h-4 shrink-0" />
             <span>{t.backToSettings}</span>
@@ -1883,7 +1883,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         <section aria-label={t.sectionPotProvider}>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <div className="px-4 py-4 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
               <div className="min-w-0">
                 <div className="text-sm font-medium text-black dark:text-white">
@@ -1926,7 +1926,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div className="p-4 sm:p-5 space-y-4">
               {potMode === 'managed' && (!potInstalled || !potPluginInstalled) && (
-                <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15">
+                <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-white/55 dark:bg-white/[0.04] backdrop-blur-md border border-black/10 dark:border-white/15">
                   <span className="text-xs text-zinc-600 dark:text-zinc-300">
                     {!potInstalled ? t.potStatusNotInstalled : t.potPluginMissing}
                   </span>
@@ -2220,7 +2220,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             type="button"
             onClick={() => openAdminPage('main')}
-            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+            className="theme-surface min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
           >
             <BackArrowIcon className="w-4 h-4 shrink-0" />
             <span>{t.backToSettings}</span>
@@ -2236,7 +2236,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         <section aria-label={t.sectionTelegram}>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <div className="px-4 py-4 flex items-center justify-between gap-4 border-b border-black/10 dark:border-white/10">
               <div className="min-w-0">
                 <div className="text-sm font-medium text-black dark:text-white">{t.telegramEnableLabel}</div>
@@ -2544,7 +2544,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <h2 className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
             {t.telegramStorageTitle}
           </h2>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <div className="p-4 sm:p-5 space-y-3">
               <p className="text-xs text-zinc-500 dark:text-zinc-400">{t.telegramStorageDesc}</p>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-300">
@@ -2588,7 +2588,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <h2 className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
             {t.cachePurgeTitle}
           </h2>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <div className="px-4 py-4 flex items-start gap-3 border-b border-black/10 dark:border-white/10">
               <HardDrive className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
               <div className="min-w-0">
@@ -2630,7 +2630,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <h2 className="px-4 pb-2 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
             {t.dbBackupSection}
           </h2>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <div className="px-4 py-4 flex items-start gap-3 border-b border-black/10 dark:border-white/10">
               <Database className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
               <div className="min-w-0">
@@ -2649,7 +2649,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   ].map((stat) => (
                     <div
                       key={stat.label}
-                      className="rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 px-3 py-2.5"
+                      className="rounded-xl bg-white/50 dark:bg-white/[0.04] backdrop-blur-md border border-black/10 dark:border-white/15 px-3 py-2.5"
                     >
                       <div className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">{stat.label}</div>
                       <div className="text-sm font-semibold text-black dark:text-white font-mono tabular-nums mt-0.5">
@@ -2713,7 +2713,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <li key={item.fileName}>
                         <a
                           href={`${apiBase}/api/admin/db/backups/${encodeURIComponent(item.fileName)}`}
-                          className="flex items-center gap-2 rounded-lg px-3 py-2 bg-white dark:bg-black border border-black/10 dark:border-white/15 text-xs"
+                          className="flex items-center gap-2 rounded-lg px-3 py-2 bg-white/50 dark:bg-white/[0.04] backdrop-blur-md border border-black/10 dark:border-white/15 text-xs hover:bg-white/70 dark:hover:bg-white/[0.08] transition-colors"
                         >
                           <Download className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
                           <span className="font-mono truncate flex-1 text-black dark:text-white">
@@ -2755,7 +2755,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <button
             type="button"
             onClick={() => openAdminPage('main')}
-            className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+            className="theme-surface min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
           >
             <BackArrowIcon className="w-4 h-4 shrink-0" />
             <span>{t.backToSettings}</span>
@@ -2772,7 +2772,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
 
         <section aria-label={t.adminAnnouncementsSection}>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 p-4 space-y-4">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 p-4 space-y-4 transition-colors duration-300">
             <div className="space-y-1.5">
               <label
                 htmlFor="admin-announcement-title"
@@ -2843,7 +2843,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </section>
 
         <section aria-label={t.announcementsTitle}>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             {announcements.length === 0 ? (
               <div className="px-4 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
                 {t.announcementEmptyAdmin}
@@ -2896,7 +2896,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         >
           {t.sectionAccount}
         </h2>
-        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
+        <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
           <div className="p-4 flex items-center gap-4">
             <div className="w-12 h-12 rounded-full bg-black text-white dark:bg-white dark:text-black flex items-center justify-center shrink-0 font-bold text-lg">
               {user ? user.displayName.charAt(0).toUpperCase() : <User className="w-5 h-5" />}
@@ -3035,7 +3035,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         >
           {t.sectionAppearance}
         </h2>
-        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
+        <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
           <div className="px-4 py-3.5 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <span className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
@@ -3095,7 +3095,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     className={`min-h-[46px] px-3 py-2 rounded-xl text-xs font-semibold border transition flex items-center gap-2.5 text-start cursor-pointer active:scale-[0.98] ${
                       active
                         ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white shadow-sm'
-                        : 'bg-white/80 dark:bg-black/60 text-zinc-800 dark:text-zinc-200 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
+                        : 'bg-white/55 dark:bg-white/[0.04] backdrop-blur-md text-zinc-800 dark:text-zinc-200 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
                     }`}
                     style={
                       active && item.id !== 'dark' && item.id !== 'light'
@@ -3140,7 +3140,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition whitespace-nowrap ${
                     language === item.code
                       ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
-                      : 'bg-white dark:bg-black text-zinc-700 dark:text-zinc-300 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
+                      : 'bg-white/55 dark:bg-white/[0.04] backdrop-blur-md text-zinc-700 dark:text-zinc-300 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
                   }`}
                 >
                   {item.label}
@@ -3159,7 +3159,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         >
           {t.sectionDownloads}
         </h2>
-        <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
+        <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
           <div className="px-4 py-3.5 space-y-2.5">
             <div className="flex items-center gap-3 text-sm font-medium text-black dark:text-white">
               <Download className="w-4 h-4 text-zinc-500" />
@@ -3174,7 +3174,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className={`min-h-[40px] px-2 rounded-xl text-xs font-mono font-semibold border transition whitespace-nowrap ${
                     defaultQuality === q
                       ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
-                      : 'bg-white dark:bg-black text-zinc-700 dark:text-zinc-300 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
+                      : 'bg-white/55 dark:bg-white/[0.04] backdrop-blur-md text-zinc-700 dark:text-zinc-300 border-black/10 dark:border-white/15 hover:border-black/30 dark:hover:border-white/35'
                   }`}
                 >
                   {q}
@@ -3210,7 +3210,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             {t.sectionAppServer}
           </h2>
-          <div className="rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <button
               type="button"
               onClick={() => (isInstallable ? install() : setShowIOSGuide(true))}
@@ -3238,7 +3238,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             {t.sectionAdmin}
           </h2>
-          <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden transition-colors duration-300">
             <button
               type="button"
               onClick={() => openAdminPage('stats')}
@@ -3373,7 +3373,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           onClick={() => setShowIOSGuide(false)}
         >
           <div
-            className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#0A0A0A] border border-black/15 dark:border-white/20 p-6"
+            className="w-full max-w-sm rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/75 dark:bg-zinc-950/65 border border-black/15 dark:border-white/20 p-6"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-base font-bold text-black dark:text-white">

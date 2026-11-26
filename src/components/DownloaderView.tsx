@@ -1334,7 +1334,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.2 }}
-              className="rounded-2xl p-4 bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 space-y-4 animate-pulse"
+              className="theme-surface rounded-2xl p-4 border border-black/10 dark:border-white/15 space-y-4 animate-pulse"
             >
               <div className="flex gap-4">
                 <div className="w-28 h-20 rounded-xl bg-zinc-200 dark:bg-zinc-800 shrink-0" />

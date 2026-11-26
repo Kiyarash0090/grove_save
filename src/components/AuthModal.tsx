@@ -239,7 +239,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             exit={{ y: 40, opacity: 0, scale: 0.98 }}
             transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
             onClick={(e) => e.stopPropagation()}
-            className="w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl bg-white dark:bg-[#0A0A0A] border border-black/15 dark:border-white/20 p-6 neon-white-box max-h-[90dvh] overflow-y-auto"
+            className="w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl backdrop-blur-2xl backdrop-saturate-150 bg-white/75 dark:bg-zinc-950/65 border border-black/15 dark:border-white/20 p-6 neon-white-box max-h-[90dvh] overflow-y-auto"
           >
             <div className="w-10 h-1 rounded-full bg-black/20 dark:bg-white/25 mx-auto mb-4 sm:hidden" />
 
@@ -267,7 +267,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 type="button"
                 onClick={handleGoogleSignIn}
                 disabled={loading || (Boolean(googleClientId) && !googleReady)}
-                className="w-full min-h-[48px] px-4 py-2.5 rounded-xl border border-black/15 dark:border-white/20 bg-zinc-50 dark:bg-white/[0.06] text-black dark:text-white font-semibold text-sm flex items-center justify-center gap-3 hover:bg-zinc-100 dark:hover:bg-white/[0.11] active:scale-[0.99] transition shadow-sm disabled:opacity-60 cursor-pointer"
+                className="w-full min-h-[48px] px-4 py-2.5 rounded-xl border border-black/15 dark:border-white/20 bg-white/65 dark:bg-white/[0.06] backdrop-blur-md text-black dark:text-white font-semibold text-sm flex items-center justify-center gap-3 hover:bg-white/80 dark:hover:bg-white/[0.11] active:scale-[0.99] transition shadow-sm disabled:opacity-60 cursor-pointer"
               >
                 {GOOGLE_SVG}
                 <span className="whitespace-nowrap">{t.continueWithGoogle}</span>

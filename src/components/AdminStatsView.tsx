@@ -342,7 +342,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
         <button
           type="button"
           onClick={onBack}
-          className="min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-[#0A0A0A] text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
+          className="theme-surface min-h-[44px] px-3.5 rounded-xl border border-black/10 dark:border-white/15 text-black dark:text-white text-sm font-semibold inline-flex items-center gap-2 hover:bg-black/5 dark:hover:bg-white/10 transition-colors whitespace-nowrap shrink-0"
         >
           <BackArrowIcon className="w-4 h-4 shrink-0" />
           <span>{t.backToSettings}</span>
@@ -400,7 +400,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
       {/* Loading Skeleton */}
       {loading && !stats && (
         <div className="space-y-4">
-          <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 p-4 grid grid-cols-2 sm:grid-cols-3 gap-4 animate-pulse">
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 p-4 grid grid-cols-2 sm:grid-cols-3 gap-4 animate-pulse">
             {Array.from({ length: 6 }).map((_, idx) => (
               <div key={idx} className="space-y-2">
                 <div className="h-3 w-20 rounded bg-black/10 dark:bg-white/10" />
@@ -409,7 +409,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
             ))}
           </div>
-          <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 h-44 animate-pulse" />
+          <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 h-44 animate-pulse" />
         </div>
       )}
 
@@ -423,9 +423,9 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
             >
               {t.statsOverviewHeading}
             </h2>
-            <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 divide-y sm:divide-y-0 sm:gap-px sm:bg-black/10 sm:dark:bg-white/10 overflow-hidden">
+            <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 overflow-hidden [&>*]:border-b [&>*]:border-black/10 dark:[&>*]:border-white/10 sm:[&>*]:border-e [&>*]:-mb-px sm:[&>*]:-me-px">
               {/* Users */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-1">
+              <div className="p-4 space-y-1">
                 <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                   <span>{t.statsUsersTotal}</span>
                   <Users className="w-3.5 h-3.5 shrink-0" />
@@ -444,7 +444,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
 
               {/* Active Sessions */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-1">
+              <div className="p-4 space-y-1">
                 <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                   <span>{t.statsActiveSessions}</span>
                   <Activity className="w-3.5 h-3.5 shrink-0" />
@@ -462,7 +462,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
 
               {/* Saved History */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-1">
+              <div className="p-4 space-y-1">
                 <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                   <span>{t.statsSavedDownloads}</span>
                   <Download className="w-3.5 h-3.5 shrink-0" />
@@ -481,7 +481,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
 
               {/* Tracked Activity */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-1">
+              <div className="p-4 space-y-1">
                 <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                   <span>{t.statsTrackedEvents}</span>
                   <BarChart3 className="w-3.5 h-3.5 shrink-0" />
@@ -500,7 +500,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
 
               {/* Telegram Storage */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-1">
+              <div className="p-4 space-y-1">
                 <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                   <span>{t.statsTelegramStorage}</span>
                   <Server className="w-3.5 h-3.5 shrink-0" />
@@ -518,7 +518,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
 
               {/* Database & Disk Cache */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-1">
+              <div className="p-4 space-y-1">
                 <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                   <span>{t.statsStorageHeading}</span>
                   <HardDrive className="w-3.5 h-3.5 shrink-0" />
@@ -555,7 +555,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                 {t.statsDailyActivityDesc}
               </span>
             </div>
-            <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 p-4 space-y-3">
+            <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 p-4 space-y-3">
               <div className="flex flex-wrap items-center gap-4 text-xs text-zinc-600 dark:text-zinc-300">
                 <span className="inline-flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block" />
@@ -625,7 +625,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               >
                 {t.statsPlatformsHeading}
               </h2>
-              <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden">
+              <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden">
                 {stats.platforms.map((item) => {
                   const totalItem =
                     item.historyCount + item.downloadCount + item.inspectCount + item.telegramCount;
@@ -665,7 +665,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               >
                 {t.statsQualitiesHeading}
               </h2>
-              <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden">
+              <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden">
                 {stats.qualities.length === 0 ? (
                   <div className="p-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
                     {t.statsEmptyList}
@@ -706,9 +706,9 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
             >
               {t.statsPreferencesHeading}
             </h2>
-            <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:gap-px md:bg-black/10 md:dark:bg-white/10 overflow-hidden">
+            <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 grid grid-cols-1 md:grid-cols-3 overflow-hidden [&>*]:border-b [&>*]:border-black/10 dark:[&>*]:border-white/10 md:[&>*]:border-e [&>*]:-mb-px md:[&>*]:-me-px">
               {/* Languages */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-2">
+              <div className="p-4 space-y-2">
                 <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
                   {t.statsLanguagesLabel}
                 </h3>
@@ -730,7 +730,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
 
               {/* Themes */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-2">
+              <div className="p-4 space-y-2">
                 <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
                   {t.statsThemesLabel}
                 </h3>
@@ -752,7 +752,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
               </div>
 
               {/* Default Qualities */}
-              <div className="p-4 bg-zinc-50 dark:bg-[#0A0A0A] space-y-2">
+              <div className="p-4 space-y-2">
                 <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
                   {t.statsDefaultQualitiesLabel}
                 </h3>
@@ -786,7 +786,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                 <Database className="w-3.5 h-3.5" />
                 <span>{t.statsStorageHeading}</span>
               </h2>
-              <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden text-xs">
+              <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden text-xs">
                 <div className="px-4 py-3 flex items-center justify-between gap-3">
                   <span className="text-zinc-600 dark:text-zinc-300">{t.statsDatabaseLabel}</span>
                   <span className="font-mono tabular-nums text-black dark:text-white font-semibold">
@@ -841,7 +841,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                   {t.statsServicesHeading} · {t.statsSystemHeading}
                 </span>
               </h2>
-              <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden text-xs">
+              <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden text-xs">
                 <div className="px-4 py-3 flex items-center justify-between gap-3">
                   <span className="text-zinc-600 dark:text-zinc-300">Xray VPN</span>
                   <span className="font-mono tabular-nums text-black dark:text-white text-end">
@@ -909,7 +909,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                   Error: {stats.liveJobs.error}
                 </span>
               </div>
-              <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden">
+              <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 divide-y divide-black/10 dark:divide-white/10 overflow-hidden">
                 {stats.liveJobs.items.map((job) => (
                   <div key={job.id} className="px-4 py-3 flex items-center justify-between gap-3 text-xs">
                     <div className="min-w-0 flex-1">
@@ -943,7 +943,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                   {fmtNum(filteredUsers.length)}
                 </span>
               </div>
-              <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+              <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden">
                 <div className="p-3 border-b border-black/10 dark:border-white/10">
                   <div className="relative">
                     <Search className="w-3.5 h-3.5 text-zinc-400 absolute top-1/2 -translate-y-1/2 start-3 pointer-events-none" />
@@ -952,7 +952,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                       value={userSearch}
                       onChange={(e) => setUserSearch(e.target.value)}
                       placeholder={t.statsSearchUsersPlaceholder}
-                      className="w-full min-h-[38px] ps-9 pe-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 text-xs text-black dark:text-white placeholder:text-zinc-400 outline-none focus:border-black dark:focus:border-white"
+                      className="w-full min-h-[38px] ps-9 pe-3 rounded-xl bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 text-xs text-black dark:text-white placeholder:text-zinc-400 outline-none focus:border-black dark:focus:border-white"
                     />
                   </div>
                 </div>
@@ -1000,7 +1000,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                   {fmtNum(filteredDownloads.length)}
                 </span>
               </div>
-              <div className="theme-surface rounded-2xl bg-zinc-50 dark:bg-[#0A0A0A] border border-black/10 dark:border-white/15 overflow-hidden">
+              <div className="theme-surface rounded-2xl border border-black/10 dark:border-white/15 overflow-hidden">
                 <div className="p-3 border-b border-black/10 dark:border-white/10">
                   <div className="relative">
                     <Search className="w-3.5 h-3.5 text-zinc-400 absolute top-1/2 -translate-y-1/2 start-3 pointer-events-none" />
@@ -1009,7 +1009,7 @@ export const AdminStatsView: React.FC<AdminStatsViewProps> = ({
                       value={downloadSearch}
                       onChange={(e) => setDownloadSearch(e.target.value)}
                       placeholder={t.statsSearchDownloadsPlaceholder}
-                      className="w-full min-h-[38px] ps-9 pe-3 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 text-xs text-black dark:text-white placeholder:text-zinc-400 outline-none focus:border-black dark:focus:border-white"
+                      className="w-full min-h-[38px] ps-9 pe-3 rounded-xl bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 text-xs text-black dark:text-white placeholder:text-zinc-400 outline-none focus:border-black dark:focus:border-white"
                     />
                   </div>
                 </div>
