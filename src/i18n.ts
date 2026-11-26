@@ -262,6 +262,18 @@ export interface TranslationDict {
   announcementDeleteBtn: string;
   announcementDeletedMsg: string;
   announcementEmptyAdmin: string;
+  adminLogsTitle: string;
+  adminLogsAll: string;
+  adminLogsInfo: string;
+  adminLogsWarn: string;
+  adminLogsError: string;
+  adminLogsRefresh: string;
+  adminLogsClear: string;
+  adminLogsCopy: string;
+  adminLogsCopied: string;
+  adminLogsPause: string;
+  adminLogsResume: string;
+  adminLogsEmpty: string;
 }
 
 export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
@@ -531,6 +543,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     announcementDeleteBtn: 'Delete',
     announcementDeletedMsg: 'Announcement removed.',
     announcementEmptyAdmin: 'No announcements published yet.',
+    adminLogsTitle: 'Application Logs',
+    adminLogsAll: 'All',
+    adminLogsInfo: 'Info',
+    adminLogsWarn: 'Warn',
+    adminLogsError: 'Error',
+    adminLogsRefresh: 'Refresh',
+    adminLogsClear: 'Clear',
+    adminLogsCopy: 'Copy',
+    adminLogsCopied: 'Copied',
+    adminLogsPause: 'Pause',
+    adminLogsResume: 'Live',
+    adminLogsEmpty: 'No logs recorded yet.',
   },
   fa: {
     dir: 'rtl',
@@ -799,6 +823,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     announcementDeleteBtn: 'حذف',
     announcementDeletedMsg: 'اطلاعیه حذف شد.',
     announcementEmptyAdmin: 'هنوز اطلاعیه‌ای منتشر نشده است.',
+    adminLogsTitle: 'لاگ‌های برنامه',
+    adminLogsAll: 'همه',
+    adminLogsInfo: 'اطلاعات',
+    adminLogsWarn: 'هشدار',
+    adminLogsError: 'خطا',
+    adminLogsRefresh: 'بروزرسانی',
+    adminLogsClear: 'پاک کردن',
+    adminLogsCopy: 'کپی',
+    adminLogsCopied: 'کپی شد',
+    adminLogsPause: 'توقف',
+    adminLogsResume: 'زنده',
+    adminLogsEmpty: 'هنوز لاگی ثبت نشده است.',
   },
   ru: {
     dir: 'ltr',
@@ -1067,6 +1103,18 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     announcementDeleteBtn: 'Удалить',
     announcementDeletedMsg: 'Объявление удалено.',
     announcementEmptyAdmin: 'Опубликованных объявлений пока нет.',
+    adminLogsTitle: 'Логи приложения',
+    adminLogsAll: 'Все',
+    adminLogsInfo: 'Инфо',
+    adminLogsWarn: 'Предупр.',
+    adminLogsError: 'Ошибка',
+    adminLogsRefresh: 'Обновить',
+    adminLogsClear: 'Очистить',
+    adminLogsCopy: 'Копировать',
+    adminLogsCopied: 'Скопировано',
+    adminLogsPause: 'Пауза',
+    adminLogsResume: 'В эфире',
+    adminLogsEmpty: 'Логов пока нет.',
   },
   zh: {
     dir: 'ltr',
@@ -1333,5 +1381,17 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     announcementDeleteBtn: '删除',
     announcementDeletedMsg: '公告已删除。',
     announcementEmptyAdmin: '尚未发布任何公告。',
+    adminLogsTitle: '应用日志',
+    adminLogsAll: '全部',
+    adminLogsInfo: '信息',
+    adminLogsWarn: '警告',
+    adminLogsError: '错误',
+    adminLogsRefresh: '刷新',
+    adminLogsClear: '清空',
+    adminLogsCopy: '复制',
+    adminLogsCopied: '已复制',
+    adminLogsPause: '暂停',
+    adminLogsResume: '实时',
+    adminLogsEmpty: '暂无日志记录。',
   },
 };

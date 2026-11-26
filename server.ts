@@ -38,6 +38,100 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const SESSION_COOKIE_NAME = 'grove_session';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+type AppLogLevel = 'info' | 'warn' | 'error';
+
+interface AppLogEntry {
+  id: number;
+  timestamp: string;
+  level: AppLogLevel;
+  source: string;
+  message: string;
+}
+
+const MAX_APP_LOGS = 500;
+const appLogBuffer: AppLogEntry[] = [];
+let nextAppLogId = 1;
+
+function redactSensitiveLogText(text: string): string {
+  return text
+    .replace(/bot\d+:[A-Za-z0-9_-]{20,}/g, 'bot***:***')
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1***')
+    .replace(/(grove_session=)[^;\s]+/gi, '$1***')
+    .replace(/(po_token=)[^&\s]+/gi, '$1***');
+}
+
+function appendAppLog(level: AppLogLevel, source: string, message: string): void {
+  const cleaned = redactSensitiveLogText(String(message || '')).trim();
+  if (!cleaned) return;
+  appLogBuffer.push({
+    id: nextAppLogId++,
+    timestamp: new Date().toISOString(),
+    level,
+    source: String(source || 'server').slice(0, 32),
+    message: cleaned.length > 2000 ? `${cleaned.slice(0, 2000)}…` : cleaned,
+  });
+  if (appLogBuffer.length > MAX_APP_LOGS) {
+    appLogBuffer.splice(0, appLogBuffer.length - MAX_APP_LOGS);
+  }
+}
+
+const originalConsoleLog = console.log.bind(console);
+const originalConsoleInfo = console.info.bind(console);
+const originalConsoleWarn = console.warn.bind(console);
+const originalConsoleError = console.error.bind(console);
+
+function formatConsoleArgs(args: unknown[]): string {
+  return args
+    .map((arg) => {
+      if (typeof arg === 'string') return arg;
+      if (arg instanceof Error) return arg.stack || arg.message;
+      try {
+        return JSON.stringify(arg);
+      } catch {
+        return String(arg);
+      }
+    })
+    .join(' ');
+}
+
+function extractConsoleSource(text: string, fallback: string): string {
+  const match = text.match(/^\[([a-zA-Z0-9_.:-]+)\]\s*/);
+  return match ? match[1] : fallback;
+}
+
+console.log = (...args: unknown[]) => {
+  originalConsoleLog(...args);
+  const text = formatConsoleArgs(args);
+  appendAppLog('info', extractConsoleSource(text, 'server'), text);
+};
+
+console.info = (...args: unknown[]) => {
+  originalConsoleInfo(...args);
+  const text = formatConsoleArgs(args);
+  appendAppLog('info', extractConsoleSource(text, 'server'), text);
+};
+
+console.warn = (...args: unknown[]) => {
+  originalConsoleWarn(...args);
+  const text = formatConsoleArgs(args);
+  appendAppLog('warn', extractConsoleSource(text, 'server'), text);
+};
+
+console.error = (...args: unknown[]) => {
+  originalConsoleError(...args);
+  const text = formatConsoleArgs(args);
+  appendAppLog('error', extractConsoleSource(text, 'server'), text);
+};
+
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  appendAppLog('error', 'process', `Unhandled rejection: ${msg}`);
+});
+
+process.on('uncaughtExceptionMonitor', (err) => {
+  appendAppLog('error', 'process', `Uncaught exception: ${err.stack || err.message}`);
+});
+
 interface StoredUser {
   id: string;
   email: string;
@@ -80,6 +174,7 @@ resolveWorkingPaths();
 let CACHE_DIR = path.resolve(DATA_DIR, 'cache');
 let BIN_DIR = path.resolve(DATA_DIR, 'bin');
 let YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
+let YT_DLP_CACHE_DIR = path.resolve(DATA_DIR, 'yt-dlp-cache');
 let PARTH_DL_DIR = path.resolve(DATA_DIR, 'parth-dl');
 let USERS_FILE = path.resolve(DATA_DIR, 'users.json');
 let ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
@@ -93,6 +188,7 @@ function ensureDataDir(): void {
   CACHE_DIR = path.resolve(DATA_DIR, 'cache');
   BIN_DIR = path.resolve(DATA_DIR, 'bin');
   YT_DLP_PLUGINS_DIR = path.resolve(DATA_DIR, 'yt-dlp-plugins');
+  YT_DLP_CACHE_DIR = path.resolve(DATA_DIR, 'yt-dlp-cache');
   PARTH_DL_DIR = path.resolve(DATA_DIR, 'parth-dl');
   USERS_FILE = path.resolve(DATA_DIR, 'users.json');
   ADMIN_CONFIG_FILE = path.resolve(DATA_DIR, 'admin-config.json');
@@ -109,6 +205,9 @@ function ensureDataDir(): void {
   }
   if (!fs.existsSync(YT_DLP_PLUGINS_DIR)) {
     fs.mkdirSync(YT_DLP_PLUGINS_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(YT_DLP_CACHE_DIR)) {
+    fs.mkdirSync(YT_DLP_CACHE_DIR, { recursive: true });
   }
   if (!fs.existsSync(BACKUP_DIR)) {
     fs.mkdirSync(BACKUP_DIR, { recursive: true });
@@ -3190,8 +3289,44 @@ function getBgutilPluginDirIfPresent(): string | null {
   return null;
 }
 
-function buildYtDlpArgs(baseArgs: string[]): string[] {
-  const args = ['--js-runtimes', 'node', '--no-check-certificate', '--remote-components', 'ejs:github'];
+function buildYtDlpArgs(
+  baseArgs: string[],
+  options?: { isYouTube?: boolean; isDownload?: boolean; isSubtitle?: boolean }
+): string[] {
+  ensureDataDir();
+  const isYouTube =
+    options?.isYouTube !== undefined
+      ? options.isYouTube
+      : baseArgs.some((a) => /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/i.test(a));
+  const args = [
+    '--js-runtimes',
+    'node',
+    '--no-check-certificate',
+    '--cache-dir',
+    YT_DLP_CACHE_DIR,
+    '--remote-components',
+    'ejs:github',
+    '--force-ipv4',
+    '--retries',
+    '3',
+    '--fragment-retries',
+    '3',
+    '--extractor-retries',
+    '2',
+    '--retry-sleep',
+    'http:exp=1:15',
+    '--retry-sleep',
+    'extractor:exp=2:20',
+  ];
+  if (isYouTube) {
+    args.push('--sleep-requests', '1.25');
+    if (options?.isDownload) {
+      args.push('--concurrent-fragments', '1', '--sleep-interval', '1', '--max-sleep-interval', '3');
+    }
+    if (options?.isSubtitle) {
+      args.push('--sleep-subtitles', '1');
+    }
+  }
   const pluginDir = getBgutilPluginDirIfPresent();
   if (pluginDir) {
     args.push('--plugin-dirs', pluginDir);
@@ -3740,6 +3875,10 @@ async function startXrayProcess(): Promise<void> {
     for (const line of lines) {
       xrayState.logs.push(line);
       if (xrayState.logs.length > 30) xrayState.logs.shift();
+      const lower = line.toLowerCase();
+      const lvl: AppLogLevel =
+        lower.includes('error') || lower.includes('failed') ? 'error' : lower.includes('warn') ? 'warn' : 'info';
+      appendAppLog(lvl, 'xray', line);
     }
   };
 
@@ -3751,6 +3890,9 @@ async function startXrayProcess(): Promise<void> {
       xrayState.running = false;
       if (code !== 0 && code !== null) {
         xrayState.lastError = xrayState.logs[xrayState.logs.length - 1] || `Xray exited with code ${code}`;
+        appendAppLog('error', 'xray', xrayState.lastError);
+      } else {
+        appendAppLog('info', 'xray', `Xray exited (${code ?? 'signal'})`);
       }
     }
   });
@@ -3759,6 +3901,7 @@ async function startXrayProcess(): Promise<void> {
       xrayState.process = null;
       xrayState.running = false;
       xrayState.lastError = err.message;
+      appendAppLog('error', 'xray', `Xray process error: ${err.message}`);
     }
   });
 
@@ -4048,25 +4191,28 @@ async function testXrayConfigWithYouTubeDownload(
 
     const outputTemplate = path.join(tempDir, 'video.%(ext)s');
     const ytdlpArgs = insertBeforeDoubleDash(
-      buildYtDlpArgs([
-        '-f',
-        'worst[ext=mp4]/worst[vcodec!=none][acodec!=none]/worstvideo+worstaudio/worst',
-        '--no-playlist',
-        '--no-part',
-        '--max-filesize',
-        '40M',
-        '--socket-timeout',
-        '15',
-        '--retries',
-        '2',
-        '--print',
-        'before_dl:title',
-        '--no-simulate',
-        '-o',
-        outputTemplate,
-        '--',
-        parsedUrl.toString(),
-      ]),
+      buildYtDlpArgs(
+        [
+          '-f',
+          'worst[ext=mp4]/worst[vcodec!=none][acodec!=none]/worstvideo+worstaudio/worst',
+          '--no-playlist',
+          '--no-part',
+          '--max-filesize',
+          '40M',
+          '--socket-timeout',
+          '15',
+          '--retries',
+          '2',
+          '--print',
+          'before_dl:title',
+          '--no-simulate',
+          '-o',
+          outputTemplate,
+          '--',
+          parsedUrl.toString(),
+        ],
+        { isYouTube: false }
+      ),
       [...extraArgs, '--proxy', socksProxy]
     );
 
@@ -4355,6 +4501,15 @@ async function startBgutilPotServer(): Promise<void> {
     return;
   }
 
+  // If docker-entrypoint.sh (or an existing managed daemon) already owns the port
+  // and is healthy, reuse it instead of colliding with EADDRINUSE.
+  const existingPing = await pingBgutilServer(`http://127.0.0.1:${adminConfig.potProvider.port}`);
+  if (existingPing.ok) {
+    bgutilState.running = true;
+    bgutilState.lastError = null;
+    return;
+  }
+
   let entryPath = findBgutilPotEntry();
   if (!entryPath) {
     try {
@@ -4402,6 +4557,10 @@ async function startBgutilPotServer(): Promise<void> {
     for (const line of lines) {
       bgutilState.logs.push(line);
       if (bgutilState.logs.length > 30) bgutilState.logs.shift();
+      const lower = line.toLowerCase();
+      const lvl: AppLogLevel =
+        lower.includes('error') || lower.includes('failed') ? 'error' : lower.includes('warn') ? 'warn' : 'info';
+      appendAppLog(lvl, 'bgutil', line);
     }
   };
 
@@ -4413,6 +4572,9 @@ async function startBgutilPotServer(): Promise<void> {
       bgutilState.running = false;
       if (code !== 0 && code !== null) {
         bgutilState.lastError = bgutilState.logs[bgutilState.logs.length - 1] || `bgutil exited with code ${code}`;
+        appendAppLog('error', 'bgutil', bgutilState.lastError);
+      } else {
+        appendAppLog('info', 'bgutil', `bgutil server exited (${code ?? 'signal'})`);
       }
     }
   });
@@ -4421,6 +4583,7 @@ async function startBgutilPotServer(): Promise<void> {
       bgutilState.process = null;
       bgutilState.running = false;
       bgutilState.lastError = err.message;
+      appendAppLog('error', 'bgutil', `bgutil server error: ${err.message}`);
     }
   });
 
@@ -4582,8 +4745,15 @@ async function getYtDlpAuthAndProxy(overrides?: {
     if (adminConfig.potProvider.mode === 'managed' && !bgutilState.running && findBgutilPotEntry()) {
       await startBgutilPotServer();
     }
-    const shouldAttach =
+    let shouldAttach =
       adminConfig.potProvider.mode === 'external' || bgutilState.running;
+    if (!shouldAttach && adminConfig.potProvider.mode === 'managed') {
+      const ping = await pingBgutilServer(getEffectivePotBaseUrl());
+      if (ping.ok) {
+        bgutilState.running = true;
+        shouldAttach = true;
+      }
+    }
     if (shouldAttach) {
       extraArgs.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${getEffectivePotBaseUrl()}`);
     }
@@ -4614,6 +4784,336 @@ function insertBeforeDoubleDash(args: string[], extraArgs: string[]): string[] {
     copy.push(...extraArgs);
   }
   return copy;
+}
+
+/* ------------------------------------------------------------------ *
+ * YouTube anti-ban pacing, caching, deduplication & cooldown helpers
+ * ------------------------------------------------------------------ */
+
+interface StreamInputSpecGlobal {
+  url: string;
+  headers: Record<string, string>;
+  protocol?: string;
+  vcodec?: string;
+  acodec?: string;
+  ext?: string;
+}
+
+interface ResolvedStreamEntryGlobal {
+  mode: 'proxy' | 'ffmpeg';
+  inputs: StreamInputSpecGlobal[];
+  expiresAt: number;
+}
+
+const streamResolveCache = new Map<string, ResolvedStreamEntryGlobal>();
+const streamInflightMap = new Map<string, Promise<ResolvedStreamEntryGlobal>>();
+
+const YOUTUBE_INSPECT_CACHE_TTL_MS = 10 * 60 * 1000;
+const YOUTUBE_RAW_INFO_CACHE_TTL_MS = 4 * 60 * 1000;
+const YOUTUBE_SUBTITLE_CACHE_TTL_MS = 30 * 60 * 1000;
+
+const youtubeInspectCache = new Map<string, { payload: Record<string, unknown>; expiresAt: number }>();
+const youtubeInspectInflight = new Map<string, Promise<Record<string, unknown>>>();
+const youtubeRawInfoCache = new Map<string, { info: Record<string, unknown>; expiresAt: number }>();
+const youtubeSubtitleCache = new Map<string, { vtt: string; expiresAt: number }>();
+const youtubeSubtitleInflight = new Map<string, Promise<string | null>>();
+const youtubeCooldownMap = new Map<string, { until: number; strikes: number }>();
+
+function getYouTubeConfigFingerprint(): string {
+  return `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${xrayState.running}:${adminConfig.potProvider.enabled}:${adminConfig.potProvider.mode}:${Boolean(adminConfig.youtubeCookies.trim())}:${Boolean(adminConfig.youtubePoToken.trim())}`;
+}
+
+function isYouTubeBotOrRateLimitError(err: unknown): boolean {
+  const obj = err as { stderr?: string; message?: string } | undefined;
+  const text = `${obj?.stderr || ''} ${obj?.message || String(err || '')}`;
+  return /sign in to confirm (?:you'?re|you are) not a bot|http error 429|too many requests|this helps protect our community|login_required|bot detected|rate limit cooldown/i.test(
+    text
+  );
+}
+
+function recordYouTubeRateLimit(fingerprint: string): void {
+  const now = Date.now();
+  const prev = youtubeCooldownMap.get(fingerprint);
+  const strikes = prev && now - prev.until < 5 * 60 * 1000 ? prev.strikes + 1 : 1;
+  const cooldownMs = Math.min(60000, 12000 * Math.pow(2, strikes - 1));
+  youtubeCooldownMap.set(fingerprint, { until: now + cooldownMs, strikes });
+  appendAppLog(
+    'warn',
+    'youtube',
+    `Bot/rate-limit detected (strike ${strikes}); cooling down for ${Math.ceil(cooldownMs / 1000)}s`
+  );
+}
+
+function getYouTubeCooldownRemainingMs(fingerprint: string): number {
+  const entry = youtubeCooldownMap.get(fingerprint);
+  if (!entry) return 0;
+  const rem = entry.until - Date.now();
+  if (rem <= 0) return 0;
+  return rem;
+}
+
+function resetYouTubeCachesAndCooldown(): void {
+  youtubeInspectCache.clear();
+  youtubeRawInfoCache.clear();
+  youtubeSubtitleCache.clear();
+  streamResolveCache.clear();
+  youtubeCooldownMap.clear();
+}
+
+function setBoundedCache<K, V>(map: Map<K, V>, key: K, value: V, maxSize: number): void {
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > maxSize) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+let ytQueueTail: Promise<void> = Promise.resolve();
+let lastYtRequestEndAt = 0;
+
+function runPacedYouTubeTask<T>(fn: () => Promise<T>): Promise<T> {
+  const run = async (): Promise<T> => {
+    const minGapMs = 900 + Math.floor(Math.random() * 1000);
+    const elapsed = Date.now() - lastYtRequestEndAt;
+    if (lastYtRequestEndAt > 0 && elapsed < minGapMs) {
+      await new Promise((r) => setTimeout(r, minGapMs - elapsed));
+    }
+    try {
+      return await fn();
+    } finally {
+      lastYtRequestEndAt = Date.now();
+    }
+  };
+  const next = ytQueueTail.then(run, run);
+  ytQueueTail = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
+async function proxyHttpGetFullText(
+  targetUrl: string,
+  httpPort: number,
+  timeoutMs = 12000,
+  maxBytes = 4 * 1024 * 1024
+): Promise<{ statusCode: number; body: string }> {
+  const parsed = new URL(targetUrl);
+  const targetPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('Proxy request timed out'));
+    }, timeoutMs);
+
+    const connectReq = http.request({
+      host: '127.0.0.1',
+      port: httpPort,
+      method: 'CONNECT',
+      path: `${parsed.hostname}:${targetPort}`,
+    });
+
+    connectReq.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(new Error(`Proxy CONNECT failed (${res.statusCode})`));
+        return;
+      }
+
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const createConnection = () =>
+        parsed.protocol === 'https:'
+          ? tls.connect({ socket, servername: parsed.hostname })
+          : socket;
+
+      const req = mod.request(
+        {
+          hostname: parsed.hostname,
+          port: targetPort,
+          path: parsed.pathname + parsed.search,
+          method: 'GET',
+          createConnection,
+          headers: {
+            Host: parsed.host,
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            Connection: 'close',
+          },
+        },
+        (resp) => {
+          const chunks: Buffer[] = [];
+          let total = 0;
+          resp.on('data', (d: Buffer) => {
+            total += d.byteLength;
+            if (total <= maxBytes) chunks.push(d);
+            else resp.destroy();
+          });
+          resp.on('end', () => {
+            clearTimeout(timer);
+            resolve({ statusCode: resp.statusCode || 0, body: Buffer.concat(chunks).toString('utf8') });
+          });
+          resp.on('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        }
+      );
+      req.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      req.end();
+    });
+
+    connectReq.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    connectReq.end();
+  });
+}
+
+function findSubtitleUrlFromRawInfo(
+  rawInfo: Record<string, unknown>,
+  lang: string,
+  isAuto: boolean
+): string | null {
+  const sourceMap = (isAuto ? rawInfo.automatic_captions : rawInfo.subtitles) as
+    | Record<string, Array<{ ext?: string; url?: string }>>
+    | undefined;
+  const fallbackMap = (isAuto ? rawInfo.subtitles : rawInfo.automatic_captions) as
+    | Record<string, Array<{ ext?: string; url?: string }>>
+    | undefined;
+  const entries = sourceMap?.[lang] || fallbackMap?.[lang];
+  if (!Array.isArray(entries) || entries.length === 0) return null;
+  const vtt = entries.find((e) => e.ext === 'vtt' && typeof e.url === 'string' && /^https?:\/\//i.test(e.url));
+  if (vtt?.url) return vtt.url;
+  const any = entries.find((e) => typeof e.url === 'string' && /^https?:\/\//i.test(e.url));
+  return any?.url || null;
+}
+
+function resolveYouTubeStreamFromRawInfo(
+  rawInfo: Record<string, unknown>,
+  targetH: number,
+  audioFormatId: string | undefined,
+  buildHeaders: (customHeaders?: Record<string, string>, cookieStr?: string) => Record<string, string>,
+  extractCookie: (rawCookies: unknown) => string,
+  isManifest: (input: StreamInputSpecGlobal) => boolean
+): ResolvedStreamEntryGlobal | null {
+  const formats = Array.isArray(rawInfo.formats) ? (rawInfo.formats as Array<Record<string, unknown>>) : [];
+  if (formats.length === 0) return null;
+
+  const validFormats = formats.filter((f) => {
+    const u = typeof f.url === 'string' ? f.url.trim() : '';
+    const ext = typeof f.ext === 'string' ? f.ext.toLowerCase() : '';
+    const proto = typeof f.protocol === 'string' ? f.protocol.toLowerCase() : '';
+    const note = typeof f.format_note === 'string' ? f.format_note.toLowerCase() : '';
+    if (!/^https?:\/\//i.test(u)) return false;
+    if (ext === 'mhtml' || proto === 'mhtml' || note.includes('storyboard')) return false;
+    return true;
+  });
+
+  const toSpec = (fmt: Record<string, unknown>): StreamInputSpecGlobal | null => {
+    const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
+    if (!/^https?:\/\//i.test(u)) return null;
+    return {
+      url: u,
+      headers: buildHeaders(
+        fmt.http_headers && typeof fmt.http_headers === 'object'
+          ? (fmt.http_headers as Record<string, string>)
+          : undefined,
+        extractCookie(fmt.cookies)
+      ),
+      protocol: typeof fmt.protocol === 'string' ? fmt.protocol : undefined,
+      vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
+      acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
+      ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
+    };
+  };
+
+  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const str = (v: unknown): string => (typeof v === 'string' ? v.toLowerCase() : '');
+
+  const muxed = validFormats
+    .filter((f) => {
+      const vc = str(f.vcodec);
+      const ac = str(f.acodec);
+      const h = num(f.height);
+      return vc !== 'none' && vc !== '' && ac !== 'none' && ac !== '' && h > 0 && h <= targetH;
+    })
+    .sort((a, b) => {
+      const mp4Diff = (str(b.ext) === 'mp4' ? 1 : 0) - (str(a.ext) === 'mp4' ? 1 : 0);
+      if (mp4Diff !== 0) return mp4Diff;
+      const hDiff = num(b.height) - num(a.height);
+      if (hDiff !== 0) return hDiff;
+      return num(b.tbr) - num(a.tbr);
+    });
+
+  if (!audioFormatId) {
+    const bestMuxed = muxed[0];
+    if (bestMuxed && str(bestMuxed.ext) === 'mp4' && (targetH <= 360 || num(bestMuxed.height) >= 480)) {
+      const spec = toSpec(bestMuxed);
+      if (spec && !isManifest(spec)) {
+        return { mode: 'proxy', inputs: [spec], expiresAt: Date.now() + 4 * 60 * 1000 };
+      }
+    }
+  }
+
+  const videoOnly = validFormats
+    .filter((f) => {
+      const vc = str(f.vcodec);
+      const ac = str(f.acodec);
+      const h = num(f.height);
+      return vc !== 'none' && vc !== '' && (ac === 'none' || ac === '') && h > 0 && h <= targetH;
+    })
+    .sort((a, b) => {
+      const avcDiff = (str(b.vcodec).startsWith('avc') ? 1 : 0) - (str(a.vcodec).startsWith('avc') ? 1 : 0);
+      const hDiff = num(b.height) - num(a.height);
+      if (hDiff !== 0) return hDiff;
+      if (avcDiff !== 0) return avcDiff;
+      return num(b.tbr) - num(a.tbr);
+    });
+
+  const audioOnly = validFormats
+    .filter((f) => {
+      const vc = str(f.vcodec);
+      const ac = str(f.acodec);
+      return (vc === 'none' || vc === '') && ac !== 'none' && ac !== '';
+    })
+    .sort((a, b) => {
+      const mp4aDiff = (str(b.acodec).includes('mp4a') ? 1 : 0) - (str(a.acodec).includes('mp4a') ? 1 : 0);
+      if (mp4aDiff !== 0) return mp4aDiff;
+      return num(b.abr || b.tbr) - num(a.abr || a.tbr);
+    });
+
+  const chosenVideo = videoOnly[0];
+  const chosenAudio = audioFormatId
+    ? validFormats.find((f) => String(f.format_id || '') === audioFormatId) || audioOnly[0]
+    : audioOnly[0];
+
+  if (chosenVideo && chosenAudio) {
+    const vSpec = toSpec(chosenVideo);
+    const aSpec = toSpec(chosenAudio);
+    if (vSpec && aSpec) {
+      return { mode: 'ffmpeg', inputs: [vSpec, aSpec], expiresAt: Date.now() + 4 * 60 * 1000 };
+    }
+  }
+
+  if (!audioFormatId && muxed[0]) {
+    const spec = toSpec(muxed[0]);
+    if (spec) {
+      return {
+        mode: isManifest(spec) ? 'ffmpeg' : 'proxy',
+        inputs: [spec],
+        expiresAt: Date.now() + 4 * 60 * 1000,
+      };
+    }
+  }
+
+  return null;
 }
 
 function sanitizeFilename(name: string): string {
@@ -4730,6 +5230,25 @@ async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '1mb' }));
+
+  app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    const reqPath = req.path || '';
+    if (reqPath === '/admin/logs') {
+      next();
+      return;
+    }
+    const startedAt = Date.now();
+    res.on('finish', () => {
+      const status = res.statusCode;
+      if (reqPath.startsWith('/media/jobs/') && status < 400) {
+        return;
+      }
+      const durationMs = Date.now() - startedAt;
+      const lvl: AppLogLevel = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+      appendAppLog(lvl, 'http', `${req.method} /api${reqPath} -> ${status} (${durationMs}ms)`);
+    });
+    next();
+  });
 
   app.get('/api/health', async (_req: Request, res: Response) => {
     const ytdlpVersion = await getYtDlpVersion();
@@ -5069,7 +5588,49 @@ async function startServer() {
     }
     adminConfig.youtubePoToken = typeof body.youtubePoToken === 'string' ? body.youtubePoToken.trim() : '';
     saveAdminConfig(adminConfig);
+    resetYouTubeCachesAndCooldown();
+    appendAppLog('info', 'admin', 'Updated YouTube auth configuration');
     res.json({ success: true });
+  });
+
+  // Application logs (admin only)
+  app.get('/api/admin/logs', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 250;
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(MAX_APP_LOGS, Math.floor(rawLimit))) : 250;
+    const levelParam = typeof req.query.level === 'string' ? req.query.level.trim().toLowerCase() : 'all';
+    const sinceIdRaw = typeof req.query.sinceId === 'string' ? Number(req.query.sinceId) : 0;
+    const sinceId = Number.isFinite(sinceIdRaw) && sinceIdRaw > 0 ? Math.floor(sinceIdRaw) : 0;
+
+    let filtered = appLogBuffer;
+    if (levelParam === 'info' || levelParam === 'warn' || levelParam === 'error') {
+      filtered = filtered.filter((entry) => entry.level === levelParam);
+    }
+    if (sinceId > 0) {
+      filtered = filtered.filter((entry) => entry.id > sinceId);
+    }
+    const logs = filtered.slice(-limit);
+    const latestId = appLogBuffer.length > 0 ? appLogBuffer[appLogBuffer.length - 1].id : 0;
+    res.json({
+      logs,
+      total: appLogBuffer.length,
+      latestId,
+    });
+  });
+
+  app.delete('/api/admin/logs', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    appLogBuffer.length = 0;
+    appendAppLog('info', 'admin', 'Application logs cleared by admin');
+    res.json({ success: true, logs: [...appLogBuffer], total: appLogBuffer.length });
   });
 
   app.post('/api/admin/youtube-auth/test', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -5882,6 +6443,7 @@ async function startServer() {
 
     adminConfig.xray.enabled = nextEnabled;
     saveAdminConfig(adminConfig);
+    resetYouTubeCachesAndCooldown();
 
     if (adminConfig.xray.enabled) {
       let bin = await findXrayBinary();
@@ -5987,6 +6549,7 @@ async function startServer() {
     adminConfig.xray.configInput = profile.configInput;
     adminConfig.xray.enabled = true;
     saveAdminConfig(adminConfig);
+    resetYouTubeCachesAndCooldown();
 
     let bin = await findXrayBinary();
     if (!bin && process.platform === 'linux') {
@@ -6044,6 +6607,7 @@ async function startServer() {
     }
 
     saveAdminConfig(adminConfig);
+    resetYouTubeCachesAndCooldown();
     res.json({
       success: true,
       enabled: adminConfig.xray.enabled,
@@ -6125,6 +6689,7 @@ async function startServer() {
       port: nextPort,
     };
     saveAdminConfig(adminConfig);
+    resetYouTubeCachesAndCooldown();
 
     if (nextEnabled && nextMode === 'managed') {
       await startBgutilPotServer();
@@ -6931,14 +7496,194 @@ async function startServer() {
     }
 
     const ytId = extractYouTubeId(parsed);
-    const targetUrlForInspect = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
+    const targetUrlForInspect = isXUrl(parsed)
+      ? normalizeXUrl(parsed)
+      : ytId
+        ? `https://www.youtube.com/watch?v=${ytId}`
+        : parsed.toString();
     const runner = await getYtDlpRunner();
+
+    if (ytId) {
+      const fp = getYouTubeConfigFingerprint();
+      const inspectCacheKey = `${ytId}::${fp}`;
+      const cachedInspect = youtubeInspectCache.get(inspectCacheKey);
+      if (cachedInspect && cachedInspect.expiresAt > Date.now()) {
+        res.json(cachedInspect.payload);
+        return;
+      }
+      if (cachedInspect) youtubeInspectCache.delete(inspectCacheKey);
+
+      const cooldownMs = getYouTubeCooldownRemainingMs(fp);
+      if (cooldownMs > 0) {
+        const secs = Math.max(1, Math.ceil(cooldownMs / 1000));
+        res.status(429).json({
+          error: `YouTube rate-limit protection active. Please retry in ${secs}s or update cookies/Xray node.`,
+          retryAfterSeconds: secs,
+        });
+        return;
+      }
+
+      if (runner) {
+        let inflight = youtubeInspectInflight.get(inspectCacheKey);
+        if (!inflight) {
+          inflight = runPacedYouTubeTask(async () => {
+            const { extraArgs, env } = await getYtDlpAuthAndProxy();
+            const args = insertBeforeDoubleDash(
+              buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', targetUrlForInspect], {
+                isYouTube: true,
+              }),
+              extraArgs
+            );
+            const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
+              timeout: 30000,
+              maxBuffer: 8 * 1024 * 1024,
+              env,
+            });
+            const info = JSON.parse(stdout) as Record<string, unknown> & {
+              title?: string;
+              uploader?: string;
+              channel?: string;
+              creator?: string;
+              duration?: number;
+              thumbnail?: string;
+            };
+            setBoundedCache(
+              youtubeRawInfoCache,
+              inspectCacheKey,
+              { info, expiresAt: Date.now() + YOUTUBE_RAW_INFO_CACHE_TTL_MS },
+              80
+            );
+            const tracks = extractYtDlpTracks(info);
+            const rawThumb =
+              typeof info.thumbnail === 'string' && info.thumbnail
+                ? info.thumbnail
+                : `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
+            const payload: Record<string, unknown> = {
+              title: info.title || 'Media Stream',
+              author: info.uploader || info.channel || info.creator || parsed.hostname,
+              durationSeconds: typeof info.duration === 'number' ? info.duration : null,
+              thumbnail: maybeProxySocialThumbnail(rawThumb, parsed),
+              providerGlow: 'red',
+              qualities: ['2160p', '1080p', '720p', '480p', '360p'],
+              engineMode: 'live',
+              audioTracks: tracks.audioTracks,
+              manualSubtitles: tracks.manualSubtitles,
+              autoSubtitles: tracks.autoSubtitles,
+            };
+            setBoundedCache(
+              youtubeInspectCache,
+              inspectCacheKey,
+              { payload, expiresAt: Date.now() + YOUTUBE_INSPECT_CACHE_TTL_MS },
+              100
+            );
+            return payload;
+          });
+          youtubeInspectInflight.set(inspectCacheKey, inflight);
+        }
+
+        try {
+          const payload = await inflight;
+          res.json(payload);
+          return;
+        } catch (ytErr) {
+          if (isYouTubeBotOrRateLimitError(ytErr)) {
+            recordYouTubeRateLimit(fp);
+            res.status(429).json({
+              error:
+                'YouTube temporarily flagged this IP with a bot/rate-limit check. Wait a moment, add cookies, or switch Xray server.',
+              code: 'YOUTUBE_AUTH_REQUIRED',
+            });
+            return;
+          }
+          // When Xray is active, never fall back to unproxied ytdl-core/fetch which leaks the raw server IP
+          if (adminConfig.xray.enabled && xrayState.running) {
+            res.status(422).json({
+              error: ytErr instanceof Error ? ytErr.message : 'Failed to inspect YouTube video through Xray.',
+            });
+            return;
+          }
+        } finally {
+          youtubeInspectInflight.delete(inspectCacheKey);
+        }
+      }
+
+      // Only allow @distube/ytdl-core fallback when yt-dlp isn't installed or had a non-bot failure without Xray
+      const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
+      try {
+        const info = await ytdl.getInfo(watchUrl);
+        const details = info.videoDetails;
+        const maxHeight = info.formats.reduce(
+          (max: number, f: VideoFormat) => Math.max(max, f.height || 0),
+          0
+        );
+        const qualities = ['2160p', '1080p', '720p', '480p', '360p'].filter((q) => {
+          const h = selectTargetHeight(q);
+          return maxHeight === 0 || h <= maxHeight || h <= 720;
+        });
+
+        const thumbs = details.thumbnails || [];
+        const bestThumb = thumbs[thumbs.length - 1]?.url || `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
+        const tracks = extractYtdlTracks(info);
+
+        res.json({
+          title: details.title || `Media Clip (${ytId})`,
+          author: details.author?.name || 'Media Creator',
+          durationSeconds: Number(details.lengthSeconds) || null,
+          thumbnail: bestThumb,
+          providerGlow: 'red',
+          qualities,
+          engineMode: 'live',
+          audioTracks: tracks.audioTracks,
+          manualSubtitles: tracks.manualSubtitles,
+          autoSubtitles: tracks.autoSubtitles,
+        });
+        return;
+      } catch {
+        // Fall back to oEmbed metadata (single lightweight endpoint)
+        let title = `Media Clip (${ytId})`;
+        let author = 'Media Creator';
+        let thumbnail = `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
+
+        try {
+          const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(watchUrl)}&format=json`;
+          const oembedRes = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
+          if (oembedRes.ok) {
+            const data = (await oembedRes.json()) as {
+              title?: string;
+              author_name?: string;
+              thumbnail_url?: string;
+            };
+            if (data.title) title = data.title;
+            if (data.author_name) author = data.author_name;
+            if (data.thumbnail_url) thumbnail = data.thumbnail_url;
+          }
+        } catch {
+          // Keep parsed fallback metadata
+        }
+
+        res.json({
+          title,
+          author,
+          durationSeconds: null,
+          thumbnail,
+          providerGlow: 'red',
+          qualities: ['2160p', '1080p', '720p', '480p', '360p'],
+          engineMode: 'preview',
+          audioTracks: [],
+          manualSubtitles: [],
+          autoSubtitles: [],
+        });
+        return;
+      }
+    }
 
     if (runner) {
       try {
         const { extraArgs, env } = await getYtDlpAuthAndProxy();
         const args = insertBeforeDoubleDash(
-          buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', targetUrlForInspect]),
+          buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', targetUrlForInspect], {
+            isYouTube: false,
+          }),
           extraArgs
         );
         const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
@@ -6955,18 +7700,13 @@ async function startServer() {
           thumbnail?: string;
         };
         const tracks = extractYtDlpTracks(info);
-        const rawThumb =
-          typeof info.thumbnail === 'string' && info.thumbnail
-            ? info.thumbnail
-            : ytId
-              ? `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`
-              : null;
+        const rawThumb = typeof info.thumbnail === 'string' && info.thumbnail ? info.thumbnail : null;
         res.json({
           title: info.title || 'Media Stream',
           author: info.uploader || info.channel || info.creator || parsed.hostname,
           durationSeconds: typeof info.duration === 'number' ? info.duration : null,
           thumbnail: maybeProxySocialThumbnail(rawThumb, parsed),
-          providerGlow: ytId ? 'red' : 'default',
+          providerGlow: 'default',
           qualities: ['2160p', '1080p', '720p', '480p', '360p'],
           engineMode: 'live',
           audioTracks: tracks.audioTracks,
@@ -6975,7 +7715,7 @@ async function startServer() {
         });
         return;
       } catch {
-        // Fall through to X/TikTok fallbacks or @distube/ytdl-core
+        // Fall through to X/TikTok fallbacks
       }
     }
 
@@ -7030,76 +7770,6 @@ async function startServer() {
       } catch (ttErr) {
         res.status(422).json({
           error: ttErr instanceof Error ? ttErr.message : 'Could not fetch TikTok media.',
-        });
-        return;
-      }
-    }
-
-    if (ytId) {
-      const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
-      try {
-        const info = await ytdl.getInfo(watchUrl);
-        const details = info.videoDetails;
-        const maxHeight = info.formats.reduce(
-          (max: number, f: VideoFormat) => Math.max(max, f.height || 0),
-          0
-        );
-        const qualities = ['2160p', '1080p', '720p', '480p', '360p'].filter((q) => {
-          const h = selectTargetHeight(q);
-          return maxHeight === 0 || h <= maxHeight || h <= 720;
-        });
-
-        const thumbs = details.thumbnails || [];
-        const bestThumb = thumbs[thumbs.length - 1]?.url || `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
-        const tracks = extractYtdlTracks(info);
-
-        res.json({
-          title: details.title || `Media Clip (${ytId})`,
-          author: details.author?.name || 'Media Creator',
-          durationSeconds: Number(details.lengthSeconds) || null,
-          thumbnail: bestThumb,
-          providerGlow: 'red',
-          qualities,
-          engineMode: 'live',
-          audioTracks: tracks.audioTracks,
-          manualSubtitles: tracks.manualSubtitles,
-          autoSubtitles: tracks.autoSubtitles,
-        });
-        return;
-      } catch {
-        // Fall back to oEmbed metadata
-        let title = `Media Clip (${ytId})`;
-        let author = 'Media Creator';
-        let thumbnail = `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
-
-        try {
-          const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(watchUrl)}&format=json`;
-          const oembedRes = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
-          if (oembedRes.ok) {
-            const data = (await oembedRes.json()) as {
-              title?: string;
-              author_name?: string;
-              thumbnail_url?: string;
-            };
-            if (data.title) title = data.title;
-            if (data.author_name) author = data.author_name;
-            if (data.thumbnail_url) thumbnail = data.thumbnail_url;
-          }
-        } catch {
-          // Keep parsed fallback metadata
-        }
-
-        res.json({
-          title,
-          author,
-          durationSeconds: null,
-          thumbnail,
-          providerGlow: 'red',
-          qualities: ['2160p', '1080p', '720p', '480p', '360p'],
-          engineMode: 'preview',
-          audioTracks: [],
-          manualSubtitles: [],
-          autoSubtitles: [],
         });
         return;
       }
@@ -7547,6 +8217,7 @@ async function startServer() {
 
     job.progress = 100;
     job.status = 'ready';
+    appendAppLog('info', 'download', `Job ready: ${job.title} [${job.quality}.${job.ext}] (${job.totalBytes ?? 0} bytes)`);
   }
 
   async function runDirectTelegramDownload(job: DownloadJob, parsed: URL): Promise<void> {
@@ -7651,9 +8322,22 @@ async function startServer() {
         return;
       }
 
-      const targetUrlForDl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
+      const targetUrlForDl = isXUrl(parsed)
+        ? normalizeXUrl(parsed)
+        : ytId
+          ? `https://www.youtube.com/watch?v=${ytId}`
+          : parsed.toString();
       const runner = await getYtDlpRunner();
       if (runner) {
+        const fp = ytId ? getYouTubeConfigFingerprint() : '';
+        if (ytId) {
+          const cooldownMs = getYouTubeCooldownRemainingMs(fp);
+          if (cooldownMs > 0) {
+            throw new Error(
+              `YouTube rate-limit protection active. Retry in ${Math.max(1, Math.ceil(cooldownMs / 1000))}s.`
+            );
+          }
+        }
         try {
           const targetH = String(selectTargetHeight(job.quality));
           const audioFid = job.audioFormatId;
@@ -7667,63 +8351,89 @@ async function startServer() {
           const { extraArgs, env } = await getYtDlpAuthAndProxy();
 
           const dumpArgs = insertBeforeDoubleDash(
-            buildYtDlpArgs([
-              '--dump-single-json',
-              '-f',
-              isAudio ? audioFmtSelector : videoFmtSelector,
-              '--no-playlist',
-              '--playlist-items',
-              '1',
-              '--no-warnings',
-              '--',
-              targetUrlForDl,
-            ]),
+            buildYtDlpArgs(
+              [
+                '--dump-single-json',
+                '-f',
+                isAudio ? audioFmtSelector : videoFmtSelector,
+                '--no-playlist',
+                '--playlist-items',
+                '1',
+                '--no-warnings',
+                '--',
+                targetUrlForDl,
+              ],
+              { isYouTube: Boolean(ytId) }
+            ),
             extraArgs
           );
 
           let inputs: StreamInputSpec[] = [];
-          try {
-            const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...dumpArgs], {
-              timeout: 25000,
-              maxBuffer: 8 * 1024 * 1024,
-              env,
-            });
-            const rawJson = JSON.parse(stdout) as Record<string, unknown> & {
-              entries?: Array<Record<string, unknown>>;
-            };
-            const entry =
-              Array.isArray(rawJson.entries) && rawJson.entries.length > 0 ? rawJson.entries[0] : rawJson;
-            const toSpec = (fmt: Record<string, unknown>): StreamInputSpec | null => {
-              const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
-              if (!/^https?:\/\//i.test(u)) return null;
-              return {
-                url: u,
-                headers: buildUpstreamHeaders(
-                  fmt.http_headers && typeof fmt.http_headers === 'object'
-                    ? (fmt.http_headers as Record<string, string>)
-                    : undefined,
-                  extractCookieHeaderFromYtDlp(fmt.cookies)
-                ),
-                protocol: typeof fmt.protocol === 'string' ? fmt.protocol : undefined,
-                vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
-                acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
-                ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
-              };
-            };
-            const reqFmts = Array.isArray(entry.requested_formats)
-              ? (entry.requested_formats as Array<Record<string, unknown>>)
-              : null;
-            if (reqFmts && reqFmts.length >= 2) {
-              inputs = reqFmts.map(toSpec).filter((x): x is StreamInputSpec => x !== null);
-            } else if (reqFmts && reqFmts.length === 1) {
-              const one = toSpec(reqFmts[0]);
-              if (one) inputs = [one];
-            } else {
-              const one = toSpec(entry);
-              if (one) inputs = [one];
+          let fatalBotError: unknown = null;
+
+          // Reuse recently resolved stream URLs when available (avoids double-scraping YouTube)
+          if (!isAudio && ytId) {
+            const streamCacheKey = `${targetUrlForDl}::${targetH}::${audioFid || ''}::${fp}`;
+            const cachedStream = streamResolveCache.get(streamCacheKey);
+            if (cachedStream && cachedStream.expiresAt > Date.now() && cachedStream.inputs.length > 0) {
+              inputs = cachedStream.inputs;
             }
-          } catch {
-            inputs = [];
+          }
+
+          if (inputs.length === 0) {
+            try {
+              const execDump = () =>
+                execFileAsync(runner.cmd, [...runner.baseArgs, ...dumpArgs], {
+                  timeout: 30000,
+                  maxBuffer: 8 * 1024 * 1024,
+                  env,
+                });
+              const { stdout } = ytId ? await runPacedYouTubeTask(execDump) : await execDump();
+              const rawJson = JSON.parse(stdout) as Record<string, unknown> & {
+                entries?: Array<Record<string, unknown>>;
+              };
+              const entry =
+                Array.isArray(rawJson.entries) && rawJson.entries.length > 0 ? rawJson.entries[0] : rawJson;
+              const toSpec = (fmt: Record<string, unknown>): StreamInputSpec | null => {
+                const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
+                if (!/^https?:\/\//i.test(u)) return null;
+                return {
+                  url: u,
+                  headers: buildUpstreamHeaders(
+                    fmt.http_headers && typeof fmt.http_headers === 'object'
+                      ? (fmt.http_headers as Record<string, string>)
+                      : undefined,
+                    extractCookieHeaderFromYtDlp(fmt.cookies)
+                  ),
+                  protocol: typeof fmt.protocol === 'string' ? fmt.protocol : undefined,
+                  vcodec: typeof fmt.vcodec === 'string' ? fmt.vcodec : undefined,
+                  acodec: typeof fmt.acodec === 'string' ? fmt.acodec : undefined,
+                  ext: typeof fmt.ext === 'string' ? fmt.ext : undefined,
+                };
+              };
+              const reqFmts = Array.isArray(entry.requested_formats)
+                ? (entry.requested_formats as Array<Record<string, unknown>>)
+                : null;
+              if (reqFmts && reqFmts.length >= 2) {
+                inputs = reqFmts.map(toSpec).filter((x): x is StreamInputSpec => x !== null);
+              } else if (reqFmts && reqFmts.length === 1) {
+                const one = toSpec(reqFmts[0]);
+                if (one) inputs = [one];
+              } else {
+                const one = toSpec(entry);
+                if (one) inputs = [one];
+              }
+            } catch (dumpErr) {
+              if (ytId && isYouTubeBotOrRateLimitError(dumpErr)) {
+                recordYouTubeRateLimit(fp);
+                fatalBotError = dumpErr;
+              }
+              inputs = [];
+            }
+          }
+
+          if (fatalBotError) {
+            throw fatalBotError;
           }
 
           if (inputs.length === 1 && !isAudio && !isManifestOrIncompatibleFormat(inputs[0])) {
@@ -7735,9 +8445,7 @@ async function startServer() {
               });
               return;
             } catch (openErr) {
-              // A rejected upload will be rejected identically by every retry.
               if (isFatalTelegramUploadError(openErr)) throw openErr;
-              // Fall through to ffmpeg or yt-dlp stdout streaming below
             }
           }
 
@@ -7752,7 +8460,6 @@ async function startServer() {
               return;
             } catch (muxErr) {
               if (isFatalTelegramUploadError(muxErr)) throw muxErr;
-              // Fall through to direct yt-dlp stdout pipe
             }
           }
 
@@ -7761,7 +8468,10 @@ async function startServer() {
             ? audioFmtSelector
             : `best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`;
           const ytdlpArgs = insertBeforeDoubleDash(
-            buildYtDlpArgs(['-f', singleFmt, '--no-playlist', '--playlist-items', '1', '-o', '-', '--', targetUrlForDl]),
+            buildYtDlpArgs(
+              ['-f', singleFmt, '--no-playlist', '--playlist-items', '1', '-o', '-', '--', targetUrlForDl],
+              { isYouTube: Boolean(ytId), isDownload: true }
+            ),
             extraArgs
           );
           const ytStdout = spawnChildToReadable(runner.cmd, [...runner.baseArgs, ...ytdlpArgs], env);
@@ -8036,6 +8746,7 @@ async function startServer() {
     } catch (err) {
       job.status = 'error';
       job.error = sanitizeTelegramError(err, adminConfig.telegram.botToken);
+      appendAppLog('error', 'download', `Telegram upload job failed (${job.title}): ${job.error}`);
     }
   }
 
@@ -8181,9 +8892,22 @@ async function startServer() {
         }
       }
 
-      const targetUrlForDl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
+      const targetUrlForDl = isXUrl(parsed)
+        ? normalizeXUrl(parsed)
+        : ytId
+          ? `https://www.youtube.com/watch?v=${ytId}`
+          : parsed.toString();
       const runner = await getYtDlpRunner();
       if (runner) {
+        const fp = ytId ? getYouTubeConfigFingerprint() : '';
+        if (ytId) {
+          const cooldownMs = getYouTubeCooldownRemainingMs(fp);
+          if (cooldownMs > 0) {
+            throw new Error(
+              `YouTube rate-limit protection active. Retry in ${Math.max(1, Math.ceil(cooldownMs / 1000))}s.`
+            );
+          }
+        }
         try {
           const targetH = String(selectTargetHeight(job.quality));
           const audioFid = job.audioFormatId;
@@ -8220,7 +8944,10 @@ async function startServer() {
                 targetUrlForDl,
               ];
           const { extraArgs, env } = await getYtDlpAuthAndProxy();
-          const finalArgs = insertBeforeDoubleDash(buildYtDlpArgs(baseArgs), extraArgs);
+          const finalArgs = insertBeforeDoubleDash(
+            buildYtDlpArgs(baseArgs, { isYouTube: Boolean(ytId), isDownload: true }),
+            extraArgs
+          );
 
           await new Promise<void>((resolve, reject) => {
             const child = spawn(runner.cmd, [...runner.baseArgs, ...finalArgs], { shell: false, env });
@@ -8241,7 +8968,11 @@ async function startServer() {
                 await finalizeJobFile(job);
                 resolve();
               } else {
-                reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+                const err = new Error(stderr || `yt-dlp exited with code ${code}`);
+                if (ytId && isYouTubeBotOrRateLimitError(err)) {
+                  recordYouTubeRateLimit(fp);
+                }
+                reject(err);
               }
             });
             child.on('error', reject);
@@ -8647,6 +9378,7 @@ async function startServer() {
     } catch (err) {
       job.status = 'error';
       job.error = err instanceof Error ? err.message : 'Download failed';
+      appendAppLog('error', 'download', `Download job failed (${job.title}): ${job.error}`);
       fs.promises.rm(job.filePath, { force: true }).catch(() => {});
     }
   }
@@ -8707,6 +9439,7 @@ async function startServer() {
       author: rawAuthor,
     };
     downloadJobs.set(id, job);
+    appendAppLog('info', 'download', `Job started: ${rawTitle} [${quality}] (${parsed.hostname})`);
 
     void runStagedDownload(job, parsed);
 
@@ -8866,23 +9599,8 @@ async function startServer() {
     });
   });
 
-  interface StreamInputSpec {
-    url: string;
-    headers: Record<string, string>;
-    protocol?: string;
-    vcodec?: string;
-    acodec?: string;
-    ext?: string;
-  }
-
-  interface ResolvedStreamEntry {
-    mode: 'proxy' | 'ffmpeg';
-    inputs: StreamInputSpec[];
-    expiresAt: number;
-  }
-
-  const streamResolveCache = new Map<string, ResolvedStreamEntry>();
-  const streamInflightMap = new Map<string, Promise<ResolvedStreamEntry>>();
+  type StreamInputSpec = StreamInputSpecGlobal;
+  type ResolvedStreamEntry = ResolvedStreamEntryGlobal;
 
   function isManifestOrIncompatibleFormat(input: StreamInputSpec): boolean {
     const proto = (input.protocol || '').toLowerCase();
@@ -9152,15 +9870,22 @@ async function startServer() {
     }
 
     const ytId = extractYouTubeId(parsed);
-    const streamTargetUrl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
+    const streamTargetUrl = isXUrl(parsed)
+      ? normalizeXUrl(parsed)
+      : ytId
+        ? `https://www.youtube.com/watch?v=${ytId}`
+        : parsed.toString();
     const isTikTok = isTikTokUrl(parsed);
     const runner = await getYtDlpRunner();
     let lastStreamError = '';
+    let suppressYtdlFallback = Boolean(adminConfig.xray.enabled && xrayState.running);
 
     if (runner) {
       try {
         const { extraArgs, env } = await getYtDlpAuthAndProxy();
-        const cfgFingerprint = `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${adminConfig.potProvider.enabled}:${Boolean(adminConfig.youtubeCookies)}`;
+        const cfgFingerprint = ytId
+          ? getYouTubeConfigFingerprint()
+          : `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${adminConfig.potProvider.enabled}:${Boolean(adminConfig.youtubeCookies)}`;
         const cacheKey = `${streamTargetUrl}::${targetH}::${audioFormatId || ''}::${cfgFingerprint}`;
 
         let resolvedEntry = streamResolveCache.get(cacheKey);
@@ -9169,10 +9894,40 @@ async function startServer() {
           resolvedEntry = undefined;
         }
 
+        if (!resolvedEntry && ytId) {
+          const cachedRaw = youtubeRawInfoCache.get(`${ytId}::${cfgFingerprint}`);
+          if (cachedRaw && cachedRaw.expiresAt > Date.now()) {
+            const fromRaw = resolveYouTubeStreamFromRawInfo(
+              cachedRaw.info,
+              targetH,
+              audioFormatId,
+              buildUpstreamHeaders,
+              extractCookieHeaderFromYtDlp,
+              isManifestOrIncompatibleFormat
+            );
+            if (fromRaw) {
+              setBoundedCache(streamResolveCache, cacheKey, fromRaw, 100);
+              resolvedEntry = fromRaw;
+            }
+          } else if (cachedRaw) {
+            youtubeRawInfoCache.delete(`${ytId}::${cfgFingerprint}`);
+          }
+        }
+
+        if (!resolvedEntry && ytId) {
+          const cooldownMs = getYouTubeCooldownRemainingMs(cfgFingerprint);
+          if (cooldownMs > 0) {
+            suppressYtdlFallback = true;
+            throw new Error(
+              `YouTube rate-limit protection active. Retry in ${Math.max(1, Math.ceil(cooldownMs / 1000))}s.`
+            );
+          }
+        }
+
         if (!resolvedEntry) {
           let inflight = streamInflightMap.get(cacheKey);
           if (!inflight) {
-            inflight = (async () => {
+            const resolveTask = async (): Promise<ResolvedStreamEntry> => {
               const formatSelector = audioFormatId
                 ? `bestvideo[height<=${targetH}][vcodec^=avc]+${audioFormatId}/bestvideo[height<=${targetH}]+${audioFormatId}/best[height<=${targetH}]`
                 : isTikTok
@@ -9182,21 +9937,24 @@ async function startServer() {
                     : `best[height<=${targetH}][height>=480][ext=mp4][vcodec!=none][acodec!=none]/bestvideo[height<=${targetH}][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=${targetH}]+bestaudio/best[height<=${targetH}][ext=mp4]/best[height<=${targetH}]/best`;
 
               const args = insertBeforeDoubleDash(
-                buildYtDlpArgs([
-                  '--dump-single-json',
-                  '-f',
-                  formatSelector,
-                  '--no-playlist',
-                  '--playlist-items',
-                  '1',
-                  '--no-warnings',
-                  '--',
-                  streamTargetUrl,
-                ]),
+                buildYtDlpArgs(
+                  [
+                    '--dump-single-json',
+                    '-f',
+                    formatSelector,
+                    '--no-playlist',
+                    '--playlist-items',
+                    '1',
+                    '--no-warnings',
+                    '--',
+                    streamTargetUrl,
+                  ],
+                  { isYouTube: Boolean(ytId) }
+                ),
                 extraArgs
               );
               const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
-                timeout: 25000,
+                timeout: 30000,
                 maxBuffer: 8 * 1024 * 1024,
                 env,
               });
@@ -9205,6 +9963,15 @@ async function startServer() {
               };
               const entry =
                 Array.isArray(rawJson.entries) && rawJson.entries.length > 0 ? rawJson.entries[0] : rawJson;
+
+              if (ytId) {
+                setBoundedCache(
+                  youtubeRawInfoCache,
+                  `${ytId}::${cfgFingerprint}`,
+                  { info: entry, expiresAt: Date.now() + YOUTUBE_RAW_INFO_CACHE_TTL_MS },
+                  80
+                );
+              }
 
               const toSpec = (fmt: Record<string, unknown>): StreamInputSpec | null => {
                 const u = typeof fmt.url === 'string' ? fmt.url.trim() : '';
@@ -9249,16 +10016,12 @@ async function startServer() {
               const resolved: ResolvedStreamEntry = {
                 mode,
                 inputs,
-                expiresAt: Date.now() + 3 * 60 * 1000,
+                expiresAt: Date.now() + 4 * 60 * 1000,
               };
-              streamResolveCache.set(cacheKey, resolved);
-              // Keep cache bounded
-              if (streamResolveCache.size > 100) {
-                const oldestKey = streamResolveCache.keys().next().value;
-                if (oldestKey) streamResolveCache.delete(oldestKey);
-              }
+              setBoundedCache(streamResolveCache, cacheKey, resolved, 100);
               return resolved;
-            })();
+            };
+            inflight = ytId ? runPacedYouTubeTask(resolveTask) : resolveTask();
             streamInflightMap.set(cacheKey, inflight);
           }
 
@@ -9270,14 +10033,30 @@ async function startServer() {
         }
 
         if (resolvedEntry.mode === 'proxy' && resolvedEntry.inputs[0]) {
-          await proxyRemoteMediaWithRange(resolvedEntry.inputs[0].url, req, res, resolvedEntry.inputs[0].headers);
-          return;
+          try {
+            await proxyRemoteMediaWithRange(resolvedEntry.inputs[0].url, req, res, resolvedEntry.inputs[0].headers);
+            return;
+          } catch (proxyErr) {
+            streamResolveCache.delete(cacheKey);
+            if (ytId) youtubeRawInfoCache.delete(`${ytId}::${cfgFingerprint}`);
+            throw proxyErr;
+          }
         }
         if (resolvedEntry.mode === 'ffmpeg' && resolvedEntry.inputs.length > 0) {
-          await spawnFfmpegStream(resolvedEntry.inputs, env, req, res);
-          return;
+          try {
+            await spawnFfmpegStream(resolvedEntry.inputs, env, req, res);
+            return;
+          } catch (ffErr) {
+            streamResolveCache.delete(cacheKey);
+            if (ytId) youtubeRawInfoCache.delete(`${ytId}::${cfgFingerprint}`);
+            throw ffErr;
+          }
         }
       } catch (err: unknown) {
+        if (ytId && isYouTubeBotOrRateLimitError(err)) {
+          recordYouTubeRateLimit(getYouTubeConfigFingerprint());
+          suppressYtdlFallback = true;
+        }
         const errObj = err as { stderr?: string; message?: string };
         const stderrLines = (errObj.stderr || '')
           .split(/\r?\n/)
@@ -9314,7 +10093,7 @@ async function startServer() {
       }
     }
 
-    if (ytId) {
+    if (ytId && !suppressYtdlFallback) {
       const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
       try {
         const info = await ytdl.getInfo(watchUrl);
@@ -9433,96 +10212,163 @@ async function startServer() {
       res.send(vttText);
     };
 
-    const runner = await getYtDlpRunner();
-    if (runner) {
-      let tempDir: string | null = null;
-      try {
-        tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-sub-'));
-        const { extraArgs, env } = await getYtDlpAuthAndProxy();
-        const subArgs = insertBeforeDoubleDash(
-          buildYtDlpArgs([
-            '--skip-download',
-            isAuto ? '--write-auto-subs' : '--write-subs',
-            '--sub-langs',
-            lang,
-            '--sub-format',
-            'vtt/srt/best',
-            '--convert-subs',
-            'vtt',
-            '--no-playlist',
-            '-o',
-            path.join(tempDir, 'sub.%(ext)s'),
-            '--',
-            parsed.toString(),
-          ]),
-          extraArgs
-        );
-        await execFileAsync(runner.cmd, [...runner.baseArgs, ...subArgs], { timeout: 25000, env });
-        const files = await fs.promises.readdir(tempDir);
-        const vttFile = files.find((f) => f.endsWith('.vtt')) || files[0];
-        if (vttFile) {
-          const content = await fs.promises.readFile(path.join(tempDir, vttFile), 'utf8');
-          if (content.trim()) {
-            sendVtt(content);
-            return;
-          }
-        }
-      } catch {
-        // Fall through to ytdl-core timedtext fallback
-      } finally {
-        if (tempDir) {
-          await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-        }
-      }
-    }
-
     const ytId = extractYouTubeId(parsed);
-    if (ytId) {
-      try {
-        const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${ytId}`);
-        type SubtitlePlayerResp = {
-          captions?: {
-            playerCaptionsTracklistRenderer?: {
-              captionTracks?: Array<{ baseUrl?: string; languageCode?: string; kind?: string }>;
-            };
-          };
-        };
-        const rawInfo = info as unknown as {
-          playerResponse?: SubtitlePlayerResp;
-          player_response?: SubtitlePlayerResp;
-        };
-        const playerResp = rawInfo.playerResponse || rawInfo.player_response;
-        const captionTracks = playerResp?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+    const subCacheKey = `${ytId || parsed.toString()}::${lang}::${isAuto ? '1' : '0'}`;
+    const cachedSub = youtubeSubtitleCache.get(subCacheKey);
+    if (cachedSub && cachedSub.expiresAt > Date.now()) {
+      sendVtt(cachedSub.vtt);
+      return;
+    }
+    if (cachedSub) youtubeSubtitleCache.delete(subCacheKey);
 
-        const match =
-          captionTracks.find((c) => c.languageCode === lang && (isAuto ? c.kind === 'asr' : c.kind !== 'asr')) ||
-          captionTracks.find((c) => c.languageCode === lang);
+    let inflightSub = youtubeSubtitleInflight.get(subCacheKey);
+    if (!inflightSub) {
+      inflightSub = (async (): Promise<string | null> => {
+        const fp = ytId ? getYouTubeConfigFingerprint() : '';
 
-        if (match?.baseUrl) {
-          const vttUrl = match.baseUrl.includes('fmt=')
-            ? match.baseUrl.replace(/fmt=[^&]+/, 'fmt=vtt')
-            : `${match.baseUrl}&fmt=vtt`;
-
-          if (adminConfig.xray.enabled && xrayState.running) {
-            const resp = await proxyHttpGet(vttUrl, adminConfig.xray.httpPort, 10000);
-            if (resp.statusCode >= 200 && resp.statusCode < 300 && resp.body.trim()) {
-              sendVtt(resp.body);
-              return;
-            }
-          } else {
-            const resp = await fetch(vttUrl, { signal: AbortSignal.timeout(10000) });
-            if (resp.ok) {
-              const text = await resp.text();
-              if (text.trim()) {
-                sendVtt(text);
-                return;
+        // 1. Try direct timedtext VTT URL from cached inspect/stream raw info (0 extra yt-dlp calls!)
+        if (ytId) {
+          const cachedRaw = youtubeRawInfoCache.get(`${ytId}::${fp}`);
+          if (cachedRaw && cachedRaw.expiresAt > Date.now()) {
+            const subUrl = findSubtitleUrlFromRawInfo(cachedRaw.info, lang, isAuto);
+            if (subUrl) {
+              try {
+                if (adminConfig.xray.enabled && xrayState.running) {
+                  const resp = await proxyHttpGetFullText(subUrl, adminConfig.xray.httpPort, 12000);
+                  if (resp.statusCode >= 200 && resp.statusCode < 300 && resp.body.trim()) {
+                    return resp.body;
+                  }
+                } else {
+                  const resp = await fetch(subUrl, { signal: AbortSignal.timeout(12000) });
+                  if (resp.ok) {
+                    const text = await resp.text();
+                    if (text.trim()) return text;
+                  }
+                }
+              } catch {
+                // Fall through to yt-dlp below
               }
             }
           }
         }
-      } catch {
-        // Fall through to 404
+
+        const runner = await getYtDlpRunner();
+        let suppressSubYtdlFallback = Boolean(adminConfig.xray.enabled && xrayState.running);
+        if (runner && (!ytId || getYouTubeCooldownRemainingMs(fp) === 0)) {
+          let tempDir: string | null = null;
+          try {
+            tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-sub-'));
+            const { extraArgs, env } = await getYtDlpAuthAndProxy();
+            const subArgs = insertBeforeDoubleDash(
+              buildYtDlpArgs(
+                [
+                  '--skip-download',
+                  isAuto ? '--write-auto-subs' : '--write-subs',
+                  '--sub-langs',
+                  lang,
+                  '--sub-format',
+                  'vtt/srt/best',
+                  '--convert-subs',
+                  'vtt',
+                  '--no-playlist',
+                  '-o',
+                  path.join(tempDir, 'sub.%(ext)s'),
+                  '--',
+                  ytId ? `https://www.youtube.com/watch?v=${ytId}` : parsed.toString(),
+                ],
+                { isYouTube: Boolean(ytId), isSubtitle: true }
+              ),
+              extraArgs
+            );
+            const execSub = () => execFileAsync(runner.cmd, [...runner.baseArgs, ...subArgs], { timeout: 28000, env });
+            if (ytId) {
+              await runPacedYouTubeTask(execSub);
+            } else {
+              await execSub();
+            }
+            const files = await fs.promises.readdir(tempDir);
+            const vttFile = files.find((f) => f.endsWith('.vtt')) || files[0];
+            if (vttFile) {
+              const content = await fs.promises.readFile(path.join(tempDir, vttFile), 'utf8');
+              if (content.trim()) {
+                return content;
+              }
+            }
+          } catch (subErr) {
+            if (ytId && isYouTubeBotOrRateLimitError(subErr)) {
+              recordYouTubeRateLimit(fp);
+              suppressSubYtdlFallback = true;
+            }
+          } finally {
+            if (tempDir) {
+              await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+            }
+          }
+        }
+
+        if (ytId && !suppressSubYtdlFallback) {
+          try {
+            const info = await ytdl.getInfo(`https://www.youtube.com/watch?v=${ytId}`);
+            type SubtitlePlayerResp = {
+              captions?: {
+                playerCaptionsTracklistRenderer?: {
+                  captionTracks?: Array<{ baseUrl?: string; languageCode?: string; kind?: string }>;
+                };
+              };
+            };
+            const rawInfo = info as unknown as {
+              playerResponse?: SubtitlePlayerResp;
+              player_response?: SubtitlePlayerResp;
+            };
+            const playerResp = rawInfo.playerResponse || rawInfo.player_response;
+            const captionTracks = playerResp?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+
+            const match =
+              captionTracks.find((c) => c.languageCode === lang && (isAuto ? c.kind === 'asr' : c.kind !== 'asr')) ||
+              captionTracks.find((c) => c.languageCode === lang);
+
+            if (match?.baseUrl) {
+              const vttUrl = match.baseUrl.includes('fmt=')
+                ? match.baseUrl.replace(/fmt=[^&]+/, 'fmt=vtt')
+                : `${match.baseUrl}&fmt=vtt`;
+
+              if (adminConfig.xray.enabled && xrayState.running) {
+                const resp = await proxyHttpGetFullText(vttUrl, adminConfig.xray.httpPort, 10000);
+                if (resp.statusCode >= 200 && resp.statusCode < 300 && resp.body.trim()) {
+                  return resp.body;
+                }
+              } else {
+                const resp = await fetch(vttUrl, { signal: AbortSignal.timeout(10000) });
+                if (resp.ok) {
+                  const text = await resp.text();
+                  if (text.trim()) return text;
+                }
+              }
+            }
+          } catch {
+            // Fall through to 404
+          }
+        }
+
+        return null;
+      })();
+      youtubeSubtitleInflight.set(subCacheKey, inflightSub);
+    }
+
+    try {
+      const vttText = await inflightSub;
+      if (vttText) {
+        setBoundedCache(
+          youtubeSubtitleCache,
+          subCacheKey,
+          { vtt: vttText, expiresAt: Date.now() + YOUTUBE_SUBTITLE_CACHE_TTL_MS },
+          150
+        );
+        sendVtt(vttText);
+        return;
       }
+    } finally {
+      youtubeSubtitleInflight.delete(subCacheKey);
     }
 
     res.status(404).json({ error: 'Subtitle track not found.' });
@@ -9639,7 +10485,11 @@ async function startServer() {
       }
     }
 
-    const dlTargetUrl = isXUrl(parsed) ? normalizeXUrl(parsed) : parsed.toString();
+    const dlTargetUrl = isXUrl(parsed)
+      ? normalizeXUrl(parsed)
+      : ytId
+        ? `https://www.youtube.com/watch?v=${ytId}`
+        : parsed.toString();
     const runner = await getYtDlpRunner();
     if (runner) {
       const targetH = String(selectTargetHeight(quality));
@@ -9659,7 +10509,10 @@ async function startServer() {
             dlTargetUrl,
           ];
       const { extraArgs, env } = await getYtDlpAuthAndProxy();
-      const finalArgs = insertBeforeDoubleDash(buildYtDlpArgs(baseArgs), extraArgs);
+      const finalArgs = insertBeforeDoubleDash(
+        buildYtDlpArgs(baseArgs, { isYouTube: Boolean(ytId), isDownload: true }),
+        extraArgs
+      );
 
       res.setHeader('Content-Type', isAudio ? 'audio/mpeg' : 'video/mp4');
       res.setHeader('Content-Disposition', contentDisposition);

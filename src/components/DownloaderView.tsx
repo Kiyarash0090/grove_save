@@ -7,14 +7,19 @@ import {
   ChevronDown,
   ClipboardPaste,
   CloudDownload,
+  Copy,
   Film,
   Image as ImageIcon,
   Link2,
   Loader2,
   Music,
+  Pause,
   Play,
+  RefreshCw,
   Search,
   Send,
+  Terminal,
+  Trash2,
   Volume2,
   X,
 } from 'lucide-react';
@@ -78,6 +83,14 @@ interface ReadyJob {
   downloadPath?: string;
 }
 
+interface AdminLogEntry {
+  id: number;
+  timestamp: string;
+  level: 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+}
+
 interface DownloaderViewProps {
   t: TranslationDict;
   apiBase: string;
@@ -86,6 +99,8 @@ interface DownloaderViewProps {
   onAddHistory: (item: SavedItem) => void;
   onProviderGlowChange: (glow: ProviderGlow) => void;
   isGuest?: boolean;
+  isAdmin?: boolean;
+  authToken?: string | null;
 }
 
 export function extractClientYouTubeId(raw: string): string | null {
@@ -205,6 +220,8 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   onAddHistory,
   onProviderGlowChange,
   isGuest = false,
+  isAdmin = false,
+  authToken = null,
 }) => {
   const [urlInput, setUrlInput] = useState('');
   const [selectedQuality, setSelectedQuality] = useState(defaultQuality);
@@ -235,6 +252,112 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
 
   const lastInspectedRef = useRef<string>('');
   const pollTimerRef = useRef<number | null>(null);
+
+  const [adminLogs, setAdminLogs] = useState<AdminLogEntry[]>([]);
+  const [adminLogLevel, setAdminLogLevel] = useState<'all' | 'info' | 'warn' | 'error'>('all');
+  const [adminLogsPaused, setAdminLogsPaused] = useState(false);
+  const [adminLogsLoading, setAdminLogsLoading] = useState(false);
+  const [adminLogsCopied, setAdminLogsCopied] = useState(false);
+  const adminLogBoxRef = useRef<HTMLDivElement | null>(null);
+  const adminLogStickBottomRef = useRef<boolean>(true);
+
+  const buildAdminHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = {
+      'X-Requested-With': 'GroveSave',
+    };
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`;
+    }
+    return headers;
+  };
+
+  const fetchAdminLogs = async (silent = false) => {
+    if (!isAdmin) return;
+    if (!silent) setAdminLogsLoading(true);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/logs?limit=250`, {
+        method: 'GET',
+        credentials: 'include',
+        headers: buildAdminHeaders(),
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { logs?: AdminLogEntry[] };
+      if (Array.isArray(data.logs)) {
+        setAdminLogs(data.logs);
+      }
+    } catch {
+      // ignore transient network errors on background log polling
+    } finally {
+      if (!silent) setAdminLogsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isAdmin) {
+      setAdminLogs([]);
+      return;
+    }
+    void fetchAdminLogs(false);
+    if (adminLogsPaused) return;
+    const intervalId = window.setInterval(() => {
+      void fetchAdminLogs(true);
+    }, 3000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isAdmin, authToken, apiBase, adminLogsPaused]);
+
+  const filteredAdminLogs =
+    adminLogLevel === 'all'
+      ? adminLogs
+      : adminLogs.filter((entry) => entry.level === adminLogLevel);
+
+  useEffect(() => {
+    const box = adminLogBoxRef.current;
+    if (!box || !adminLogStickBottomRef.current) return;
+    box.scrollTop = box.scrollHeight;
+  }, [filteredAdminLogs.length, adminLogLevel]);
+
+  const handleAdminLogScroll = () => {
+    const box = adminLogBoxRef.current;
+    if (!box) return;
+    const distanceFromBottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+    adminLogStickBottomRef.current = distanceFromBottom < 32;
+  };
+
+  const handleClearAdminLogs = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await fetch(`${apiBase}/api/admin/logs`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: buildAdminHeaders(),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { logs?: AdminLogEntry[] };
+        setAdminLogs(Array.isArray(data.logs) ? data.logs : []);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleCopyAdminLogs = async () => {
+    if (filteredAdminLogs.length === 0) return;
+    const text = filteredAdminLogs
+      .map((entry) => {
+        const time = entry.timestamp.slice(11, 19);
+        return `${time} [${entry.level.toUpperCase()}] [${entry.source}] ${entry.message}`;
+      })
+      .join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setAdminLogsCopied(true);
+      window.setTimeout(() => setAdminLogsCopied(false), 1800);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
 
   const providerGlow: ProviderGlow =
     isYouTubeUrlString(urlInput) || media?.providerGlow === 'red'
@@ -288,7 +411,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       return;
     }
 
-    if (lastInspectedRef.current === normalized && media) return;
+    if (lastInspectedRef.current === normalized && (media || inspecting)) return;
     lastInspectedRef.current = normalized;
 
     stopPolling();
@@ -319,6 +442,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       if (!res.ok) {
         setErrorMsg(data.error || t.inspectFailed);
         setMedia(null);
+        lastInspectedRef.current = '';
       } else {
         const audioTracks: MediaAudioTrack[] = Array.isArray(data.audioTracks) ? data.audioTracks : [];
         const manualSubtitles: MediaSubtitleTrack[] = Array.isArray(data.manualSubtitles)
@@ -361,6 +485,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     } catch {
       setErrorMsg(t.inspectFailed);
       setMedia(null);
+      lastInspectedRef.current = '';
     } finally {
       setInspecting(false);
     }
@@ -378,6 +503,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       return;
     }
     if (!/^https?:\/\/[^\s.]+\.[^\s]+/i.test(trimmed)) return;
+    if (lastInspectedRef.current === trimmed) return;
     const timer = setTimeout(() => {
       inspectUrl(trimmed);
     }, 500);
@@ -389,9 +515,10 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     setErrorMsg(null);
     try {
       const text = await navigator.clipboard.readText();
-      if (text) {
-        setUrlInput(text.trim());
-        await inspectUrl(text.trim());
+      const trimmed = text?.trim();
+      if (trimmed) {
+        setUrlInput(trimmed);
+        await inspectUrl(trimmed);
       }
     } catch {
       setErrorMsg(t.clipboardBlocked);
@@ -1556,8 +1683,150 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
         </AnimatePresence>
       </div>
 
-      {/* Saved History Column */}
-      <div className="lg:col-span-5">
+      {/* Right Column: Admin Logs (above History) + Saved History */}
+      <div className="lg:col-span-5 space-y-6">
+        {isAdmin && (
+          <div className="rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] p-4 sm:p-5 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-black/5 dark:bg-white/10 flex items-center justify-center text-black dark:text-white shrink-0">
+                  <Terminal className="w-4 h-4" />
+                </div>
+                <h2 className="text-sm font-bold text-black dark:text-white truncate">
+                  {t.adminLogsTitle}
+                </h2>
+                <span className="text-[11px] font-mono tabular-nums text-zinc-500 dark:text-zinc-400 shrink-0">
+                  ({filteredAdminLogs.length})
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setAdminLogsPaused((prev) => !prev)}
+                  title={adminLogsPaused ? t.adminLogsResume : t.adminLogsPause}
+                  aria-label={adminLogsPaused ? t.adminLogsResume : t.adminLogsPause}
+                  className={`h-8 px-2 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 border transition active:scale-95 ${
+                    adminLogsPaused
+                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300'
+                      : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                  }`}
+                >
+                  {adminLogsPaused ? (
+                    <Play className="w-3 h-3" />
+                  ) : (
+                    <Pause className="w-3 h-3" />
+                  )}
+                  <span>{adminLogsPaused ? t.adminLogsPause : t.adminLogsResume}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyAdminLogs}
+                  disabled={filteredAdminLogs.length === 0}
+                  title={adminLogsCopied ? t.adminLogsCopied : t.adminLogsCopy}
+                  aria-label={adminLogsCopied ? t.adminLogsCopied : t.adminLogsCopy}
+                  className="h-8 w-8 rounded-lg flex items-center justify-center text-zinc-600 dark:text-zinc-300 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-40 transition active:scale-95"
+                >
+                  {adminLogsCopied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void fetchAdminLogs(false)}
+                  title={t.adminLogsRefresh}
+                  aria-label={t.adminLogsRefresh}
+                  className="h-8 w-8 rounded-lg flex items-center justify-center text-zinc-600 dark:text-zinc-300 hover:bg-black/5 dark:hover:bg-white/10 transition active:scale-95"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${adminLogsLoading ? 'animate-spin' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleClearAdminLogs()}
+                  title={t.adminLogsClear}
+                  aria-label={t.adminLogsClear}
+                  className="h-8 w-8 rounded-lg flex items-center justify-center text-red-600 dark:text-red-400 hover:bg-red-500/10 transition active:scale-95"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-4 gap-1 p-1 rounded-xl bg-black/[0.04] dark:bg-white/[0.04] border border-black/5 dark:border-white/10">
+              {(
+                [
+                  { id: 'all', label: t.adminLogsAll },
+                  { id: 'info', label: t.adminLogsInfo },
+                  { id: 'warn', label: t.adminLogsWarn },
+                  { id: 'error', label: t.adminLogsError },
+                ] as const
+              ).map((tab) => {
+                const active = adminLogLevel === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setAdminLogLevel(tab.id)}
+                    className={`h-7 rounded-lg text-[11px] font-semibold transition ${
+                      active
+                        ? 'bg-black text-white dark:bg-white dark:text-black shadow-sm'
+                        : 'text-zinc-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div
+              ref={adminLogBoxRef}
+              onScroll={handleAdminLogScroll}
+              dir="ltr"
+              className="h-64 overflow-y-auto rounded-xl bg-zinc-950/90 dark:bg-black/60 border border-black/15 dark:border-white/10 p-3 font-mono text-[11px] leading-relaxed text-zinc-200 space-y-1.5 text-left"
+            >
+              {filteredAdminLogs.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-zinc-500 text-xs font-sans">
+                  {t.adminLogsEmpty}
+                </div>
+              ) : (
+                filteredAdminLogs.map((entry) => {
+                  const timeStr = entry.timestamp.length >= 19 ? entry.timestamp.slice(11, 19) : entry.timestamp;
+                  const levelCls =
+                    entry.level === 'error'
+                      ? 'text-red-400 bg-red-500/15 border-red-500/30'
+                      : entry.level === 'warn'
+                        ? 'text-amber-300 bg-amber-500/15 border-amber-500/30'
+                        : 'text-sky-300 bg-sky-500/15 border-sky-500/30';
+                  return (
+                    <div
+                      key={entry.id}
+                      className="flex items-start gap-2 border-b border-white/[0.05] pb-1 last:border-b-0 last:pb-0 break-words"
+                    >
+                      <span className="text-zinc-500 tabular-nums shrink-0">{timeStr}</span>
+                      <span
+                        className={`px-1.5 py-0.2 rounded border text-[9px] font-bold uppercase tracking-wider shrink-0 ${levelCls}`}
+                      >
+                        {entry.level}
+                      </span>
+                      <span className="text-zinc-400 shrink-0">[{entry.source}]</span>
+                      <span
+                        className={`min-w-0 flex-1 whitespace-pre-wrap break-all ${
+                          entry.level === 'error'
+                            ? 'text-red-200'
+                            : entry.level === 'warn'
+                              ? 'text-amber-100'
+                              : 'text-zinc-200'
+                        }`}
+                      >
+                        {entry.message}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="rounded-2xl backdrop-blur-2xl backdrop-saturate-150 bg-white/60 dark:bg-white/[0.05] border border-black/10 dark:border-white/15 shadow-[0_8px_32px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.75)] dark:shadow-[0_12px_36px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.14)] p-4 sm:p-5 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-black dark:text-white">

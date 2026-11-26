@@ -505,6 +505,8 @@ export default function App() {
                 onAddHistory={handleAddHistory}
                 onProviderGlowChange={setProviderGlow}
                 isGuest={!user}
+                isAdmin={user?.role === 'admin'}
+                authToken={authToken}
               />
             </motion.div>
           ) : activeTab === 1 ? (
