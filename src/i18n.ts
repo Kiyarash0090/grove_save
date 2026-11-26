@@ -108,6 +108,8 @@ export interface TranslationDict {
   continueWithGoogle: string;
   googleNotConfigured: string;
   orUseEmail: string;
+  privateAuthTitle: string;
+  privateAuthSubtitle: string;
   modeSignIn: string;
   modeRegister: string;
   displayNameLabel: string;
@@ -451,6 +453,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: 'Continue with Google',
     googleNotConfigured: 'Google Client ID is not configured on this server yet. Use email & password below or set GOOGLE_CLIENT_ID.',
     orUseEmail: 'or with email',
+    privateAuthTitle: 'Personal & Private Account',
+    privateAuthSubtitle: 'Sign in directly inside Grove Save without redirecting to Google.',
     modeSignIn: 'Sign In',
     modeRegister: 'Create Account',
     displayNameLabel: 'Name',
@@ -868,6 +872,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: 'ورود با گوگل',
     googleNotConfigured: 'شناسه Google Client ID هنوز روی سرور تنظیم نشده است. از جیمیل و رمز عبور پایین استفاده کنید.',
     orUseEmail: 'یا با جیمیل و رمز عبور',
+    privateAuthTitle: 'حساب شخصی و اختصاصی',
+    privateAuthSubtitle: 'ورود مستقیم و شخصی داخل برنامه؛ بدون اتصال به گوگل و بدون باز شدن صفحه گوگل.',
     modeSignIn: 'ورود',
     modeRegister: 'ثبت‌نام',
     displayNameLabel: 'نام نمایشی',
@@ -1286,6 +1292,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: 'Войти через Google',
     googleNotConfigured: 'Google Client ID не настроен на сервере. Войдите по почте и паролю ниже.',
     orUseEmail: 'или по почте',
+    privateAuthTitle: 'Личный приватный аккаунт',
+    privateAuthSubtitle: 'Прямой вход внутри приложения без перехода в Google.',
     modeSignIn: 'Вход',
     modeRegister: 'Регистрация',
     displayNameLabel: 'Имя',
@@ -1703,6 +1711,8 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     continueWithGoogle: '使用 Google 登录',
     googleNotConfigured: '服务器尚未配置 Google Client ID，请使用下方的邮箱与密码登录。',
     orUseEmail: '或使用邮箱',
+    privateAuthTitle: '私人专属账号',
+    privateAuthSubtitle: '直接在应用内私密登录，无需跳转至 Google。',
     modeSignIn: '登录',
     modeRegister: '注册',
     displayNameLabel: '昵称',
