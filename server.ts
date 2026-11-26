@@ -1072,7 +1072,7 @@ const TELEGRAM_BOT_MAX_BYTES = 50 * 1024 * 1024;
  */
 function isFatalTelegramUploadError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '');
-  return /over the 50 MB Telegram bot upload limit|Telegram upload is not enabled|Download cancelled/i.test(msg);
+  return /over the 50 MB Telegram bot upload limit|Telegram upload is not enabled|Download cancelled|Telegram account (?:is not a member|does not have permission|is restricted|cannot access)|requires a signed-in MTProto/i.test(msg);
 }
 
 function telegramIsConfigured(cfg: AdminTelegramConfig): boolean {
@@ -1373,247 +1373,148 @@ function lookupTelegramFile(id: string): TelegramFileRow | null {
   return row ?? null;
 }
 
-/**
- * Streams a Readable directly into Telegram MTProto (`SaveFilePart` for <= 10 MB
- * or `SaveBigFilePart` with streaming `fileTotalParts = -1` for > 10 MB) with
- * bounded concurrency and backpressure, never touching the server disk.
- */
-async function uploadStreamToTelegramMtproto(
-  client: TelegramClient,
-  readable: Readable,
-  fileName: string,
-  onProgress?: (uploadedBytes: number) => void,
-  options?: { knownTotalBytes?: number | null; onReadProgress?: (readBytes: number) => void }
-): Promise<{ inputFile: Api.InputFile | Api.InputFileBig; sizeBytes: number }> {
-  const PART_SIZE = 512 * 1024;
-  const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10 MB (20 parts of 512 KB)
-  const WORKERS = 8;
+interface ParsedTelegramPostLink {
+  peer: string;
+  messageId: number;
+  displayPeer: string;
+}
 
-  const rawId = crypto.randomBytes(8).readBigInt64LE(0);
-  const fileId = bigInt(rawId.toString());
-  const dcId = client.session.dcId;
+function parseTelegramPostUrl(parsed: URL): ParsedTelegramPostLink | null {
+  const host = parsed.hostname.toLowerCase();
+  if (!['t.me', 'www.t.me', 'telegram.me', 'www.telegram.me', 'telegram.dog'].includes(host)) {
+    return null;
+  }
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (parts.length === 3 && parts[0].toLowerCase() === 'c' && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2])) {
+    const msgId = Number(parts[2]);
+    if (!Number.isSafeInteger(msgId) || msgId <= 0) return null;
+    return { peer: `-100${parts[1]}`, messageId: msgId, displayPeer: `c/${parts[1]}` };
+  }
+  if (parts.length === 3 && parts[0].toLowerCase() === 's' && /^[a-zA-Z][a-zA-Z0-9_]{3,63}$/.test(parts[1]) && /^\d+$/.test(parts[2])) {
+    const msgId = Number(parts[2]);
+    if (!Number.isSafeInteger(msgId) || msgId <= 0) return null;
+    return { peer: `@${parts[1]}`, messageId: msgId, displayPeer: `@${parts[1]}` };
+  }
+  if (parts.length === 2 && /^[a-zA-Z][a-zA-Z0-9_]{3,63}$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+    const reserved = new Set(['joinchat', 'share', 'addstickers', 'addemoji', 'proxy', 'socks', 'setlanguage', 'confirmphone', 'iv']);
+    if (reserved.has(parts[0].toLowerCase())) return null;
+    const msgId = Number(parts[1]);
+    if (!Number.isSafeInteger(msgId) || msgId <= 0) return null;
+    return { peer: `@${parts[0]}`, messageId: msgId, displayPeer: `@${parts[0]}` };
+  }
+  return null;
+}
 
-  await client.getSender(dcId);
-  let uploadedBytes = 0;
-
-  const getActiveSender = async () => {
-    if (!client.connected) {
-      await client.connect().catch(() => {});
-    }
-    // Always borrow through client.getSender so GramJS refreshes the 30s
-    // exported sender release timeout on active transfers.
-    const sender = await client.getSender(dcId);
-    if (!sender.isConnected()) {
-      await new Promise((r) => setTimeout(r, 250));
-      return client.getSender(dcId);
-    }
-    return sender;
-  };
-
-  const sendPart = async (
-    isLarge: boolean,
-    partIndex: number,
-    totalPartsArg: number,
-    bytes: Buffer
-  ): Promise<void> => {
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      let sender: Awaited<ReturnType<TelegramClient['getSender']>> | undefined;
-      try {
-        sender = await getActiveSender();
-        await sender.send(
-          isLarge
-            ? new Api.upload.SaveBigFilePart({
-                fileId,
-                filePart: partIndex,
-                fileTotalParts: totalPartsArg,
-                bytes,
-              })
-            : new Api.upload.SaveFilePart({
-                fileId,
-                filePart: partIndex,
-                bytes,
-              })
-        );
-        uploadedBytes += bytes.length;
-        if (onProgress) onProgress(uploadedBytes);
-        return;
-      } catch (err: unknown) {
-        const errAny = err as { seconds?: number; message?: string };
-        const errMsg = String(errAny?.message || '');
-        if (typeof errAny?.seconds === 'number' && errAny.seconds > 0) {
-          await new Promise((r) => setTimeout(r, (errAny.seconds! + 1) * 1000));
-          continue;
-        }
-        if (
-          attempt < 5 &&
-          ((sender && !sender.isConnected()) ||
-            /not connected|connection closed|socket|timeout|ECONNRESET|EPIPE|ECONNABORTED|ETIMEDOUT|disconnect/i.test(
-              errMsg
-            ))
-        ) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-          continue;
-        }
-        throw err;
-      }
-    }
-    throw new Error('Failed to upload file part to Telegram after retries.');
-  };
-
-  const inFlight = new Set<Promise<void>>();
-  const enqueue = async (task: () => Promise<void>): Promise<void> => {
-    while (inFlight.size >= WORKERS) {
-      await Promise.race(inFlight);
-    }
-    let tracked!: Promise<void>;
-    tracked = task().finally(() => {
-      inFlight.delete(tracked);
-    });
-    inFlight.add(tracked);
-  };
-
-  let accChunks: Buffer[] = [];
-  let accLen = 0;
-  const takeExact = (n: number): Buffer => {
-    if (accChunks.length === 1 && accChunks[0].length === n) {
-      const exact = accChunks[0];
-      accChunks = [];
-      accLen = 0;
-      return exact;
-    }
-    const joined = accChunks.length === 1 ? accChunks[0] : Buffer.concat(accChunks, accLen);
-    const slice = joined.subarray(0, n);
-    const rest = joined.subarray(n);
-    if (accChunks.length === 1) {
-      accChunks = rest.length > 0 ? [rest] : [];
-      accLen = rest.length;
-      return Buffer.from(slice);
-    }
-    accChunks = rest.length > 0 ? [Buffer.from(rest)] : [];
-    accLen = rest.length;
-    return slice;
-  };
-  const drainRemaining = (): Buffer | null => {
-    if (accLen === 0) return null;
-    const joined = accChunks.length === 1 ? accChunks[0] : Buffer.concat(accChunks, accLen);
-    accChunks = [];
-    accLen = 0;
-    return joined;
-  };
-
-  let totalBytes = 0;
-  // When exact Content-Length is known to exceed 10 MB, start streaming SaveBigFilePart from part 0
-  // without buffering the first 10 MB in memory.
-  let streamingBig = Boolean(options?.knownTotalBytes && options.knownTotalBytes > LARGE_FILE_THRESHOLD);
-  let nextPartIndex = 0;
-  const initialParts: Buffer[] = [];
-  let heldBigChunk: Buffer | null = null;
-
-  const flushInitialToBig = async (holdLast: boolean): Promise<void> => {
-    streamingBig = true;
-    const limit = holdLast ? initialParts.length - 1 : initialParts.length;
-    for (let i = 0; i < limit; i += 1) {
-      const partBuf = initialParts[i];
-      const idx = nextPartIndex++;
-      await enqueue(() => sendPart(true, idx, -1, partBuf));
-    }
-    if (holdLast && initialParts.length > 0) {
-      heldBigChunk = initialParts[initialParts.length - 1];
-    }
-    initialParts.length = 0;
-  };
-
+async function assertTelegramTargetWritable(client: TelegramClient, channel: string): Promise<unknown> {
+  const targetInput = await client.getInputEntity(channel);
   try {
-    for await (const raw of readable) {
-      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
-      if (chunk.length === 0) continue;
-      totalBytes += chunk.length;
-      if (options?.onReadProgress) options.onReadProgress(totalBytes);
-      accChunks.push(chunk);
-      accLen += chunk.length;
+    const entity = (await client.getEntity(targetInput)) as
+      | (Api.Channel & {
+          left?: boolean;
+          kicked?: boolean;
+          broadcast?: boolean;
+          creator?: boolean;
+          adminRights?: { postMessages?: boolean };
+          defaultBannedRights?: { sendMessages?: boolean; sendMedia?: boolean };
+          bannedRights?: { sendMessages?: boolean; sendMedia?: boolean };
+        })
+      | (Api.Chat & {
+          left?: boolean;
+          kicked?: boolean;
+          deactivated?: boolean;
+          creator?: boolean;
+          adminRights?: unknown;
+          defaultBannedRights?: { sendMessages?: boolean; sendMedia?: boolean };
+        })
+      | undefined;
 
-      while (accLen >= PART_SIZE) {
-        const part = takeExact(PART_SIZE);
-        if (!streamingBig) {
-          initialParts.push(part);
-          if (totalBytes > LARGE_FILE_THRESHOLD) {
-            // If there are still bytes in accLen, none of initialParts is the last chunk;
-            // otherwise hold the last full chunk until more bytes or EOF arrive.
-            await flushInitialToBig(accLen === 0);
-          }
-        } else {
-          if (heldBigChunk !== null) {
-            const toSend = heldBigChunk;
-            const idx = nextPartIndex++;
-            await enqueue(() => sendPart(true, idx, -1, toSend));
-          }
-          heldBigChunk = part;
+    if (entity instanceof Api.Channel) {
+      if (entity.left || entity.kicked) {
+        throw new Error('Telegram account is not a member of the configured channel.');
+      }
+      if (!entity.creator) {
+        if (entity.broadcast && !entity.adminRights?.postMessages) {
+          throw new Error('Telegram account does not have permission to post messages in this channel.');
+        }
+        if (entity.bannedRights?.sendMessages || (!entity.adminRights && entity.defaultBannedRights?.sendMessages)) {
+          throw new Error('Telegram account is restricted from sending messages in this channel.');
+        }
+        if (entity.bannedRights?.sendMedia || (!entity.adminRights && entity.defaultBannedRights?.sendMedia)) {
+          throw new Error('Telegram account is restricted from sending media in this channel.');
         }
       }
-
-      if (!streamingBig && totalBytes > LARGE_FILE_THRESHOLD && initialParts.length > 0 && accLen > 0) {
-        await flushInitialToBig(false);
+    } else if (entity instanceof Api.Chat) {
+      if (entity.left || entity.kicked || entity.deactivated) {
+        throw new Error('Telegram account cannot access the configured group chat.');
       }
-      if (streamingBig && heldBigChunk !== null && accLen > 0) {
-        const toSend = heldBigChunk;
-        heldBigChunk = null;
-        const idx = nextPartIndex++;
-        await enqueue(() => sendPart(true, idx, -1, toSend));
+      if (!entity.creator && !entity.adminRights && entity.defaultBannedRights?.sendMessages) {
+        throw new Error('Telegram account is restricted from sending messages in this group.');
+      }
+      if (!entity.creator && !entity.adminRights && entity.defaultBannedRights?.sendMedia) {
+        throw new Error('Telegram account is restricted from sending media in this group.');
       }
     }
   } catch (err) {
-    await Promise.allSettled(inFlight);
-    throw err;
-  }
-
-  const tail = drainRemaining();
-
-  if (!streamingBig) {
-    if (tail) initialParts.push(tail);
-    if (totalBytes === 0 || initialParts.length === 0) {
-      throw new Error('Media stream was empty.');
+    if (err instanceof Error && /Telegram account (?:is not a member|does not have permission|is restricted|cannot access)/i.test(err.message)) {
+      throw err;
     }
-    const totalParts = initialParts.length;
-    const isLarge = totalBytes > LARGE_FILE_THRESHOLD;
-    for (let i = 0; i < totalParts; i += 1) {
-      const partBuf = initialParts[i];
-      await enqueue(() => sendPart(isLarge, i, totalParts, partBuf));
+  }
+  return targetInput;
+}
+
+function recordUploadedTelegramMessage(
+  job: DownloadJob,
+  cfg: AdminTelegramConfig,
+  opts: {
+    chatId: string;
+    messageId: number;
+    botFileId?: string | null;
+    fileName: string;
+    sizeBytes: number;
+    sentMessage?: any;
+  }
+): void {
+  const resolvedChatId = opts.chatId || cfg.channel;
+  const recordId = recordTelegramFile({
+    userId: job.ownerUserId ?? null,
+    jobId: job.id,
+    sourceUrl: job.url,
+    title: job.title,
+    author: job.author || 'grove save',
+    quality: job.quality,
+    chatId: resolvedChatId,
+    messageId: opts.messageId,
+    botFileId: opts.botFileId ?? null,
+    fileName: opts.fileName,
+    mimeType: job.mimeType,
+    sizeBytes: opts.sizeBytes,
+  });
+
+  if (opts.sentMessage) {
+    try {
+      const loc = telegramFileLocation(opts.sentMessage);
+      setBoundedCache(
+        telegramResolvedFileCache,
+        `${recordId}:${resolvedChatId}:${opts.messageId}`,
+        {
+          value: { message: opts.sentMessage, dcId: loc.dcId, location: loc.location, size: loc.size || opts.sizeBytes },
+          expiresAt: Date.now() + TELEGRAM_RESOLVED_CACHE_TTL_MS,
+        },
+        200
+      );
+    } catch {
+      // Cache warm-up is best-effort only
     }
-    await Promise.all(inFlight);
-    return {
-      inputFile: isLarge
-        ? new Api.InputFileBig({ id: fileId, parts: totalParts, name: fileName })
-        : new Api.InputFile({ id: fileId, parts: totalParts, name: fileName, md5Checksum: '' }),
-      sizeBytes: totalBytes,
-    };
   }
 
-  // Wait for all intermediate `-1` parts before sending the final part with exact totalParts.
-  await Promise.all(inFlight);
-
-  if (heldBigChunk !== null && tail !== null) {
-    const midIdx = nextPartIndex++;
-    await sendPart(true, midIdx, -1, heldBigChunk);
-    const finalIdx = nextPartIndex++;
-    const totalParts = finalIdx + 1;
-    await sendPart(true, finalIdx, totalParts, tail);
-    return {
-      inputFile: new Api.InputFileBig({ id: fileId, parts: totalParts, name: fileName }),
-      sizeBytes: totalBytes,
-    };
-  }
-
-  const finalBuf = heldBigChunk ?? tail;
-  if (!finalBuf) {
-    throw new Error('Missing final stream chunk.');
-  }
-  const finalIdx = nextPartIndex++;
-  const totalParts = finalIdx + 1;
-  await sendPart(true, finalIdx, totalParts, finalBuf);
-  return {
-    inputFile: new Api.InputFileBig({ id: fileId, parts: totalParts, name: fileName }),
-    sizeBytes: totalBytes,
-  };
+  job.telegramFileId = recordId;
+  job.telegramMessageId = opts.messageId;
+  job.telegramChatId = resolvedChatId;
+  job.telegramUploadError = undefined;
+  job.totalBytes = opts.sizeBytes;
+  job.downloadedBytes = opts.sizeBytes;
+  job.progress = 100;
+  job.status = 'ready';
 }
 
 /**
@@ -1752,27 +1653,34 @@ async function uploadStreamToTelegramBotApi(
 }
 
 /**
- * Streams a finished/live Readable directly into the configured Telegram
- * channel (user MTProto, bot MTProto, or bot HTTP API) without touching disk.
+ * Uploads a temporary file on `/tmp` into the configured/locked Telegram channel
+ * using GramJS `CustomFile` + `client.sendFile(..., { workers: 16 })`, or falls
+ * back to Bot HTTP API when API ID/Hash are absent.
  */
-async function uploadStreamJobToTelegram(
+async function uploadTmpFileToLockedTelegramChannel(
   job: DownloadJob,
-  readable: Readable,
-  knownTotalBytes: number | null,
-  options?: { ext?: DownloadFileExt; mimeType?: string; fileName?: string; estimatedTotalBytes?: number | null }
+  tmpFilePath: string,
+  options?: {
+    ext?: DownloadFileExt;
+    mimeType?: string;
+    fileName?: string;
+    progressStart?: number;
+    progressEnd?: number;
+  }
 ): Promise<void> {
   const cfg = adminConfig.telegram;
   if (!telegramEnabledForUploads(cfg)) {
     throw new Error('Telegram upload is not enabled.');
   }
 
-  // The Bot HTTP API caps documents at 50 MB. Check before streaming a single
-  // byte: otherwise a doomed upload pushes 50 MB to Telegram, gets rejected,
-  // and every caller that falls through to the next strategy repeats it.
-  // (Callers treat this prefix as fatal — see isFatalTelegramUploadError.)
-  if (telegramUsesBotHttpApi(cfg) && knownTotalBytes && knownTotalBytes > TELEGRAM_BOT_MAX_BYTES) {
+  const stat = await fs.promises.stat(tmpFilePath);
+  if (!stat.isFile() || stat.size <= 0) {
+    throw new Error('Downloaded media file was empty.');
+  }
+
+  if (telegramUsesBotHttpApi(cfg) && stat.size > TELEGRAM_BOT_MAX_BYTES) {
     throw new Error(
-      `This file is ${(knownTotalBytes / (1024 * 1024)).toFixed(1)} MB, over the 50 MB Telegram bot upload limit. Sign in with a phone number to upload files up to 2 GB.`
+      `This file is ${(stat.size / (1024 * 1024)).toFixed(1)} MB, over the 50 MB Telegram bot upload limit. Sign in with a phone number to upload files up to 2 GB.`
     );
   }
 
@@ -1786,42 +1694,19 @@ async function uploadStreamJobToTelegram(
 
   const fileName = options?.fileName || job.fileName || `${sanitizeFilename(`${job.title}-${job.quality}`)}.${job.ext}`;
   job.fileName = fileName;
-  if (knownTotalBytes && knownTotalBytes > 0) {
-    job.totalBytes = knownTotalBytes;
-  } else if (options?.estimatedTotalBytes && options.estimatedTotalBytes > 0) {
-    job.totalBytes = options.estimatedTotalBytes;
-  }
+  job.totalBytes = stat.size;
 
+  const progressStart = options?.progressStart ?? 50;
+  const progressEnd = options?.progressEnd ?? 99;
   const caption = `${job.title}\n${job.quality.toUpperCase()} · grove save`;
   job.telegramUploading = true;
-  job.status = 'downloading';
+  job.status = 'processing';
+  job.progress = Math.max(job.progress, progressStart);
 
-  const reportProgress = (bytes: number) => {
-    job.downloadedBytes = Math.max(job.downloadedBytes, bytes);
-    if (job.totalBytes && job.totalBytes > 0) {
-      const pct = Math.min(97, Math.max(5, Math.floor((bytes / job.totalBytes) * 97)));
-      job.progress = Math.max(job.progress, pct);
-    } else {
-      const pct = Math.min(94, 5 + Math.floor(Math.log2(1 + bytes / (512 * 1024)) * 11));
-      job.progress = Math.max(job.progress, pct);
-    }
-  };
-
-  const reportReadProgress = (readBytes: number) => {
-    job.downloadedBytes = Math.max(job.downloadedBytes, readBytes);
-    if (job.totalBytes && job.totalBytes > 0) {
-      // Reserve upper half of bar for actual MTProto send when buffering <= 10 MB
-      const pct = Math.min(48, Math.max(5, Math.floor((readBytes / job.totalBytes) * 48)));
-      job.progress = Math.max(job.progress, pct);
-    } else {
-      const pct = Math.min(45, 5 + Math.floor(Math.log2(1 + readBytes / (512 * 1024)) * 6));
-      job.progress = Math.max(job.progress, pct);
-    }
-  };
-
-  const unregisterStreamCancel = registerJobCancel(job, () => {
+  let cancelUpload: (() => void) | null = null;
+  const unregisterCancel = registerJobCancel(job, () => {
     try {
-      readable.destroy(new Error('Download cancelled'));
+      cancelUpload?.();
     } catch {}
   });
 
@@ -1829,59 +1714,106 @@ async function uploadStreamJobToTelegram(
     if (job.cancelled) {
       throw new Error('Download cancelled');
     }
+
     let chatId = cfg.channel;
     let messageId = 0;
     let botFileId: string | null = null;
-    let sizeBytes = 0;
     let sentMessage: any = null;
 
     if (telegramUsesBotHttpApi(cfg)) {
+      const rs = fs.createReadStream(tmpFilePath);
+      cancelUpload = () => rs.destroy(new Error('Download cancelled'));
       const result = await uploadStreamToTelegramBotApi(
         cfg.botToken,
         cfg.channel,
-        readable,
+        rs,
         fileName,
         job.mimeType,
         caption,
-        reportProgress
+        (uploadedBytes) => {
+          const frac = Math.max(0, Math.min(1, uploadedBytes / stat.size));
+          const pct = Math.min(
+            progressEnd,
+            Math.max(progressStart, Math.floor(progressStart + frac * (progressEnd - progressStart)))
+          );
+          job.progress = Math.max(job.progress, pct);
+          job.downloadedBytes = Math.max(job.downloadedBytes, uploadedBytes);
+        }
       );
       chatId = result.chatId;
       messageId = result.messageId;
       botFileId = result.botFileId;
-      sizeBytes = result.sizeBytes;
     } else {
       const client = await getTelegramClient();
-      const uploadedStream = await uploadStreamToTelegramMtproto(client, readable, fileName, reportProgress, {
-        knownTotalBytes,
-        onReadProgress: reportReadProgress,
-      });
+      const targetPeer = await assertTelegramTargetWritable(client, cfg.channel);
+      const customFile = new tgClientLib.uploads.CustomFile(fileName, stat.size, tmpFilePath);
+      const isImage = ['png', 'jpg', 'webp'].includes(job.ext);
+
+      const sendWithMode = async (forceDoc: boolean) => {
+        const progressCallback = ((fraction: number) => {
+          if (job.cancelled) {
+            progressCallback.isCanceled = true;
+            return;
+          }
+          const clamped = Math.max(0, Math.min(1, Number(fraction) || 0));
+          const pct = Math.min(
+            progressEnd,
+            Math.max(progressStart, Math.floor(progressStart + clamped * (progressEnd - progressStart)))
+          );
+          job.progress = Math.max(job.progress, pct);
+          job.downloadedBytes = Math.max(job.downloadedBytes, Math.round(stat.size * clamped));
+        }) as ((progress: number) => void) & { isCanceled?: boolean };
+
+        cancelUpload = () => {
+          progressCallback.isCanceled = true;
+        };
+        if (job.cancelled) {
+          progressCallback.isCanceled = true;
+          throw new Error('Download cancelled');
+        }
+
+        return (await client.sendFile(targetPeer as never, {
+          file: customFile,
+          caption,
+          forceDocument: forceDoc,
+          workers: 16,
+          progressCallback,
+          ...(forceDoc ? { attributes: [new Api.DocumentAttributeFilename({ fileName })] } : {}),
+        })) as { id: number; peerId?: unknown; media?: unknown };
+      };
+
+      let sent: { id: number; peerId?: unknown; media?: unknown };
+      try {
+        sent = await sendWithMode(!isImage);
+      } catch (sendErr) {
+        const msg = sendErr instanceof Error ? sendErr.message : String(sendErr ?? '');
+        if (
+          isImage &&
+          !job.cancelled &&
+          /CHAT_SEND_PHOTOS_FORBIDDEN|PHOTO_INVALID_DIMENSIONS|SEND_MEDIA_INVALID|MEDIA_EMPTY/i.test(msg)
+        ) {
+          sent = await sendWithMode(true);
+        } else {
+          throw sendErr;
+        }
+      }
+
       if (job.cancelled) {
         throw new Error('Download cancelled');
       }
-      job.status = 'processing';
-      job.progress = 98;
-      const sent = (await client.sendFile(cfg.channel, {
-        file: uploadedStream.inputFile,
-        caption,
-        forceDocument: true,
-        supportsStreaming: false,
-        attributes: [new Api.DocumentAttributeFilename({ fileName })],
-      })) as { id: number; peerId?: unknown; media?: unknown };
+
       sentMessage = sent;
       messageId = sent.id;
-      sizeBytes = uploadedStream.sizeBytes;
-
       if (sent.peerId) {
         try {
           chatId = tgUtils.getPeerId(sent.peerId as never);
         } catch {
-          // Fall back to resolving channel below
+          // Fall back to resolved targetPeer below
         }
       }
       if (!chatId || chatId === cfg.channel) {
         try {
-          const inputPeer = await client.getInputEntity(cfg.channel);
-          chatId = tgUtils.getPeerId(inputPeer as never);
+          chatId = tgUtils.getPeerId(targetPeer as never);
         } catch {
           chatId = cfg.channel;
         }
@@ -1892,56 +1824,24 @@ async function uploadStreamJobToTelegram(
       throw new Error('Download cancelled');
     }
 
-    const resolvedChatId = chatId || cfg.channel;
-    const recordId = recordTelegramFile({
-      userId: job.ownerUserId ?? null,
-      jobId: job.id,
-      sourceUrl: job.url,
-      title: job.title,
-      author: job.author || 'grove save',
-      quality: job.quality,
-      chatId: resolvedChatId,
+    recordUploadedTelegramMessage(job, cfg, {
+      chatId,
       messageId,
       botFileId,
       fileName,
-      mimeType: job.mimeType,
-      sizeBytes,
+      sizeBytes: stat.size,
+      sentMessage,
     });
-
-    if (sentMessage) {
-      try {
-        const loc = telegramFileLocation(sentMessage);
-        setBoundedCache(
-          telegramResolvedFileCache,
-          `${recordId}:${resolvedChatId}:${messageId}`,
-          {
-            value: { message: sentMessage, dcId: loc.dcId, location: loc.location, size: loc.size || sizeBytes },
-            expiresAt: Date.now() + TELEGRAM_RESOLVED_CACHE_TTL_MS,
-          },
-          200
-        );
-      } catch {
-        // Cache warm-up is best-effort only
-      }
-    }
-
-    job.telegramFileId = recordId;
-    job.telegramMessageId = messageId;
-    job.telegramChatId = resolvedChatId;
-    job.telegramUploadError = undefined;
-    job.totalBytes = sizeBytes;
-    job.downloadedBytes = sizeBytes;
-    job.progress = 100;
-    job.status = 'ready';
   } catch (err) {
     if (job.cancelled) {
-      throw err;
+      throw new Error('Download cancelled');
     }
     const safeMsg = sanitizeTelegramError(err, cfg.botToken);
     job.telegramUploadError = safeMsg;
     throw new Error(safeMsg);
   } finally {
-    unregisterStreamCancel();
+    unregisterCancel();
+    cancelUpload = null;
     job.telegramUploading = false;
   }
 }
@@ -1955,9 +1855,8 @@ async function uploadJobToTelegram(job: DownloadJob, ownerUserId: string | null,
   const cfg = adminConfig.telegram;
   if (!telegramEnabledForUploads(cfg)) return;
 
-  let stat: fs.Stats;
   try {
-    stat = await fs.promises.stat(job.filePath);
+    await fs.promises.stat(job.filePath);
   } catch {
     job.telegramUploadError = 'Cache file disappeared before upload.';
     return;
@@ -1965,12 +1864,13 @@ async function uploadJobToTelegram(job: DownloadJob, ownerUserId: string | null,
 
   job.ownerUserId = ownerUserId;
   job.author = author;
-  const rs = fs.createReadStream(job.filePath);
   try {
-    await uploadStreamJobToTelegram(job, rs, stat.size);
+    await uploadTmpFileToLockedTelegramChannel(job, job.filePath, {
+      progressStart: 90,
+      progressEnd: 99,
+    });
     await fs.promises.rm(job.filePath, { force: true }).catch(() => {});
   } catch (err) {
-    rs.destroy();
     job.telegramUploadError = sanitizeTelegramError(err, cfg.botToken);
     console.error('[telegram] upload failed:', job.telegramUploadError);
   }
@@ -3038,6 +2938,395 @@ async function downloadRemoteUrlToFile(
   });
 }
 
+async function openHttpRequestWithRedirects(
+  remoteUrl: string,
+  reqHeaders: Record<string, string>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  redirectDepth = 0
+): Promise<{
+  statusCode: number;
+  headers: http.IncomingHttpHeaders;
+  finalUrl: string;
+  stream: http.IncomingMessage;
+  abort: () => void;
+}> {
+  if (signal?.aborted) {
+    throw new Error('Download cancelled');
+  }
+  const valid = await validatePublicUrl(remoteUrl);
+  if (!valid) {
+    throw new Error('Disallowed remote media URL.');
+  }
+  const targetPort = valid.port ? Number(valid.port) : valid.protocol === 'https:' ? 443 : 80;
+
+  const openDirectOrProxy = () =>
+    new Promise<{
+      statusCode: number;
+      headers: http.IncomingHttpHeaders;
+      finalUrl: string;
+      stream: http.IncomingMessage;
+      abort: () => void;
+    }>((resolve, reject) => {
+      let settled = false;
+      let activeReq: http.ClientRequest | null = null;
+      let activeRes: http.IncomingMessage | null = null;
+      let connectReq: http.ClientRequest | null = null;
+
+      const abort = () => {
+        try {
+          activeRes?.destroy();
+        } catch {}
+        try {
+          activeReq?.destroy();
+        } catch {}
+        try {
+          connectReq?.destroy();
+        } catch {}
+      };
+
+      const onAbort = () => {
+        abort();
+        if (!settled) {
+          settled = true;
+          reject(new Error('Download cancelled'));
+        }
+      };
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      const cleanupSignal = () => {
+        signal?.removeEventListener('abort', onAbort);
+      };
+
+      const handleRes = (res: http.IncomingMessage) => {
+        activeRes = res;
+        cleanupSignal();
+        if (settled) {
+          res.destroy();
+          return;
+        }
+        settled = true;
+        resolve({
+          statusCode: res.statusCode || 200,
+          headers: res.headers,
+          finalUrl: valid.toString(),
+          stream: res,
+          abort,
+        });
+      };
+
+      const handleErr = (err: Error) => {
+        cleanupSignal();
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
+
+      if (adminConfig.xray.enabled && xrayState.running) {
+        connectReq = http.request({
+          host: '127.0.0.1',
+          port: adminConfig.xray.httpPort,
+          method: 'CONNECT',
+          path: `${valid.hostname}:${targetPort}`,
+          timeout: 12000,
+        });
+        connectReq.on('connect', (cRes, socket) => {
+          if (cRes.statusCode !== 200) {
+            socket.destroy();
+            handleErr(new Error(`Proxy CONNECT ${cRes.statusCode}`));
+            return;
+          }
+          const mod = valid.protocol === 'https:' ? https : http;
+          const createConnection = () =>
+            valid.protocol === 'https:' ? tls.connect({ socket, servername: valid.hostname }) : socket;
+          activeReq = mod.request(
+            {
+              hostname: valid.hostname,
+              port: targetPort,
+              path: valid.pathname + valid.search,
+              method: 'GET',
+              createConnection,
+              headers: { ...reqHeaders, Host: valid.host },
+              timeout: timeoutMs,
+            },
+            handleRes
+          );
+          activeReq.on('timeout', () => activeReq?.destroy(new Error('Media download timed out.')));
+          activeReq.on('error', handleErr);
+          activeReq.end();
+        });
+        connectReq.on('timeout', () => connectReq?.destroy(new Error('Proxy connect timed out.')));
+        connectReq.on('error', handleErr);
+        connectReq.end();
+        return;
+      }
+
+      const mod = valid.protocol === 'https:' ? https : http;
+      activeReq = mod.request(
+        {
+          hostname: valid.hostname,
+          port: targetPort,
+          path: valid.pathname + valid.search,
+          method: 'GET',
+          headers: reqHeaders,
+          timeout: timeoutMs,
+        },
+        handleRes
+      );
+      activeReq.on('timeout', () => activeReq?.destroy(new Error('Media download timed out.')));
+      activeReq.on('error', handleErr);
+      activeReq.end();
+    });
+
+  const resp = await openDirectOrProxy();
+  if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+    const nextLoc = resp.headers.location;
+    resp.stream.resume();
+    if (redirectDepth >= 5) {
+      throw new Error('Too many redirects downloading media.');
+    }
+    let nextAbs = '';
+    try {
+      nextAbs = new URL(nextLoc, valid).toString();
+    } catch {
+      throw new Error('Invalid redirect location.');
+    }
+    return openHttpRequestWithRedirects(nextAbs, reqHeaders, timeoutMs, signal, redirectDepth + 1);
+  }
+  return resp;
+}
+
+/**
+ * Downloads a remote HTTP/HTTPS URL to `destPath` using parallel multi-connection
+ * byte-range workers when the server supports `Range` (`206 Partial Content`),
+ * dramatically speeding up YouTube CDN (`googlevideo.com`) and direct downloads.
+ * Automatically falls back to single-stream download if `200 OK` is returned.
+ */
+async function downloadUrlFastToFile(
+  remoteUrl: string,
+  destPath: string,
+  options?: {
+    headers?: Record<string, string>;
+    referer?: string;
+    concurrency?: number;
+    chunkSize?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    onProgress?: (downloaded: number, total: number) => void;
+  }
+): Promise<{ contentType: string; sizeBytes: number }> {
+  const baseHeaders: Record<string, string> = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Accept: '*/*',
+  };
+  if (options?.headers) {
+    for (const [k, v] of Object.entries(options.headers)) {
+      if (!v || typeof v !== 'string') continue;
+      const kl = k.toLowerCase();
+      if (['host', 'connection', 'content-length', 'accept-encoding', 'range'].includes(kl)) continue;
+      const cleanK = k.replace(/[^a-zA-Z0-9-]/g, '');
+      const cleanV = v.replace(/[\r\n\0]+/g, ' ').trim();
+      if (cleanK && cleanV) baseHeaders[cleanK] = cleanV;
+    }
+  }
+  if (options?.referer && !baseHeaders.Referer && !baseHeaders.referer) {
+    baseHeaders.Referer = options.referer.replace(/[\r\n\0]+/g, ' ').trim();
+  }
+
+  const timeoutMs = options?.timeoutMs ?? 120000;
+  const FIRST_CHUNK_BYTES = 2 * 1024 * 1024;
+  let initial = await openHttpRequestWithRedirects(
+    remoteUrl,
+    { ...baseHeaders, Range: `bytes=0-${FIRST_CHUNK_BYTES - 1}` },
+    timeoutMs,
+    options?.signal
+  );
+
+  if (initial.statusCode === 416) {
+    initial.stream.destroy();
+    initial = await openHttpRequestWithRedirects(remoteUrl, baseHeaders, timeoutMs, options?.signal);
+  }
+
+  if (initial.statusCode >= 400) {
+    initial.stream.destroy();
+    throw new Error(`Upstream returned HTTP ${initial.statusCode}.`);
+  }
+
+  const contentType = String(initial.headers['content-type'] || '')
+    .toLowerCase()
+    .split(';')[0]
+    .trim();
+  const contentRange = String(initial.headers['content-range'] || '');
+  const rangeMatch = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec(contentRange);
+  const totalFromRange = rangeMatch && rangeMatch[3] !== '*' ? Number(rangeMatch[3]) : 0;
+
+  // Single-stream fallback if server ignored Range (200 OK) or total fits inside first probe
+  if (initial.statusCode !== 206 || !Number.isFinite(totalFromRange) || totalFromRange <= FIRST_CHUNK_BYTES) {
+    const contentLen = Number(initial.headers['content-length'] || 0) || totalFromRange || 0;
+    let downloaded = 0;
+    const out = fs.createWriteStream(destPath);
+    const onAbort = () => {
+      initial.abort();
+      out.destroy(new Error('Download cancelled'));
+    };
+    options?.signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        initial.stream.on('data', (chunk: Buffer) => {
+          if (options?.signal?.aborted) {
+            onAbort();
+            return;
+          }
+          downloaded += chunk.byteLength;
+          options?.onProgress?.(downloaded, contentLen);
+        });
+        initial.stream.on('error', (err) => {
+          out.destroy();
+          reject(err);
+        });
+        out.on('error', reject);
+        out.on('finish', resolve);
+        initial.stream.pipe(out);
+      });
+    } finally {
+      options?.signal?.removeEventListener('abort', onAbort);
+    }
+    const stat = await fs.promises.stat(destPath);
+    return { contentType, sizeBytes: stat.size };
+  }
+
+  // Parallel byte-range download directly into destPath using positional pwrite
+  const totalBytes = totalFromRange;
+  const fh = await fs.promises.open(destPath, 'w+');
+  const activeAborts = new Set<() => void>();
+  activeAborts.add(initial.abort);
+  const onAbortAll = () => {
+    for (const fn of activeAborts) {
+      try {
+        fn();
+      } catch {}
+    }
+  };
+  options?.signal?.addEventListener('abort', onAbortAll, { once: true });
+
+  let downloadedBytes = 0;
+  try {
+    // Write chunk 0 already open from the initial probe
+    let chunk0Offset = 0;
+    try {
+      for await (const raw of initial.stream) {
+        if (options?.signal?.aborted) throw new Error('Download cancelled');
+        const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+        if (buf.length === 0) continue;
+        await fh.write(buf, 0, buf.length, chunk0Offset);
+        chunk0Offset += buf.length;
+        downloadedBytes += buf.length;
+        options?.onProgress?.(downloadedBytes, totalBytes);
+      }
+    } finally {
+      activeAborts.delete(initial.abort);
+    }
+
+    const startAfterProbe = chunk0Offset;
+    if (startAfterProbe < totalBytes) {
+      const defaultChunkSize = totalBytes > 64 * 1024 * 1024 ? 4 * 1024 * 1024 : 2 * 1024 * 1024;
+      const chunkSize = options?.chunkSize ?? defaultChunkSize;
+      const ranges: Array<{ start: number; end: number }> = [];
+      for (let pos = startAfterProbe; pos < totalBytes; pos += chunkSize) {
+        ranges.push({ start: pos, end: Math.min(totalBytes - 1, pos + chunkSize - 1) });
+      }
+
+      let nextIdx = 0;
+      const workersCount = Math.min(Math.max(1, options?.concurrency ?? 8), ranges.length);
+      const runWorker = async () => {
+        while (true) {
+          if (options?.signal?.aborted) throw new Error('Download cancelled');
+          const idx = nextIdx++;
+          if (idx >= ranges.length) return;
+          const { start, end } = ranges[idx];
+          const expectedLen = end - start + 1;
+
+          let lastErr: unknown = null;
+          let completed = false;
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            if (options?.signal?.aborted) throw new Error('Download cancelled');
+            let attemptWritten = 0;
+            let reqAbort: (() => void) | null = null;
+            try {
+              const partResp = await openHttpRequestWithRedirects(
+                initial.finalUrl,
+                { ...baseHeaders, Range: `bytes=${start}-${end}` },
+                timeoutMs,
+                options?.signal
+              );
+              reqAbort = partResp.abort;
+              activeAborts.add(reqAbort);
+              if (partResp.statusCode !== 206) {
+                partResp.stream.destroy();
+                const httpErr = new Error(`Range request returned HTTP ${partResp.statusCode}.`);
+                if (partResp.statusCode === 429 || partResp.statusCode >= 500) {
+                  throw httpErr;
+                }
+                throw Object.assign(httpErr, { fatal: true });
+              }
+              let writePos = start;
+              for await (const raw of partResp.stream) {
+                if (options?.signal?.aborted) throw new Error('Download cancelled');
+                const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+                if (buf.length === 0) continue;
+                const room = end + 1 - writePos;
+                if (room <= 0) break;
+                const slice = buf.length > room ? buf.subarray(0, room) : buf;
+                await fh.write(slice, 0, slice.length, writePos);
+                writePos += slice.length;
+                attemptWritten += slice.length;
+                downloadedBytes += slice.length;
+                options?.onProgress?.(downloadedBytes, totalBytes);
+              }
+              if (attemptWritten < expectedLen) {
+                throw new Error(`Incomplete byte range (${attemptWritten}/${expectedLen})`);
+              }
+              completed = true;
+              break;
+            } catch (err) {
+              if (attemptWritten > 0) {
+                downloadedBytes = Math.max(0, downloadedBytes - attemptWritten);
+              }
+              lastErr = err;
+              if (options?.signal?.aborted || (err as { fatal?: boolean })?.fatal) {
+                throw err;
+              }
+              if (attempt < 4) {
+                await new Promise((r) => setTimeout(r, 350 * Math.pow(2, attempt)));
+              }
+            } finally {
+              if (reqAbort) activeAborts.delete(reqAbort);
+            }
+          }
+          if (!completed) {
+            throw lastErr instanceof Error ? lastErr : new Error('Failed to download range chunk.');
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: workersCount }, () => runWorker()));
+    }
+  } finally {
+    options?.signal?.removeEventListener('abort', onAbortAll);
+    onAbortAll();
+    await fh.close().catch(() => {});
+  }
+
+  return { contentType, sizeBytes: totalBytes };
+}
+
 async function validatePublicUrl(rawUrl: string): Promise<URL | null> {
   try {
     const parsed = new URL(rawUrl.trim());
@@ -3746,9 +4035,11 @@ function buildYtDlpArgs(
     'extractor:exp=2:20',
   ];
   if (isYouTube) {
-    args.push('--sleep-requests', '0.5');
+    if (!options?.isDownload && youtubeCooldownMap.size > 0) {
+      args.push('--sleep-requests', '0.5');
+    }
     if (options?.isDownload) {
-      args.push('--concurrent-fragments', '4');
+      args.push('--concurrent-fragments', '16', '--http-chunk-size', '10M');
     }
     if (options?.isSubtitle) {
       args.push('--sleep-subtitles', '0.5');
@@ -5303,7 +5594,8 @@ let lastYtRequestEndAt = 0;
 
 function runPacedYouTubeTask<T>(fn: () => Promise<T>): Promise<T> {
   const run = async (): Promise<T> => {
-    const minGapMs = 900 + Math.floor(Math.random() * 1000);
+    const hasCooldown = getYouTubeCooldownRemainingMs(getYouTubeConfigFingerprint()) > 0;
+    const minGapMs = hasCooldown ? 900 + Math.floor(Math.random() * 1000) : 150 + Math.floor(Math.random() * 150);
     const elapsed = Date.now() - lastYtRequestEndAt;
     if (lastYtRequestEndAt > 0 && elapsed < minGapMs) {
       await new Promise((r) => setTimeout(r, minGapMs - elapsed));
@@ -7941,6 +8233,73 @@ async function startServer() {
       return;
     }
 
+    const tgPost = parseTelegramPostUrl(parsed);
+    if (tgPost) {
+      let title = `Telegram Post #${tgPost.messageId}`;
+      let author = tgPost.displayPeer;
+      let durationSeconds: number | null = null;
+      let mediaKind: 'video' | 'image' | 'file' = 'video';
+      let hasVideo = true;
+
+      const client = await telegramClientIfReady();
+      if (client && adminConfig.telegram.mode === 'user') {
+        try {
+          const msgs = await client.getMessages(tgPost.peer, { ids: tgPost.messageId });
+          const msg = Array.isArray(msgs) ? (msgs[0] as any) : undefined;
+          if (msg) {
+            const rawCaption = typeof msg.message === 'string' ? msg.message.trim() : '';
+            const firstLine = rawCaption.split(/\r?\n/)[0]?.trim();
+            const doc = msg.media?.document;
+            if (doc) {
+              const attrs = Array.isArray(doc.attributes) ? doc.attributes : [];
+              const fnAttr = attrs.find((a: any) => a instanceof Api.DocumentAttributeFilename) as
+                | { fileName?: string }
+                | undefined;
+              const vidAttr = attrs.find((a: any) => a instanceof Api.DocumentAttributeVideo) as
+                | { duration?: number }
+                | undefined;
+              const audAttr = attrs.find((a: any) => a instanceof Api.DocumentAttributeAudio) as
+                | { duration?: number; title?: string }
+                | undefined;
+              if (typeof vidAttr?.duration === 'number') durationSeconds = Math.round(vidAttr.duration);
+              else if (typeof audAttr?.duration === 'number') durationSeconds = Math.round(audAttr.duration);
+              const mime = String(doc.mimeType || '').toLowerCase();
+              hasVideo = mime.startsWith('video/') || Boolean(vidAttr);
+              mediaKind = hasVideo ? 'video' : mime.startsWith('image/') ? 'image' : 'file';
+              if (firstLine) title = firstLine.slice(0, 100);
+              else if (audAttr?.title) title = audAttr.title.slice(0, 100);
+              else if (fnAttr?.fileName) title = fnAttr.fileName.replace(/\.[^.]+$/, '');
+            } else if (msg.media?.photo || msg.photo) {
+              hasVideo = false;
+              mediaKind = 'image';
+              if (firstLine) title = firstLine.slice(0, 100);
+            } else if (firstLine) {
+              title = firstLine.slice(0, 100);
+            }
+          }
+        } catch {
+          // Keep clean fallback metadata
+        }
+      }
+
+      res.json({
+        title,
+        author,
+        durationSeconds,
+        thumbnail: null,
+        providerGlow: 'default',
+        mediaKind,
+        hasVideo,
+        itemCount: 1,
+        qualities: ['best'],
+        engineMode: 'live',
+        audioTracks: [],
+        manualSubtitles: [],
+        autoSubtitles: [],
+      });
+      return;
+    }
+
     if (isInstagramUrl(parsed)) {
       const normalizedIgUrl = normalizeInstagramUrl(parsed);
       try {
@@ -8782,11 +9141,281 @@ async function startServer() {
     appendAppLog('info', 'download', `Job ready: ${job.title} [${job.quality}.${job.ext}] (${job.totalBytes ?? 0} bytes)`);
   }
 
+  async function runFfmpegLocalFile(
+    ffArgs: string[],
+    job: DownloadJob,
+    env?: NodeJS.ProcessEnv
+  ): Promise<void> {
+    if (job.cancelled) {
+      throw new Error('Download cancelled');
+    }
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('ffmpeg', ffArgs, { shell: false, ...(env ? { env } : {}) });
+      let stderrBuf = '';
+      const unregisterCancel = registerJobCancel(job, () => {
+        if (child.exitCode === null && !child.killed) {
+          try {
+            child.kill('SIGTERM');
+          } catch {}
+          setTimeout(() => {
+            if (child.exitCode === null) {
+              try {
+                child.kill('SIGKILL');
+              } catch {}
+            }
+          }, 300).unref();
+        }
+      });
+      child.stderr?.on('data', (chunk: Buffer) => {
+        if (stderrBuf.length < 4096) stderrBuf += chunk.toString('utf8');
+      });
+      child.on('error', (err) => {
+        unregisterCancel();
+        reject(err);
+      });
+      child.on('close', (code) => {
+        unregisterCancel();
+        if (job.cancelled) {
+          reject(new Error('Download cancelled'));
+          return;
+        }
+        if (code === 0) {
+          resolve();
+        } else {
+          const lines = stderrBuf
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter(Boolean);
+          reject(new Error(lines[lines.length - 1] || `ffmpeg exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  function buildFfmpegLocalMuxArgs(
+    videoPath: string,
+    audioPath: string | null,
+    specs: StreamInputSpec[],
+    isAudio: boolean,
+    title: string,
+    outPath: string
+  ): string[] {
+    const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', videoPath];
+    if (audioPath) args.push('-i', audioPath);
+    if (isAudio) {
+      args.push(
+        '-vn',
+        '-c:a',
+        'libmp3lame',
+        '-b:a',
+        '192k',
+        '-metadata',
+        `title=${sanitizeFilename(title)}`,
+        '-f',
+        'mp3',
+        outPath
+      );
+      return args;
+    }
+    const primaryVcodec = (specs[0]?.vcodec || '').toLowerCase();
+    const primaryExt = (specs[0]?.ext || '').toLowerCase();
+    const needsVideoTranscode =
+      ['mpeg4', 'msmpeg4', 'divx', 'xvid', 'wmv', 'flv', 'vp6', 'h263'].some((c) => primaryVcodec.includes(c)) ||
+      ['avi', 'wmv', 'flv'].includes(primaryExt);
+    if (needsVideoTranscode) {
+      args.push('-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p');
+    } else {
+      args.push('-c:v', 'copy');
+    }
+    const audioSpec = specs.length >= 2 ? specs[1] : specs[0];
+    const audioAcodec = (audioSpec?.acodec || '').toLowerCase();
+    const audioExt = (audioSpec?.ext || '').toLowerCase();
+    const canCopyAudio =
+      audioAcodec.includes('mp4a') ||
+      audioAcodec.includes('aac') ||
+      (audioExt === 'm4a' && (!audioAcodec || audioAcodec === 'unknown'));
+    if (canCopyAudio) {
+      args.push('-c:a', 'copy');
+    } else {
+      args.push('-c:a', 'aac', '-b:a', '160k');
+    }
+    args.push('-movflags', '+faststart', '-f', 'mp4', outPath);
+    return args;
+  }
+
+  function inferExtFromMimeAndPath(contentType: string, urlPath: string, fallback: DownloadFileExt = 'mp4'): DownloadFileExt {
+    const ct = contentType.toLowerCase();
+    const cleanPath = urlPath.toLowerCase();
+    if (ct.includes('audio/mpeg') || cleanPath.endsWith('.mp3')) return 'mp3';
+    if (ct.includes('image/png') || cleanPath.endsWith('.png')) return 'png';
+    if (ct.includes('image/webp') || cleanPath.endsWith('.webp')) return 'webp';
+    if (ct.includes('image/jpeg') || ct.includes('image/jpg') || cleanPath.endsWith('.jpg') || cleanPath.endsWith('.jpeg')) return 'jpg';
+    if (ct.includes('application/zip') || cleanPath.endsWith('.zip')) return 'zip';
+    return fallback;
+  }
+
   async function runDirectTelegramDownload(job: DownloadJob, parsed: URL): Promise<void> {
     const isAudio = job.quality === 'audio';
     const ytId = extractYouTubeId(parsed);
+    const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-tg-'));
+    const abortController = new AbortController();
+    const unregisterAbort = registerJobCancel(job, () => abortController.abort());
+
+    const updateDlProgress = (downloaded: number, total: number, maxPct = 48) => {
+      job.downloadedBytes = Math.max(job.downloadedBytes, downloaded);
+      if (total > 0) {
+        job.totalBytes = total;
+        const pct = Math.min(maxPct, Math.max(5, Math.floor((downloaded / total) * maxPct)));
+        job.progress = Math.max(job.progress, pct);
+      } else {
+        const pct = Math.min(maxPct - 3, 5 + Math.floor(Math.log2(1 + downloaded / (512 * 1024)) * 6));
+        job.progress = Math.max(job.progress, pct);
+      }
+    };
 
     try {
+      // 1. Telegram Post Links (t.me/...): Direct cloud copy to locked channel,
+      //    falling back to iterDownload -> /tmp -> sendFile(..., workers: 16) if forwarding is restricted.
+      const tgPost = parseTelegramPostUrl(parsed);
+      if (tgPost) {
+        const cfg = adminConfig.telegram;
+        if (!telegramEnabledForUploads(cfg)) {
+          throw new Error('Telegram upload is not enabled.');
+        }
+        if (telegramUsesBotHttpApi(cfg) || cfg.mode !== 'user') {
+          throw new Error('Downloading from Telegram post links requires a signed-in MTProto user account.');
+        }
+        const client = await getTelegramClient();
+        const targetPeer = await assertTelegramTargetWritable(client, cfg.channel);
+        const msgs = await client.getMessages(tgPost.peer, { ids: tgPost.messageId });
+        const sourceMsg = (Array.isArray(msgs) ? msgs[0] : undefined) as any;
+        if (!sourceMsg || sourceMsg.className === 'MessageEmpty') {
+          throw new Error('Telegram post not found or not accessible by this account.');
+        }
+
+        let targetMedia = sourceMsg.media;
+        if ((!targetMedia || targetMedia.className === 'MessageMediaEmpty') && sourceMsg.document) {
+          targetMedia = new Api.MessageMediaDocument({ document: sourceMsg.document });
+        } else if ((!targetMedia || targetMedia.className === 'MessageMediaEmpty') && sourceMsg.photo) {
+          targetMedia = new Api.MessageMediaPhoto({ photo: sourceMsg.photo });
+        } else if (targetMedia instanceof Api.MessageMediaWebPage && targetMedia.webpage instanceof Api.WebPage) {
+          if (targetMedia.webpage.document) {
+            targetMedia = new Api.MessageMediaDocument({ document: targetMedia.webpage.document });
+          } else if (targetMedia.webpage.photo) {
+            targetMedia = new Api.MessageMediaPhoto({ photo: targetMedia.webpage.photo });
+          }
+        }
+        if (!targetMedia || targetMedia.className === 'MessageMediaEmpty') {
+          throw new Error('This Telegram post does not contain downloadable media.');
+        }
+
+        const loc = telegramFileLocation({ media: targetMedia });
+        const doc = targetMedia.document;
+        let origFileName = '';
+        let mimeType = doc?.mimeType ? String(doc.mimeType) : 'video/mp4';
+        if (doc && Array.isArray(doc.attributes)) {
+          const fnAttr = doc.attributes.find((a: any) => a instanceof Api.DocumentAttributeFilename) as
+            | { fileName?: string }
+            | undefined;
+          if (fnAttr?.fileName) origFileName = path.basename(fnAttr.fileName);
+        }
+        const isPhoto = Boolean(targetMedia.photo || targetMedia.className === 'MessageMediaPhoto');
+        if (isPhoto) mimeType = 'image/jpeg';
+        const ext = inferExtFromMimeAndPath(mimeType, origFileName, isPhoto ? 'jpg' : 'mp4');
+        const safeFileName = origFileName || `${sanitizeFilename(`${job.title}-${job.quality}`)}.${ext}`;
+        const caption = `${job.title}\n${job.quality.toUpperCase()} · grove save`;
+
+        job.ext = ext;
+        job.mimeType = mimeType;
+        job.fileName = safeFileName;
+        job.contentDisposition = buildContentDisposition(job.title, job.quality, ext);
+
+        // Try instant cloud-side copy straight into the locked channel first
+        try {
+          job.status = 'processing';
+          job.progress = 50;
+          const sent = (await client.sendMessage(targetPeer as never, {
+            file: targetMedia,
+            message: caption,
+          })) as { id: number; peerId?: unknown; media?: unknown };
+          let chatId = cfg.channel;
+          if (sent.peerId) {
+            try {
+              chatId = tgUtils.getPeerId(sent.peerId as never);
+            } catch {}
+          }
+          if (!chatId || chatId === cfg.channel) {
+            try {
+              chatId = tgUtils.getPeerId(targetPeer as never);
+            } catch {
+              chatId = cfg.channel;
+            }
+          }
+          recordUploadedTelegramMessage(job, cfg, {
+            chatId,
+            messageId: sent.id,
+            fileName: safeFileName,
+            sizeBytes: loc.size || 0,
+            sentMessage: sent,
+          });
+          return;
+        } catch (copyErr) {
+          if (job.cancelled) throw new Error('Download cancelled');
+          if (isFatalTelegramUploadError(copyErr)) throw copyErr;
+          // Source channel restricts forwarding -> download via iterDownload to /tmp then upload with workers: 16
+        }
+
+        const tmpTgPath = path.join(workDir, `tg_source_${tgPost.messageId}.${ext}`);
+        const outStream = fs.createWriteStream(tmpTgPath);
+        const unregTgDl = registerJobCancel(job, () => {
+          try {
+            outStream.destroy(new Error('Download cancelled'));
+          } catch {}
+        });
+        let dlBytes = 0;
+        try {
+          job.status = 'downloading';
+          if (loc.size > 0) job.totalBytes = loc.size;
+          const iterator = client.iterDownload({
+            file: loc.location,
+            dcId: loc.dcId,
+            fileSize: loc.size > 0 ? bigInt(loc.size) : undefined,
+            requestSize: 512 * 1024,
+          });
+          for await (const chunk of iterator) {
+            if (job.cancelled) throw new Error('Download cancelled');
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as ArrayBuffer);
+            if (buf.length === 0) continue;
+            if (!outStream.write(buf)) {
+              await new Promise<void>((resDrain, rejDrain) => {
+                outStream.once('drain', resDrain);
+                outStream.once('error', rejDrain);
+              });
+            }
+            dlBytes += buf.length;
+            updateDlProgress(dlBytes, loc.size || 0, 48);
+          }
+          await new Promise<void>((resEnd, rejEnd) => {
+            outStream.on('finish', resEnd);
+            outStream.on('error', rejEnd);
+            outStream.end();
+          });
+        } finally {
+          unregTgDl();
+          outStream.destroy();
+        }
+
+        await uploadTmpFileToLockedTelegramChannel(job, tmpTgPath, {
+          ext,
+          mimeType,
+          fileName: safeFileName,
+          progressStart: 50,
+          progressEnd: 99,
+        });
+        return;
+      }
+
+      // 2. Instagram
       if (isInstagramUrl(parsed)) {
         const normalizedIgUrl = normalizeInstagramUrl(parsed);
         const targetH = selectTargetHeight(job.quality);
@@ -8802,45 +9431,74 @@ async function startServer() {
           if (!fmt?.url) {
             throw new Error('This Instagram post does not contain a video track for MP3 extraction.');
           }
-          const { stream } = await openRemoteMediaReadable(fmt.url, { referer: 'https://www.instagram.com/' });
-          const ffStream = spawnChildToReadable(
-            'ffmpeg',
-            ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
-            undefined,
-            {
-              stdio: ['pipe', 'pipe', 'pipe'],
-              onSpawn: (child) => {
-                child.stdin?.on('error', () => {});
-                stream.on('error', () => {
-                  if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
-                });
-                if (child.stdin) stream.pipe(child.stdin);
-              },
-            }
+          const srcPath = path.join(workDir, 'ig_src.mp4');
+          const mp3Path = path.join(workDir, 'ig_out.mp3');
+          await downloadUrlFastToFile(fmt.url, srcPath, {
+            referer: 'https://www.instagram.com/',
+            signal: abortController.signal,
+            onProgress: (dl, tot) => updateDlProgress(dl, tot, 44),
+          });
+          job.status = 'processing';
+          job.progress = Math.max(job.progress, 48);
+          await runFfmpegLocalFile(
+            ['-y', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', mp3Path],
+            job
           );
-          await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
+          await fs.promises.rm(srcPath, { force: true }).catch(() => {});
+          await uploadTmpFileToLockedTelegramChannel(job, mp3Path, {
+            ext: 'mp3',
+            mimeType: 'audio/mpeg',
+            progressStart: 52,
+            progressEnd: 99,
+          });
           return;
         }
 
         if (entries.length > 1) {
-          const zipEntries = entries.map((entry, idx) => ({
-            baseName: `item_${idx + 1}`,
-            fetchEntry: async () => {
+          const fileNames: string[] = [];
+          await Promise.all(
+            entries.map(async (entry, idx) => {
               if (entry.kind === 'video') {
                 const fmt = selectInstagramVideoFormat(entry, targetH);
                 if (!fmt?.url) throw new Error('Missing video URL in carousel item.');
-                const { buffer } = await readRemoteBuffer(fmt.url, { referer: 'https://www.instagram.com/' });
-                return { buffer, ext: 'mp4' };
+                const name = `item_${idx + 1}.mp4`;
+                await downloadUrlFastToFile(fmt.url, path.join(workDir, name), {
+                  referer: 'https://www.instagram.com/',
+                  concurrency: 4,
+                  signal: abortController.signal,
+                });
+                fileNames[idx] = name;
+              } else {
+                const imgUrl = (entry.formats || []).find((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url))?.url;
+                if (!imgUrl) throw new Error('Missing image URL in carousel item.');
+                const tmpName = `item_${idx + 1}.img`;
+                const tmpPath = path.join(workDir, tmpName);
+                const { contentType } = await downloadUrlFastToFile(imgUrl, tmpPath, {
+                  referer: 'https://www.instagram.com/',
+                  concurrency: 2,
+                  signal: abortController.signal,
+                });
+                const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+                const finalName = `item_${idx + 1}.${ext}`;
+                await fs.promises.rename(tmpPath, path.join(workDir, finalName));
+                fileNames[idx] = finalName;
               }
-              const imgUrl = (entry.formats || []).find((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url))?.url;
-              if (!imgUrl) throw new Error('Missing image URL in carousel item.');
-              const { buffer, contentType } = await readRemoteBuffer(imgUrl, { referer: 'https://www.instagram.com/' });
-              const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
-              return { buffer, ext };
-            },
-          }));
-          const zipStream = createStreamingZipReadable(zipEntries);
-          await uploadStreamJobToTelegram(job, zipStream, null, { ext: 'zip', mimeType: 'application/zip' });
+              job.progress = Math.min(48, job.progress + Math.floor(40 / entries.length));
+            })
+          );
+          job.status = 'processing';
+          job.progress = 50;
+          const zipPath = path.join(workDir, 'carousel.zip');
+          await execFileAsync('python3', ['-m', 'zipfile', '-c', zipPath, ...fileNames], {
+            cwd: workDir,
+            timeout: 45000,
+          });
+          await uploadTmpFileToLockedTelegramChannel(job, zipPath, {
+            ext: 'zip',
+            mimeType: 'application/zip',
+            progressStart: 52,
+            progressEnd: 99,
+          });
           return;
         }
 
@@ -8848,42 +9506,63 @@ async function startServer() {
         if (single.kind === 'video') {
           const fmt = selectInstagramVideoFormat(single, targetH);
           if (!fmt?.url) throw new Error('No downloadable Instagram video URL found.');
-          let opened;
+          const outMp4 = path.join(workDir, 'ig_video.mp4');
           try {
-            opened = await openRemoteMediaReadable(fmt.url, { referer: 'https://www.instagram.com/' });
+            await downloadUrlFastToFile(fmt.url, outMp4, {
+              referer: 'https://www.instagram.com/',
+              signal: abortController.signal,
+              onProgress: (dl, tot) => updateDlProgress(dl, tot, 48),
+            });
           } catch (openErr) {
             if (/HTTP 403|HTTP 410|HTTP 404/i.test(openErr instanceof Error ? openErr.message : '')) {
               const refreshed = await runParthDlInfo(normalizedIgUrl, true);
               const refEntry = (refreshed.entries || []).find((e) => e.kind === 'video');
               const refFmt = refEntry ? selectInstagramVideoFormat(refEntry, targetH) : null;
               if (!refFmt?.url) throw openErr;
-              opened = await openRemoteMediaReadable(refFmt.url, { referer: 'https://www.instagram.com/' });
+              await downloadUrlFastToFile(refFmt.url, outMp4, {
+                referer: 'https://www.instagram.com/',
+                signal: abortController.signal,
+                onProgress: (dl, tot) => updateDlProgress(dl, tot, 48),
+              });
             } else {
               throw openErr;
             }
           }
-          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+          await uploadTmpFileToLockedTelegramChannel(job, outMp4, {
             ext: 'mp4',
             mimeType: 'video/mp4',
+            progressStart: 50,
+            progressEnd: 99,
           });
           return;
         }
 
         const imgUrl = (single.formats || []).find((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url))?.url;
         if (!imgUrl) throw new Error('No downloadable Instagram image URL found.');
-        const opened = await openRemoteMediaReadable(imgUrl, { referer: 'https://www.instagram.com/' });
-        const imgExt: DownloadFileExt = opened.contentType.includes('png')
+        const tmpImg = path.join(workDir, 'ig_photo.img');
+        const { contentType } = await downloadUrlFastToFile(imgUrl, tmpImg, {
+          referer: 'https://www.instagram.com/',
+          concurrency: 2,
+          signal: abortController.signal,
+          onProgress: (dl, tot) => updateDlProgress(dl, tot, 48),
+        });
+        const imgExt: DownloadFileExt = contentType.includes('png')
           ? 'png'
-          : opened.contentType.includes('webp')
+          : contentType.includes('webp')
             ? 'webp'
             : 'jpg';
-        await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+        const finalImg = path.join(workDir, `ig_photo.${imgExt}`);
+        await fs.promises.rename(tmpImg, finalImg);
+        await uploadTmpFileToLockedTelegramChannel(job, finalImg, {
           ext: imgExt,
           mimeType: getMimeTypeForExt(imgExt),
+          progressStart: 50,
+          progressEnd: 99,
         });
         return;
       }
 
+      // 3. YouTube & yt-dlp supported platforms
       const targetUrlForDl = isXUrl(parsed)
         ? normalizeXUrl(parsed)
         : ytId
@@ -9012,7 +9691,6 @@ async function startServer() {
           let usedCachedInputs = false;
           let fatalBotError: unknown = null;
 
-          // Reuse cached stream URLs or raw inspect metadata first so we don't re-scrape YouTube.
           if (ytId) {
             if (!isAudio) {
               const cachedStream = streamResolveCache.get(streamCacheKey);
@@ -9072,50 +9750,166 @@ async function startServer() {
             throw fatalBotError;
           }
 
-          const streamInputsToTelegram = async (specs: StreamInputSpec[]): Promise<boolean> => {
-            if (specs.length === 1 && !isAudio && !isManifestOrIncompatibleFormat(specs[0])) {
-              try {
-                const opened = await openRemoteMediaReadable(specs[0].url, { headers: specs[0].headers });
-                await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+          const downloadAndUploadSpecsToTelegram = async (specs: StreamInputSpec[]): Promise<boolean> => {
+            if (specs.length === 0) return false;
+            const cfgTg = adminConfig.telegram;
+
+            // Enforce Bot HTTP API 50 MB limit early before downloading large files
+            const estTotal = specs.reduce((acc, s) => acc + (s.filesize || 0), 0);
+            if (telegramUsesBotHttpApi(cfgTg) && estTotal > TELEGRAM_BOT_MAX_BYTES) {
+              throw new Error(
+                `This file is ${(estTotal / (1024 * 1024)).toFixed(1)} MB, over the 50 MB Telegram bot upload limit. Sign in with a phone number to upload files up to 2 GB.`
+              );
+            }
+
+            try {
+              // Fast Case A: Single non-manifest video stream -> parallel range download to /tmp -> upload via CustomFile (workers: 16)
+              if (specs.length === 1 && !isAudio && !isManifestOrIncompatibleFormat(specs[0])) {
+                const specExt = (specs[0].ext || '').toLowerCase();
+                const rawPath = path.join(workDir, `single.${specExt || 'mp4'}`);
+                const outMp4 = path.join(workDir, 'out.mp4');
+                if (specs[0].filesize) job.totalBytes = specs[0].filesize;
+                await downloadUrlFastToFile(specs[0].url, rawPath, {
+                  headers: specs[0].headers,
+                  concurrency: 8,
+                  signal: abortController.signal,
+                  onProgress: (dl, tot) => updateDlProgress(dl, tot || specs[0].filesize || 0, 48),
+                });
+
+                let uploadPath = rawPath;
+                if (specExt && specExt !== 'mp4') {
+                  job.status = 'processing';
+                  job.progress = Math.max(job.progress, 50);
+                  await runFfmpegLocalFile(buildFfmpegLocalMuxArgs(rawPath, null, specs, false, job.title, outMp4), job);
+                  await fs.promises.rm(rawPath, { force: true }).catch(() => {});
+                  uploadPath = outMp4;
+                }
+                await uploadTmpFileToLockedTelegramChannel(job, uploadPath, {
                   ext: 'mp4',
                   mimeType: 'video/mp4',
-                  estimatedTotalBytes: specs[0].filesize ?? null,
+                  progressStart: 52,
+                  progressEnd: 99,
                 });
                 return true;
-              } catch (openErr) {
-                if (isFatalTelegramUploadError(openErr)) throw openErr;
               }
-            }
 
-            if (specs.length > 0) {
-              const estBytes = specs.reduce((acc, s) => acc + (s.filesize || 0), 0) || null;
-              try {
-                const ffArgs = buildFfmpegStreamArgs(specs, isAudio, job.title);
-                const ffStream = spawnChildToReadable('ffmpeg', ffArgs, buildFfmpegProxyEnv(env));
-                await uploadStreamJobToTelegram(job, ffStream, null, {
-                  ext: isAudio ? 'mp3' : 'mp4',
-                  mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
-                  estimatedTotalBytes: isAudio ? null : estBytes,
+              // Fast Case B: Separate DASH video + audio -> download BOTH in parallel with multi-connection ranges,
+              //              then instant local disk-to-disk ffmpeg remux -> upload via CustomFile (workers: 16)
+              if (specs.length >= 2 && !isAudio && !specs.some(isManifestOrIncompatibleFormat)) {
+                const vPath = path.join(workDir, 'video.bin');
+                const aPath = path.join(workDir, 'audio.bin');
+                const outMp4 = path.join(workDir, 'muxed.mp4');
+                const estBytes = (specs[0].filesize || 0) + (specs[1].filesize || 0);
+                if (estBytes > 0) job.totalBytes = estBytes;
+
+                let vDl = 0;
+                let aDl = 0;
+                let vTot = specs[0].filesize || 0;
+                let aTot = specs[1].filesize || 0;
+                const reportDualProgress = () => {
+                  updateDlProgress(vDl + aDl, vTot + aTot || estBytes, 46);
+                };
+
+                await Promise.all([
+                  downloadUrlFastToFile(specs[0].url, vPath, {
+                    headers: specs[0].headers,
+                    concurrency: 6,
+                    signal: abortController.signal,
+                    onProgress: (dl, tot) => {
+                      vDl = dl;
+                      if (tot > 0) vTot = tot;
+                      reportDualProgress();
+                    },
+                  }),
+                  downloadUrlFastToFile(specs[1].url, aPath, {
+                    headers: specs[1].headers,
+                    concurrency: 4,
+                    signal: abortController.signal,
+                    onProgress: (dl, tot) => {
+                      aDl = dl;
+                      if (tot > 0) aTot = tot;
+                      reportDualProgress();
+                    },
+                  }),
+                ]);
+
+                job.status = 'processing';
+                job.progress = Math.max(job.progress, 49);
+                await runFfmpegLocalFile(buildFfmpegLocalMuxArgs(vPath, aPath, specs, false, job.title, outMp4), job);
+                await Promise.all([
+                  fs.promises.rm(vPath, { force: true }).catch(() => {}),
+                  fs.promises.rm(aPath, { force: true }).catch(() => {}),
+                ]);
+
+                await uploadTmpFileToLockedTelegramChannel(job, outMp4, {
+                  ext: 'mp4',
+                  mimeType: 'video/mp4',
+                  progressStart: 52,
+                  progressEnd: 99,
                 });
                 return true;
-              } catch (muxErr) {
-                if (isFatalTelegramUploadError(muxErr)) throw muxErr;
               }
+
+              // Fast Case C: Audio extraction from non-manifest track -> parallel download -> local ffmpeg -> MP3
+              if (isAudio && !isManifestOrIncompatibleFormat(specs[0])) {
+                const aPath = path.join(workDir, 'audio_src.bin');
+                const outMp3 = path.join(workDir, 'out.mp3');
+                if (specs[0].filesize) job.totalBytes = specs[0].filesize;
+                await downloadUrlFastToFile(specs[0].url, aPath, {
+                  headers: specs[0].headers,
+                  concurrency: 6,
+                  signal: abortController.signal,
+                  onProgress: (dl, tot) => updateDlProgress(dl, tot || specs[0].filesize || 0, 45),
+                });
+                job.status = 'processing';
+                job.progress = Math.max(job.progress, 48);
+                await runFfmpegLocalFile(buildFfmpegLocalMuxArgs(aPath, null, specs, true, job.title, outMp3), job);
+                await fs.promises.rm(aPath, { force: true }).catch(() => {});
+                await uploadTmpFileToLockedTelegramChannel(job, outMp3, {
+                  ext: 'mp3',
+                  mimeType: 'audio/mpeg',
+                  progressStart: 52,
+                  progressEnd: 99,
+                });
+                return true;
+              }
+
+              // Case D: Manifest / incompatible container -> ffmpeg directly into /tmp file -> upload
+              const outFile = path.join(workDir, isAudio ? 'manifest_out.mp3' : 'manifest_out.mp4');
+              const baseFfArgs = buildFfmpegStreamArgs(specs, isAudio, job.title);
+              // Replace pipe:1 (+ frag_keyframe movflags for mp4) with direct seekable /tmp output
+              const fileFfArgs = baseFfArgs.slice(0, -1);
+              const fragIdx = fileFfArgs.indexOf('frag_keyframe+empty_moov+default_base_moof');
+              if (fragIdx !== -1) {
+                fileFfArgs[fragIdx] = '+faststart';
+              }
+              fileFfArgs.push(outFile);
+              job.progress = Math.max(job.progress, 15);
+              await runFfmpegLocalFile(fileFfArgs, job, buildFfmpegProxyEnv(env));
+              await uploadTmpFileToLockedTelegramChannel(job, outFile, {
+                ext: isAudio ? 'mp3' : 'mp4',
+                mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+                progressStart: 52,
+                progressEnd: 99,
+              });
+              return true;
+            } catch (err) {
+              if (job.cancelled || isFatalTelegramUploadError(err)) throw err;
+              return false;
             }
-            return false;
           };
 
-          if (await streamInputsToTelegram(inputs)) {
+          if (await downloadAndUploadSpecsToTelegram(inputs)) {
             return;
           }
 
-          // If cached YouTube CDN URLs went stale (e.g. 403/410), invalidate and re-resolve once cleanly.
+          // If cached CDN URLs went stale (e.g. 403/410), invalidate and re-resolve once cleanly.
           if (usedCachedInputs && ytId) {
             streamResolveCache.delete(streamCacheKey);
             youtubeRawInfoCache.delete(`${ytId}::${fp}`);
             try {
               const fresh = await resolveFreshInputs();
-              if (await streamInputsToTelegram(fresh)) {
+              if (await downloadAndUploadSpecsToTelegram(fresh)) {
                 return;
               }
             } catch (retryErr) {
@@ -9127,41 +9921,58 @@ async function startServer() {
             }
           }
 
-          // Fallback: stream yt-dlp directly to stdout -> ffmpeg -> Telegram (zero disk)
-          const singleFmt = isAudio
-            ? audioFmtSelector
-            : `best[width<=${targetH}][aspect_ratio<1][ext=mp4]/best[height<=${targetH}][ext=mp4]/best[width<=${targetH}][aspect_ratio<1]/best[height<=${targetH}]/best`;
+          // Fallback: yt-dlp directly into /tmp with concurrent fragments -> upload via CustomFile (workers: 16)
+          const singleOut = path.join(workDir, isAudio ? 'yt_dl.mp3' : 'yt_dl.mp4');
+          const ytdlpFallbackBase = isAudio
+            ? ['-f', audioFmtSelector, '-x', '--audio-format', 'mp3', '-o', singleOut, '--newline', '--', targetUrlForDl]
+            : ['-f', videoFmtSelector, '--merge-output-format', 'mp4', '-o', singleOut, '--newline', '--', targetUrlForDl];
           const ytdlpArgs = insertBeforeDoubleDash(
-            buildYtDlpArgs(
-              ['-f', singleFmt, '--no-playlist', '--playlist-items', '1', '-o', '-', '--', targetUrlForDl],
-              { isYouTube: Boolean(ytId), isDownload: true }
-            ),
+            buildYtDlpArgs(ytdlpFallbackBase, { isYouTube: Boolean(ytId), isDownload: true }),
             extraArgs
           );
-          const ytStdout = spawnChildToReadable(runner.cmd, [...runner.baseArgs, ...ytdlpArgs], env);
-          if (isAudio) {
-            const ffStream = spawnChildToReadable(
-              'ffmpeg',
-              ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
-              undefined,
-              {
-                stdio: ['pipe', 'pipe', 'pipe'],
-                onSpawn: (child) => {
-                  child.stdin?.on('error', () => {});
-                  ytStdout.on('error', () => {
-                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
-                  });
-                  if (child.stdin) ytStdout.pipe(child.stdin);
-                },
+          await new Promise<void>((resolve, reject) => {
+            if (job.cancelled) {
+              reject(new Error('Download cancelled'));
+              return;
+            }
+            const child = spawn(runner.cmd, [...runner.baseArgs, ...ytdlpArgs], { shell: false, env });
+            const unregYt = registerJobCancel(job, () => {
+              if (child.exitCode === null && !child.killed) {
+                try {
+                  child.kill('SIGTERM');
+                } catch {}
               }
-            );
-            await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
-          } else {
-            await uploadStreamJobToTelegram(job, ytStdout, null, { ext: 'mp4', mimeType: 'video/mp4' });
-          }
+            });
+            let stderr = '';
+            child.stdout.on('data', (data) => {
+              const m = data.toString().match(/\[download\]\s+(\d+(?:\.\d+)?)%/);
+              if (m) {
+                job.progress = Math.max(job.progress, Math.min(48, Math.max(5, Math.floor(parseFloat(m[1]) * 0.48))));
+              }
+            });
+            child.stderr.on('data', (data) => {
+              if (stderr.length < 4096) stderr += data.toString();
+            });
+            child.on('error', (err) => {
+              unregYt();
+              reject(err);
+            });
+            child.on('close', (code) => {
+              unregYt();
+              if (job.cancelled) reject(new Error('Download cancelled'));
+              else if (code === 0) resolve();
+              else reject(new Error(stderr || `yt-dlp exited with code ${code}`));
+            });
+          });
+          await uploadTmpFileToLockedTelegramChannel(job, singleOut, {
+            ext: isAudio ? 'mp3' : 'mp4',
+            mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+            progressStart: 50,
+            progressEnd: 99,
+          });
           return;
         } catch (ytdlpErr) {
-          if (isFatalTelegramUploadError(ytdlpErr)) throw ytdlpErr;
+          if (job.cancelled || isFatalTelegramUploadError(ytdlpErr)) throw ytdlpErr;
           if (!isXUrl(parsed) && !isTikTokUrl(parsed)) {
             throw ytdlpErr;
           }
@@ -9169,6 +9980,7 @@ async function startServer() {
         }
       }
 
+      // 4. X / TikTok fallback resolver
       if (isXUrl(parsed) || isTikTokUrl(parsed)) {
         const resolved = isXUrl(parsed)
           ? await resolveXMediaFallback(parsed)
@@ -9179,64 +9991,103 @@ async function startServer() {
           if (!sourceUrl) {
             throw new Error('This post does not contain an audio or video stream for MP3 extraction.');
           }
-          const { stream } = await openRemoteMediaReadable(sourceUrl, { referer: resolved.referer });
-          const ffStream = spawnChildToReadable(
-            'ffmpeg',
-            ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
-            undefined,
-            {
-              stdio: ['pipe', 'pipe', 'pipe'],
-              onSpawn: (child) => {
-                child.stdin?.on('error', () => {});
-                stream.on('error', () => {
-                  if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
-                });
-                if (child.stdin) stream.pipe(child.stdin);
-              },
-            }
+          const srcPath = path.join(workDir, 'social_src.bin');
+          const outMp3 = path.join(workDir, 'social_out.mp3');
+          await downloadUrlFastToFile(sourceUrl, srcPath, {
+            referer: resolved.referer,
+            signal: abortController.signal,
+            onProgress: (dl, tot) => updateDlProgress(dl, tot, 44),
+          });
+          job.status = 'processing';
+          job.progress = Math.max(job.progress, 48);
+          await runFfmpegLocalFile(
+            ['-y', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', outMp3],
+            job
           );
-          await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
+          await fs.promises.rm(srcPath, { force: true }).catch(() => {});
+          await uploadTmpFileToLockedTelegramChannel(job, outMp3, {
+            ext: 'mp3',
+            mimeType: 'audio/mpeg',
+            progressStart: 52,
+            progressEnd: 99,
+          });
           return;
         }
 
         if (resolved.videos.length > 0) {
-          const opened = await openRemoteMediaReadable(resolved.videos[0].url, { referer: resolved.referer });
-          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+          const outMp4 = path.join(workDir, 'social_video.mp4');
+          await downloadUrlFastToFile(resolved.videos[0].url, outMp4, {
+            referer: resolved.referer,
+            signal: abortController.signal,
+            onProgress: (dl, tot) => updateDlProgress(dl, tot, 48),
+          });
+          await uploadTmpFileToLockedTelegramChannel(job, outMp4, {
             ext: 'mp4',
             mimeType: 'video/mp4',
+            progressStart: 50,
+            progressEnd: 99,
           });
           return;
         }
 
         if (resolved.photos.length > 1) {
-          const zipEntries = resolved.photos.map((p, idx) => ({
-            baseName: `photo_${idx + 1}`,
-            fetchEntry: async () => {
-              const { buffer, contentType } = await readRemoteBuffer(p.url, { referer: resolved.referer });
+          const photoNames: string[] = [];
+          await Promise.all(
+            resolved.photos.map(async (p, idx) => {
+              const tmpP = path.join(workDir, `photo_${idx + 1}.img`);
+              const { contentType } = await downloadUrlFastToFile(p.url, tmpP, {
+                referer: resolved.referer,
+                concurrency: 2,
+                signal: abortController.signal,
+              });
               const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
-              return { buffer, ext };
-            },
-          }));
-          const zipStream = createStreamingZipReadable(zipEntries);
-          await uploadStreamJobToTelegram(job, zipStream, null, { ext: 'zip', mimeType: 'application/zip' });
+              const name = `photo_${idx + 1}.${ext}`;
+              await fs.promises.rename(tmpP, path.join(workDir, name));
+              photoNames[idx] = name;
+            })
+          );
+          job.status = 'processing';
+          job.progress = 50;
+          const zipPath = path.join(workDir, 'photos.zip');
+          await execFileAsync('python3', ['-m', 'zipfile', '-c', zipPath, ...photoNames], {
+            cwd: workDir,
+            timeout: 45000,
+          });
+          await uploadTmpFileToLockedTelegramChannel(job, zipPath, {
+            ext: 'zip',
+            mimeType: 'application/zip',
+            progressStart: 52,
+            progressEnd: 99,
+          });
           return;
         }
 
         if (resolved.photos.length === 1) {
-          const opened = await openRemoteMediaReadable(resolved.photos[0].url, { referer: resolved.referer });
-          const imgExt: DownloadFileExt = opened.contentType.includes('png')
+          const tmpP = path.join(workDir, 'photo_single.img');
+          const { contentType } = await downloadUrlFastToFile(resolved.photos[0].url, tmpP, {
+            referer: resolved.referer,
+            concurrency: 2,
+            signal: abortController.signal,
+            onProgress: (dl, tot) => updateDlProgress(dl, tot, 48),
+          });
+          const imgExt: DownloadFileExt = contentType.includes('png')
             ? 'png'
-            : opened.contentType.includes('webp')
+            : contentType.includes('webp')
               ? 'webp'
               : 'jpg';
-          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
+          const finalP = path.join(workDir, `photo_single.${imgExt}`);
+          await fs.promises.rename(tmpP, finalP);
+          await uploadTmpFileToLockedTelegramChannel(job, finalP, {
             ext: imgExt,
             mimeType: getMimeTypeForExt(imgExt),
+            progressStart: 50,
+            progressEnd: 99,
           });
           return;
         }
       }
 
+      // 5. @distube/ytdl-core YouTube fallback -> /tmp -> CustomFile + workers: 16
       if (ytId) {
         const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
         try {
@@ -9252,23 +10103,37 @@ async function startServer() {
                 quality: Quality.HighestAudio,
                 filter: { hasAudio: true, hasVideo: false },
               });
-            const audioStream = ytdl.download(info, { format: audioFormat });
-            const ffStream = spawnChildToReadable(
-              'ffmpeg',
-              ['-i', 'pipe:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', 'pipe:1'],
-              undefined,
-              {
-                stdio: ['pipe', 'pipe', 'pipe'],
-                onSpawn: (child) => {
-                  child.stdin?.on('error', () => {});
-                  audioStream.on('error', () => {
-                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
-                  });
-                  if (child.stdin) audioStream.pipe(child.stdin);
-                },
-              }
+            const srcPath = path.join(workDir, 'ytdl_audio.bin');
+            const outMp3 = path.join(workDir, 'ytdl_audio.mp3');
+            if (audioFormat.url) {
+              await downloadUrlFastToFile(audioFormat.url, srcPath, {
+                concurrency: 6,
+                signal: abortController.signal,
+                onProgress: (dl, tot) => updateDlProgress(dl, tot || Number(audioFormat.contentLength) || 0, 45),
+              });
+            } else {
+              const aStream = ytdl.download(info, { format: audioFormat });
+              const totalHint = Number(audioFormat.contentLength) || 0;
+              let dl = 0;
+              aStream.on('data', (c: Buffer) => {
+                dl += c.byteLength;
+                updateDlProgress(dl, totalHint, 45);
+              });
+              await pipeline(aStream, fs.createWriteStream(srcPath), { signal: abortController.signal });
+            }
+            job.status = 'processing';
+            job.progress = Math.max(job.progress, 48);
+            await runFfmpegLocalFile(
+              ['-y', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', outMp3],
+              job
             );
-            await uploadStreamJobToTelegram(job, ffStream, null, { ext: 'mp3', mimeType: 'audio/mpeg' });
+            await fs.promises.rm(srcPath, { force: true }).catch(() => {});
+            await uploadTmpFileToLockedTelegramChannel(job, outMp3, {
+              ext: 'mp3',
+              mimeType: 'audio/mpeg',
+              progressStart: 52,
+              progressEnd: 99,
+            });
             return;
           }
 
@@ -9283,9 +10148,29 @@ async function startServer() {
 
           const bestMuxed = muxedFormats[0];
           if (!customAudioFormat && bestMuxed && getVideoFormatResolution(bestMuxed) >= targetH && bestMuxed.container === 'mp4') {
-            const totalHint = Number(bestMuxed.contentLength) || null;
-            const stream = ytdl.download(info, { format: bestMuxed });
-            await uploadStreamJobToTelegram(job, stream, totalHint, { ext: 'mp4', mimeType: 'video/mp4' });
+            const outMp4 = path.join(workDir, 'ytdl_muxed.mp4');
+            if (bestMuxed.url) {
+              await downloadUrlFastToFile(bestMuxed.url, outMp4, {
+                concurrency: 8,
+                signal: abortController.signal,
+                onProgress: (dl, tot) => updateDlProgress(dl, tot || Number(bestMuxed.contentLength) || 0, 48),
+              });
+            } else {
+              const stream = ytdl.download(info, { format: bestMuxed });
+              const totalHint = Number(bestMuxed.contentLength) || 0;
+              let dl = 0;
+              stream.on('data', (c: Buffer) => {
+                dl += c.byteLength;
+                updateDlProgress(dl, totalHint, 48);
+              });
+              await pipeline(stream, fs.createWriteStream(outMp4), { signal: abortController.signal });
+            }
+            await uploadTmpFileToLockedTelegramChannel(job, outMp4, {
+              ext: 'mp4',
+              mimeType: 'video/mp4',
+              progressStart: 50,
+              progressEnd: 99,
+            });
             return;
           }
 
@@ -9301,96 +10186,165 @@ async function startServer() {
             });
 
           if (videoFormat && audioFormat && !videoFormat.hasAudio) {
-            const vStream = ytdl.download(info, { format: videoFormat });
-            const aStream = ytdl.download(info, { format: audioFormat });
+            const vPath = path.join(workDir, 'ytdl_v.bin');
+            const aPath = path.join(workDir, 'ytdl_a.bin');
+            const outMp4 = path.join(workDir, 'ytdl_out.mp4');
+            let vDl = 0;
+            let aDl = 0;
+            let vTot = Number(videoFormat.contentLength) || 0;
+            let aTot = Number(audioFormat.contentLength) || 0;
+            const updateDual = () => updateDlProgress(vDl + aDl, vTot + aTot, 46);
+
+            await Promise.all([
+              videoFormat.url
+                ? downloadUrlFastToFile(videoFormat.url, vPath, {
+                    concurrency: 6,
+                    signal: abortController.signal,
+                    onProgress: (dl, tot) => {
+                      vDl = dl;
+                      if (tot > 0) vTot = tot;
+                      updateDual();
+                    },
+                  })
+                : (async () => {
+                    const vs = ytdl.download(info, { format: videoFormat });
+                    vs.on('data', (c: Buffer) => {
+                      vDl += c.byteLength;
+                      updateDual();
+                    });
+                    await pipeline(vs, fs.createWriteStream(vPath), { signal: abortController.signal });
+                  })(),
+              audioFormat.url
+                ? downloadUrlFastToFile(audioFormat.url, aPath, {
+                    concurrency: 4,
+                    signal: abortController.signal,
+                    onProgress: (dl, tot) => {
+                      aDl = dl;
+                      if (tot > 0) aTot = tot;
+                      updateDual();
+                    },
+                  })
+                : (async () => {
+                    const as = ytdl.download(info, { format: audioFormat });
+                    as.on('data', (c: Buffer) => {
+                      aDl += c.byteLength;
+                      updateDual();
+                    });
+                    await pipeline(as, fs.createWriteStream(aPath), { signal: abortController.signal });
+                  })(),
+            ]);
+
+            job.status = 'processing';
+            job.progress = Math.max(job.progress, 49);
             const canCopyYtdlAudio =
               Boolean(audioFormat.audioCodec && audioFormat.audioCodec.toLowerCase().includes('mp4a')) ||
               audioFormat.container === 'mp4' ||
               audioFormat.container === 'm4a';
-            const ffStream = spawnChildToReadable(
-              'ffmpeg',
+            await runFfmpegLocalFile(
               [
+                '-y',
                 '-hide_banner',
                 '-loglevel',
                 'error',
-                '-thread_queue_size',
-                '1024',
                 '-i',
-                'pipe:3',
-                '-thread_queue_size',
-                '1024',
+                vPath,
                 '-i',
-                'pipe:4',
+                aPath,
                 '-c:v',
                 'copy',
                 ...(canCopyYtdlAudio ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '192k']),
                 '-movflags',
-                'frag_keyframe+empty_moov+default_base_moof',
+                '+faststart',
                 '-f',
                 'mp4',
-                'pipe:1',
+                outMp4,
               ],
-              undefined,
-              {
-                stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
-                onSpawn: (child) => {
-                  const pipe3 = child.stdio[3] as NodeJS.WritableStream | null;
-                  const pipe4 = child.stdio[4] as NodeJS.WritableStream | null;
-                  pipe3?.on('error', () => {});
-                  pipe4?.on('error', () => {});
-                  vStream.on('error', () => {
-                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
-                  });
-                  aStream.on('error', () => {
-                    if (child.exitCode === null && !child.killed) child.kill('SIGTERM');
-                  });
-                  if (pipe3) vStream.pipe(pipe3);
-                  if (pipe4) aStream.pipe(pipe4);
-                },
-              }
+              job
             );
-            const estYtdlBytes =
-              (Number(videoFormat.contentLength) || 0) + (Number(audioFormat.contentLength) || 0) || null;
-            await uploadStreamJobToTelegram(job, ffStream, null, {
+            await Promise.all([
+              fs.promises.rm(vPath, { force: true }).catch(() => {}),
+              fs.promises.rm(aPath, { force: true }).catch(() => {}),
+            ]);
+            await uploadTmpFileToLockedTelegramChannel(job, outMp4, {
               ext: 'mp4',
               mimeType: 'video/mp4',
-              estimatedTotalBytes: estYtdlBytes,
+              progressStart: 52,
+              progressEnd: 99,
             });
             return;
           } else if (videoFormat) {
-            const stream = ytdl.download(info, { format: videoFormat });
-            await uploadStreamJobToTelegram(job, stream, Number(videoFormat.contentLength) || null, {
+            const outMp4 = path.join(workDir, 'ytdl_single.mp4');
+            if (videoFormat.url) {
+              await downloadUrlFastToFile(videoFormat.url, outMp4, {
+                concurrency: 8,
+                signal: abortController.signal,
+                onProgress: (dl, tot) => updateDlProgress(dl, tot || Number(videoFormat.contentLength) || 0, 48),
+              });
+            } else {
+              const stream = ytdl.download(info, { format: videoFormat });
+              const totalHint = Number(videoFormat.contentLength) || 0;
+              let dl = 0;
+              stream.on('data', (c: Buffer) => {
+                dl += c.byteLength;
+                updateDlProgress(dl, totalHint, 48);
+              });
+              await pipeline(stream, fs.createWriteStream(outMp4), { signal: abortController.signal });
+            }
+            await uploadTmpFileToLockedTelegramChannel(job, outMp4, {
               ext: 'mp4',
               mimeType: 'video/mp4',
+              progressStart: 50,
+              progressEnd: 99,
             });
             return;
           }
-        } catch {
+        } catch (ytdlErr) {
+          if (job.cancelled || isFatalTelegramUploadError(ytdlErr)) throw ytdlErr;
           // Fall through to direct URL or preview container
         }
       }
 
-      // Check direct video/audio file URL
+      // 6. Direct HTTP/HTTPS media download -> /tmp (parallel range) -> CustomFile + sendFile(workers: 16)
       try {
-        const headRes = await fetch(parsed.toString(), {
-          method: 'HEAD',
-          signal: AbortSignal.timeout(4000),
-        });
-        const ct = headRes.headers.get('content-type') || '';
-        if (ct.startsWith('video/') || ct.startsWith('audio/')) {
-          const opened = await openRemoteMediaReadable(parsed.toString());
-          const ext: DownloadFileExt = ct.startsWith('audio/') ? 'mp3' : 'mp4';
-          await uploadStreamJobToTelegram(job, opened.stream, opened.contentLength, {
-            ext,
-            mimeType: ct.split(';')[0].trim() || getMimeTypeForExt(ext),
+        const directProbe = await openHttpRequestWithRedirects(parsed.toString(), {}, 6000, abortController.signal);
+        const ct = String(directProbe.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+        directProbe.stream.destroy();
+        const isDirectMediaType =
+          ct.startsWith('video/') ||
+          ct.startsWith('audio/') ||
+          ct.startsWith('image/') ||
+          ct === 'application/octet-stream' ||
+          /\.(mp4|mkv|webm|mov|avi|mp3|m4a|ogg|wav|flac|zip|pdf|png|jpe?g|webp)$/i.test(parsed.pathname);
+        if (
+          directProbe.statusCode < 400 &&
+          isDirectMediaType &&
+          !ct.startsWith('text/html') &&
+          !ct.startsWith('application/json') &&
+          !ct.startsWith('text/plain')
+        ) {
+          const ext = inferExtFromMimeAndPath(ct, parsed.pathname, isAudio ? 'mp3' : 'mp4');
+          const directPath = path.join(workDir, `direct.${ext}`);
+          const { sizeBytes } = await downloadUrlFastToFile(parsed.toString(), directPath, {
+            concurrency: 8,
+            signal: abortController.signal,
+            onProgress: (dl, tot) => updateDlProgress(dl, tot, 48),
           });
-          return;
+          if (sizeBytes > 0) {
+            await uploadTmpFileToLockedTelegramChannel(job, directPath, {
+              ext,
+              mimeType: ct || getMimeTypeForExt(ext),
+              progressStart: 50,
+              progressEnd: 99,
+            });
+            return;
+          }
         }
-      } catch {
+      } catch (directErr) {
+        if (job.cancelled || isFatalTelegramUploadError(directErr)) throw directErr;
         // Fall through to playable container
       }
 
-      // Fallback playable container streamed directly to Telegram (zero disk)
+      // 7. Fallback playable container written to /tmp -> upload to locked Telegram channel
       const resMap: Record<string, string> = {
         '2160p': '1920x1080',
         '1080p': '1280x720',
@@ -9398,28 +10352,33 @@ async function startServer() {
         '480p': '854x480',
         '360p': '640x360',
       };
+      const fallbackPath = path.join(workDir, isAudio ? 'fallback.mp3' : 'fallback.mp4');
       const ffArgs = isAudio
         ? [
+            '-y',
             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
             '-metadata', `title=${sanitizeFilename(job.title)}`,
             '-c:a', 'libmp3lame', '-b:a', '192k',
             '-f', 'mp3',
-            'pipe:1',
+            fallbackPath,
           ]
         : [
+            '-y',
             '-f', 'lavfi', '-i', `color=c=black:s=${resMap[job.quality] || '1280x720'}:d=3`,
             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
             '-metadata', `title=${sanitizeFilename(job.title)}`,
             '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '128k',
-            '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+            '-movflags', '+faststart',
             '-f', 'mp4',
-            'pipe:1',
+            fallbackPath,
           ];
-      const ffStream = spawnChildToReadable('ffmpeg', ffArgs);
-      await uploadStreamJobToTelegram(job, ffStream, null, {
+      await runFfmpegLocalFile(ffArgs, job);
+      await uploadTmpFileToLockedTelegramChannel(job, fallbackPath, {
         ext: isAudio ? 'mp3' : 'mp4',
         mimeType: isAudio ? 'audio/mpeg' : 'video/mp4',
+        progressStart: 50,
+        progressEnd: 99,
       });
     } catch (err) {
       if (job.cancelled) {
@@ -9429,6 +10388,9 @@ async function startServer() {
       job.status = 'error';
       job.error = sanitizeTelegramError(err, adminConfig.telegram.botToken);
       appendAppLog('error', 'download', `Telegram upload job failed (${job.title}): ${job.error}`);
+    } finally {
+      unregisterAbort();
+      await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
@@ -9612,8 +10574,6 @@ async function startServer() {
                 '-f',
                 videoFmtSelector,
                 '--merge-output-format',
-                'mp4',
-                '--recode-video',
                 'mp4',
                 '-o',
                 job.filePath,
