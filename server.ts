@@ -6827,7 +6827,12 @@ function getQueryParamCI(q: URLSearchParams, name: string): string | undefined {
   return undefined;
 }
 
-function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: number): Record<string, unknown> {
+function buildXrayRuntimeConfig(
+  rawInput: string,
+  socksPort: number,
+  httpPort: number,
+  options?: { testMode?: boolean }
+): Record<string, unknown> {
   const input = rawInput.trim();
   if (!input) {
     throw new Error('Xray configuration is empty.');
@@ -6858,9 +6863,11 @@ function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: n
       throw new Error('JSON config must include a non-empty "outbounds" array.');
     }
     const existingInbounds = Array.isArray(parsed.inbounds) ? (parsed.inbounds as Record<string, unknown>[]) : [];
-    const filteredInbounds = existingInbounds.filter(
-      (ib) => ib && ib.port !== socksPort && ib.port !== httpPort && ib.tag !== 'socks-in' && ib.tag !== 'http-in'
-    );
+    const filteredInbounds = options?.testMode
+      ? []
+      : existingInbounds.filter(
+          (ib) => ib && ib.port !== socksPort && ib.port !== httpPort && ib.tag !== 'socks-in' && ib.tag !== 'http-in'
+        );
     return normalizeXrayConfigForCompatibility({
       ...parsed,
       log: { loglevel: 'warning' },
@@ -7137,7 +7144,10 @@ function parseXrayProfilesInput(rawInput: string): {
   return { profiles, errors };
 }
 
-function getFreeLocalPort(): Promise<number> {
+const reservedXrayTestPorts = new Set<number>();
+let xrayPortAllocQueue: Promise<unknown> = Promise.resolve();
+
+function bindEphemeralLocalServer(): Promise<{ server: net.Server; port: number }> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.unref();
@@ -7145,10 +7155,95 @@ function getFreeLocalPort(): Promise<number> {
     srv.listen(0, '127.0.0.1', () => {
       const addr = srv.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close(() => {
-        if (port > 0) resolve(port);
-        else reject(new Error('Failed to allocate local port'));
-      });
+      if (port > 0) {
+        resolve({ server: srv, port });
+      } else {
+        srv.close(() => reject(new Error('Failed to allocate local port')));
+      }
+    });
+  });
+}
+
+function closeServerQuietly(srv: net.Server): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      srv.close(() => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function getFreeLocalPort(): Promise<number> {
+  return bindEphemeralLocalServer().then(async ({ server, port }) => {
+    await closeServerQuietly(server);
+    return port;
+  });
+}
+
+async function allocateXrayTestPortPair(): Promise<{ socksPort: number; httpPort: number }> {
+  const run = async () => {
+    const heldServers: net.Server[] = [];
+    const busyPorts = new Set<number>([
+      ...reservedXrayTestPorts,
+      adminConfig.xray.socksPort,
+      adminConfig.xray.httpPort,
+      adminConfig.potProvider.port,
+    ]);
+
+    const acquireDistinct = async (): Promise<number> => {
+      for (let attempt = 0; attempt < 25; attempt++) {
+        const { server, port } = await bindEphemeralLocalServer();
+        heldServers.push(server);
+        if (!busyPorts.has(port)) {
+          busyPorts.add(port);
+          return port;
+        }
+      }
+      throw new Error('Unable to allocate an unused local port for Xray test tunnel.');
+    };
+
+    try {
+      const socksPort = await acquireDistinct();
+      const httpPort = await acquireDistinct();
+      reservedXrayTestPorts.add(socksPort);
+      reservedXrayTestPorts.add(httpPort);
+      return { socksPort, httpPort };
+    } finally {
+      await Promise.all(heldServers.map((s) => closeServerQuietly(s)));
+    }
+  };
+
+  const p = xrayPortAllocQueue.then(run, run);
+  xrayPortAllocQueue = p.catch(() => {});
+  return p;
+}
+
+function releaseXrayTestPortPair(socksPort: number, httpPort: number): void {
+  reservedXrayTestPorts.delete(socksPort);
+  reservedXrayTestPorts.delete(httpPort);
+}
+
+function probeLocalPortOnce(port: number, probeTimeoutMs = 800): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    const socket = net.connect({ host: '127.0.0.1', port });
+    socket.setTimeout(probeTimeoutMs, () => {
+      socket.destroy();
+      finish(false);
+    });
+    socket.once('connect', () => {
+      socket.destroy();
+      finish(true);
+    });
+    socket.once('error', () => {
+      socket.destroy();
+      finish(false);
     });
   });
 }
@@ -7157,14 +7252,10 @@ function waitForLocalPort(port: number, timeoutMs = 3000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve) => {
     const attempt = () => {
-      const socket = net.connect({ host: '127.0.0.1', port });
-      socket.once('connect', () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once('error', () => {
-        socket.destroy();
-        if (Date.now() < deadline) {
+      void probeLocalPortOnce(port, 750).then((ok) => {
+        if (ok) {
+          resolve(true);
+        } else if (Date.now() < deadline) {
           setTimeout(attempt, 120);
         } else {
           resolve(false);
@@ -7281,43 +7372,54 @@ async function startXrayProcess(): Promise<void> {
   }
 }
 
+let xrayInstallPromise: Promise<string> | null = null;
+
 async function installXrayBinary(): Promise<string> {
-  if (process.platform !== 'linux') {
-    throw new Error('Automatic Xray installation is supported on Linux hosts only. Install xray in PATH.');
-  }
-  const archMap: Record<string, string> = {
-    x64: '64',
-    arm64: 'arm64-v8a',
-  };
-  const xrayArch = archMap[process.arch];
-  if (!xrayArch) {
-    throw new Error(`Unsupported CPU architecture: ${process.arch}`);
-  }
+  if (xrayInstallPromise) return xrayInstallPromise;
+  xrayInstallPromise = (async () => {
+    if (process.platform !== 'linux') {
+      throw new Error('Automatic Xray installation is supported on Linux hosts only. Install xray in PATH.');
+    }
+    const archMap: Record<string, string> = {
+      x64: '64',
+      arm64: 'arm64-v8a',
+    };
+    const xrayArch = archMap[process.arch];
+    if (!xrayArch) {
+      throw new Error(`Unsupported CPU architecture: ${process.arch}`);
+    }
 
-  ensureDataDir();
-  if (!fs.existsSync(BIN_DIR)) {
-    fs.mkdirSync(BIN_DIR, { recursive: true });
-  }
+    ensureDataDir();
+    if (!fs.existsSync(BIN_DIR)) {
+      fs.mkdirSync(BIN_DIR, { recursive: true });
+    }
 
-  const downloadUrl = `https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xrayArch}.zip`;
-  const zipPath = path.join(BIN_DIR, 'xray.zip');
-  const res = await fetch(downloadUrl, { signal: AbortSignal.timeout(45000) });
-  if (!res.ok || !res.body) {
-    throw new Error(`Failed to download Xray-core (HTTP ${res.status}).`);
-  }
-  const arrayBuf = await res.arrayBuffer();
-  await fs.promises.writeFile(zipPath, Buffer.from(arrayBuf));
+    const downloadUrl = `https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xrayArch}.zip`;
+    const zipPath = path.join(BIN_DIR, 'xray.zip');
+    const res = await fetch(downloadUrl, { signal: AbortSignal.timeout(45000) });
+    if (!res.ok || !res.body) {
+      throw new Error(`Failed to download Xray-core (HTTP ${res.status}).`);
+    }
+    const arrayBuf = await res.arrayBuffer();
+    await fs.promises.writeFile(zipPath, Buffer.from(arrayBuf));
+
+    try {
+      await execFileAsync('unzip', ['-o', zipPath, 'xray', '-d', BIN_DIR], { timeout: 15000 });
+    } finally {
+      await fs.promises.rm(zipPath, { force: true }).catch(() => {});
+    }
+
+    const binPath = path.join(BIN_DIR, 'xray');
+    await fs.promises.chmod(binPath, 0o755);
+    xrayState.binaryPath = binPath;
+    return binPath;
+  })();
 
   try {
-    await execFileAsync('unzip', ['-o', zipPath, 'xray', '-d', BIN_DIR], { timeout: 15000 });
+    return await xrayInstallPromise;
   } finally {
-    await fs.promises.rm(zipPath, { force: true }).catch(() => {});
+    xrayInstallPromise = null;
   }
-
-  const binPath = path.join(BIN_DIR, 'xray');
-  await fs.promises.chmod(binPath, 0o755);
-  xrayState.binaryPath = binPath;
-  return binPath;
 }
 
 async function proxyHttpGet(
@@ -7430,6 +7532,276 @@ interface ActiveXrayTestEntry {
 
 const activeXrayTests = new Map<string, ActiveXrayTestEntry>();
 
+let xrayTestSpawnQueue: Promise<void> = Promise.resolve();
+let lastXrayTestSpawnAt = 0;
+
+async function scheduleXrayTestSpawn(): Promise<void> {
+  const prev = xrayTestSpawnQueue;
+  let release!: () => void;
+  xrayTestSpawnQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  try {
+    const elapsed = Date.now() - lastXrayTestSpawnAt;
+    if (elapsed < 60) {
+      await new Promise((r) => setTimeout(r, 60 - elapsed));
+    }
+    lastXrayTestSpawnAt = Date.now();
+  } finally {
+    release();
+  }
+}
+
+async function terminateChildProcess(proc: ChildProcess | null): Promise<void> {
+  if (!proc) return;
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(sigkillTimer);
+      clearTimeout(hardTimer);
+      proc.off('exit', finish);
+      proc.off('close', finish);
+      resolve();
+    };
+
+    proc.once('exit', finish);
+    proc.once('close', finish);
+
+    const sigkillTimer = setTimeout(() => {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        try {
+          proc.kill('SIGKILL');
+        } catch {}
+      }
+    }, 450);
+
+    const hardTimer = setTimeout(finish, 1200);
+
+    try {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill('SIGTERM');
+      } else {
+        finish();
+      }
+    } catch {
+      finish();
+    }
+  });
+}
+
+function extractMeaningfulXrayError(logs: string[]): string | null {
+  const meaningful = logs.filter((line) => {
+    if (!line) return false;
+    if (/^Xray \d+\.\d+/i.test(line)) return false;
+    if (line === 'A unified platform for anti-censorship.') return false;
+    if (line.includes('[Info] infra/conf/serial: Reading config:')) return false;
+    if (/\[Warning\] core: Xray .+ started$/i.test(line)) return false;
+    return true;
+  });
+  if (meaningful.length === 0) return null;
+  const errLine = [...meaningful]
+    .reverse()
+    .find((l) => /failed|error|invalid|cannot|unable|denied|address already in use|listen/i.test(l));
+  return errLine || meaningful[meaningful.length - 1];
+}
+
+async function waitForXrayTestTunnelReady(
+  child: ChildProcess,
+  socksPort: number,
+  httpPort: number,
+  logs: string[],
+  timeoutMs = 10000,
+  abortSignal?: AbortSignal
+): Promise<{ ready: boolean; cancelled?: boolean; reason?: string; retryable?: boolean }> {
+  const deadline = Date.now() + timeoutMs;
+
+  if (abortSignal?.aborted) {
+    return { ready: false, cancelled: true, reason: 'Test cancelled' };
+  }
+
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  const onExit = () => {
+    exited = true;
+  };
+  child.once('exit', onExit);
+  child.once('error', onExit);
+
+  try {
+    while (Date.now() < deadline) {
+      if (abortSignal?.aborted) {
+        return { ready: false, cancelled: true, reason: 'Test cancelled' };
+      }
+      if (exited || child.exitCode !== null || child.signalCode !== null) {
+        // Give stdout/stderr a moment to flush final lines before reading logs
+        await new Promise((r) => setTimeout(r, 70));
+        const reason = extractMeaningfulXrayError(logs);
+        const retryable = Boolean(
+          reason && /address already in use|bind|eaddrinuse/i.test(reason)
+        );
+        return {
+          ready: false,
+          retryable,
+          reason:
+            reason ||
+            `Xray test tunnel exited early (${
+              child.signalCode ? `signal ${child.signalCode}` : `code ${child.exitCode ?? 'unknown'}`
+            }).`,
+        };
+      }
+
+      const [socksOk, httpOk] = await Promise.all([
+        probeLocalPortOnce(socksPort, 600),
+        probeLocalPortOnce(httpPort, 600),
+      ]);
+      if (socksOk && httpOk) {
+        return { ready: true };
+      }
+
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const reason = extractMeaningfulXrayError(logs);
+    return {
+      ready: false,
+      retryable: true,
+      reason:
+        reason ||
+        `Xray test tunnel timed out waiting for local ports (${socksPort}/${httpPort}) after ${Math.round(
+          timeoutMs / 1000
+        )}s.`,
+    };
+  } finally {
+    child.off('exit', onExit);
+    child.off('error', onExit);
+  }
+}
+
+async function runYtDlpWithGroupCleanup(
+  cmd: string,
+  args: string[],
+  options: {
+    timeoutMs: number;
+    maxBufferBytes: number;
+    env: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+  }
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const useProcessGroup = process.platform !== 'win32';
+    const sub = spawn(cmd, args, {
+      shell: false,
+      env: options.env,
+      detached: useProcessGroup,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+
+    const killGroup = (sig: NodeJS.Signals) => {
+      if (sub.exitCode !== null || sub.signalCode !== null) return;
+      try {
+        if (useProcessGroup && sub.pid) {
+          process.kill(-sub.pid, sig);
+        } else {
+          sub.kill(sig);
+        }
+      } catch {
+        try {
+          sub.kill(sig);
+        } catch {}
+      }
+    };
+
+    const cleanupListeners = () => {
+      clearTimeout(timeoutTimer);
+      clearTimeout(killEscalationTimer);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
+
+    let killEscalationTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const terminateGroup = () => {
+      killGroup('SIGTERM');
+      killEscalationTimer = setTimeout(() => {
+        killGroup('SIGKILL');
+      }, 400);
+    };
+
+    const onAbort = () => {
+      terminateGroup();
+    };
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+
+    const timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      terminateGroup();
+    }, options.timeoutMs);
+
+    sub.stdout.on('data', (chunk: Buffer) => {
+      if (stdout.length < options.maxBufferBytes) {
+        stdout += chunk.toString('utf8');
+      }
+    });
+    sub.stderr.on('data', (chunk: Buffer) => {
+      if (stderr.length < options.maxBufferBytes) {
+        stderr += chunk.toString('utf8');
+      }
+    });
+
+    sub.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      const wrapped = err as Error & { stderr?: string };
+      wrapped.stderr = stderr;
+      reject(wrapped);
+    });
+
+    sub.once('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      // Ensure any stray grandchildren in the process group are gone
+      if (useProcessGroup && sub.pid) {
+        try {
+          process.kill(-sub.pid, 'SIGKILL');
+        } catch {}
+      }
+      if (options.signal?.aborted) {
+        const err = new Error('Test cancelled') as Error & { stderr?: string };
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      if (timedOut) {
+        const err = new Error(`yt-dlp timed out after ${Math.round(options.timeoutMs / 1000)}s`) as Error & {
+          stderr?: string;
+        };
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        const err = new Error(
+          `Command failed with ${signal ? `signal ${signal}` : `exit code ${code}`}`
+        ) as Error & { stderr?: string };
+        err.stderr = stderr;
+        reject(err);
+      }
+    });
+  });
+}
+
 async function testXrayConfigWithYouTubeDownload(
   configInput: string,
   rawYoutubeUrl?: string,
@@ -7512,77 +7884,143 @@ async function testXrayConfigWithYouTubeDownload(
     };
   }
 
-  const socksPort = await getFreeLocalPort();
-  let httpPort = await getFreeLocalPort();
-  if (httpPort === socksPort) httpPort = await getFreeLocalPort();
-
-  let runtimeConfig: Record<string, unknown>;
-  try {
-    runtimeConfig = buildXrayRuntimeConfig(configInput, socksPort, httpPort);
-  } catch (err) {
-    return {
-      success: false,
-      latencyMs: Date.now() - started,
-      youtubeUrl: parsedUrl.toString(),
-      error: err instanceof Error ? err.message : 'Invalid Xray configuration.',
-    };
-  }
-
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-xtest-'));
   const tempXrayCfgPath = path.join(tempDir, 'xray-test.json');
-  await fs.promises.writeFile(tempXrayCfgPath, JSON.stringify(runtimeConfig, null, 2), {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
 
-  const logs: string[] = [];
-  const child = spawn(bin, ['run', '-config', tempXrayCfgPath], { shell: false });
-  const pushLog = (chunk: Buffer) => {
-    const lines = chunk
-      .toString()
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-    for (const line of lines) {
-      logs.push(line);
-      if (logs.length > 25) logs.shift();
-    }
-  };
-  child.stdout.on('data', pushLog);
-  child.stderr.on('data', pushLog);
-
-  const onAbort = () => {
-    try {
-      if (!child.killed && child.exitCode === null) {
-        child.kill('SIGTERM');
-      }
-    } catch {}
-  };
-  abortSignal?.addEventListener('abort', onAbort, { once: true });
+  let activeChild: ChildProcess | null = null;
+  let activeSocksPort = 0;
+  let activeHttpPort = 0;
+  let onAbortHandler: (() => void) | null = null;
 
   try {
-    const portReady = await waitForLocalPort(socksPort, 3500);
-    if (abortSignal?.aborted) {
-      return {
-        success: false,
-        cancelled: true,
-        latencyMs: Date.now() - started,
-        youtubeUrl: parsedUrl.toString(),
-        error: 'Test cancelled',
+    let tunnelError = 'Xray test tunnel failed to start on local port.';
+    let tunnelStarted = false;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (abortSignal?.aborted) {
+        return {
+          success: false,
+          cancelled: true,
+          latencyMs: Date.now() - started,
+          youtubeUrl: parsedUrl.toString(),
+          error: 'Test cancelled',
+        };
+      }
+
+      const { socksPort, httpPort } = await allocateXrayTestPortPair();
+      activeSocksPort = socksPort;
+      activeHttpPort = httpPort;
+
+      let runtimeConfig: Record<string, unknown>;
+      try {
+        runtimeConfig = buildXrayRuntimeConfig(configInput, socksPort, httpPort, { testMode: true });
+      } catch (err) {
+        releaseXrayTestPortPair(socksPort, httpPort);
+        activeSocksPort = 0;
+        activeHttpPort = 0;
+        return {
+          success: false,
+          latencyMs: Date.now() - started,
+          youtubeUrl: parsedUrl.toString(),
+          error: err instanceof Error ? err.message : 'Invalid Xray configuration.',
+        };
+      }
+
+      await fs.promises.writeFile(tempXrayCfgPath, JSON.stringify(runtimeConfig, null, 2), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+
+      await scheduleXrayTestSpawn();
+      if (abortSignal?.aborted) {
+        releaseXrayTestPortPair(socksPort, httpPort);
+        activeSocksPort = 0;
+        activeHttpPort = 0;
+        return {
+          success: false,
+          cancelled: true,
+          latencyMs: Date.now() - started,
+          youtubeUrl: parsedUrl.toString(),
+          error: 'Test cancelled',
+        };
+      }
+
+      const logs: string[] = [];
+      const child = spawn(bin, ['run', '-config', tempXrayCfgPath], { shell: false });
+      activeChild = child;
+
+      const pushLog = (chunk: Buffer) => {
+        const lines = chunk
+          .toString()
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+        for (const line of lines) {
+          logs.push(line);
+          if (logs.length > 30) logs.shift();
+        }
       };
+      child.stdout.on('data', pushLog);
+      child.stderr.on('data', pushLog);
+      child.on('error', (err) => {
+        logs.push(`Spawn error: ${err.message}`);
+      });
+
+      if (onAbortHandler && abortSignal) {
+        abortSignal.removeEventListener('abort', onAbortHandler);
+      }
+      onAbortHandler = () => {
+        try {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill('SIGTERM');
+          }
+        } catch {}
+      };
+      abortSignal?.addEventListener('abort', onAbortHandler, { once: true });
+
+      const readyState = await waitForXrayTestTunnelReady(child, socksPort, httpPort, logs, 10000, abortSignal);
+      if (readyState.cancelled || abortSignal?.aborted) {
+        return {
+          success: false,
+          cancelled: true,
+          latencyMs: Date.now() - started,
+          youtubeUrl: parsedUrl.toString(),
+          error: 'Test cancelled',
+        };
+      }
+
+      if (readyState.ready && child.exitCode === null && child.signalCode === null) {
+        tunnelStarted = true;
+        break;
+      }
+
+      tunnelError = readyState.reason || extractMeaningfulXrayError(logs) || tunnelError;
+
+      // Clean up failed child and ports before possible retry
+      await terminateChildProcess(child);
+      activeChild = null;
+      releaseXrayTestPortPair(socksPort, httpPort);
+      activeSocksPort = 0;
+      activeHttpPort = 0;
+
+      if (!readyState.retryable || attempt === 1) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 150));
     }
-    if (!portReady || child.killed || child.exitCode !== null) {
+
+    if (!tunnelStarted) {
       return {
         success: false,
         latencyMs: Date.now() - started,
         youtubeUrl: parsedUrl.toString(),
-        error: logs[logs.length - 1] || 'Xray test tunnel failed to start on local port.',
+        error: tunnelError.slice(0, 260),
       };
     }
 
     let exitIp: string | null = null;
     try {
-      const ipRes = await proxyHttpGet('https://api.ipify.org?format=json', httpPort, 6000);
+      const ipRes = await proxyHttpGet('https://api.ipify.org?format=json', activeHttpPort, 6000);
       if (ipRes.statusCode === 200) {
         const parsedIp = JSON.parse(ipRes.body) as { ip?: string };
         exitIp = parsedIp.ip || null;
@@ -7602,8 +8040,8 @@ async function testXrayConfigWithYouTubeDownload(
     }
 
     const { extraArgs, env } = await getYtDlpAuthAndProxy({ skipProxy: true });
-    const socksProxy = `socks5h://127.0.0.1:${socksPort}`;
-    const httpProxy = `http://127.0.0.1:${httpPort}`;
+    const socksProxy = `socks5h://127.0.0.1:${activeSocksPort}`;
+    const httpProxy = `http://127.0.0.1:${activeHttpPort}`;
     const testEnv: NodeJS.ProcessEnv = {
       ...env,
       ALL_PROXY: socksProxy,
@@ -7640,9 +8078,9 @@ async function testXrayConfigWithYouTubeDownload(
       [...extraArgs, '--proxy', socksProxy]
     );
 
-    const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...ytdlpArgs], {
-      timeout: 45000,
-      maxBuffer: 4 * 1024 * 1024,
+    const { stdout } = await runYtDlpWithGroupCleanup(runner.cmd, [...runner.baseArgs, ...ytdlpArgs], {
+      timeoutMs: 45000,
+      maxBufferBytes: 4 * 1024 * 1024,
       env: testEnv,
       signal: abortSignal,
     });
@@ -7703,14 +8141,13 @@ async function testXrayConfigWithYouTubeDownload(
       error: reason.slice(0, 260),
     };
   } finally {
-    abortSignal?.removeEventListener('abort', onAbort);
-    try {
-      if (!child.killed && child.exitCode === null) {
-        child.kill('SIGTERM');
-        await new Promise((r) => setTimeout(r, 200));
-        if (child.exitCode === null) child.kill('SIGKILL');
-      }
-    } catch {}
+    if (onAbortHandler && abortSignal) {
+      abortSignal.removeEventListener('abort', onAbortHandler);
+    }
+    await terminateChildProcess(activeChild);
+    if (activeSocksPort || activeHttpPort) {
+      releaseXrayTestPortPair(activeSocksPort, activeHttpPort);
+    }
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
