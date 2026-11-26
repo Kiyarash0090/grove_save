@@ -689,26 +689,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
           'Supports pinterest.com, international Pinterest domains, and pin.it short links',
         ],
       },
-      {
-        id: 'telegram',
-        name: 'Telegram',
-        badge: 'Public Posts',
-        items: [
-          'Download media from public Telegram channel & post links (t.me/...)',
-          'Supports videos, audio tracks, photos, and shared files',
-          'Inline streaming preview for compatible video posts',
-        ],
-      },
-      {
-        id: 'other',
-        name: 'Other Platforms',
-        badge: '100+ Public Sites',
-        items: [
-          'Supports SoundCloud, Vimeo, Reddit, Facebook, Twitch, Dailymotion, and direct media links',
-          'Automatic quality selection, MP3 audio conversion, and subtitle downloads where available',
-          'Fast link inspection showing title, creator, duration, and estimated file size',
-        ],
-      },
     ],
     infoFeaturesGeneral: [
       {
@@ -1125,26 +1105,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
           'دانلود کاروسل‌های چندتصویری با فایل ZIP همراه با پیش‌نمایش صفحه‌ای همه تصاویر',
           'دانلود پین‌های ویدیویی (MP4 و استریم HLS)، گیف متحرک و استخراج صوت MP3',
           'پشتیبانی کامل از لینک‌های pinterest و لینک‌های کوتاه pin.it',
-        ],
-      },
-      {
-        id: 'telegram',
-        name: 'تلگرام (Telegram)',
-        badge: 'پست‌های عمومی',
-        items: [
-          'دانلود مستقیم رسانه از لینک پست‌ها و کانال‌های عمومی تلگرام (t.me/...)',
-          'پشتیبانی از ویدیو، فایل صوتی، عکس و فایل‌های رسانه‌ای اشتراک‌گذاری شده',
-          'پخش آنلاین برای پست‌های ویدیویی سازگار',
-        ],
-      },
-      {
-        id: 'other',
-        name: 'سایر پلتفرم‌ها',
-        badge: 'صدها سایت پشتیبانی‌شده',
-        items: [
-          'پشتیبانی از SoundCloud، Vimeo، Reddit، Facebook، Twitch، Dailymotion و لینک‌های مستقیم رسانه',
-          'تشخیص خودکار کیفیت‌ها، تبدیل به صوت MP3 و دریافت زیرنویس در صورت پشتیبانی پلتفرم',
-          'نمایش مشخصات کامل لینک شامل عنوان، سازنده، مدت‌زمان و حجم تقریبی فایل',
         ],
       },
     ],
@@ -1565,26 +1525,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
           'Поддержка доменов pinterest.* и коротких ссылок pin.it',
         ],
       },
-      {
-        id: 'telegram',
-        name: 'Telegram',
-        badge: 'Публичные посты',
-        items: [
-          'Прямая загрузка медиа из публичных постов и каналов Telegram (t.me/...)',
-          'Поддержка видео, аудиофайлов, фото и медиадокументов',
-          'Онлайн-просмотр совместимых видеопостов',
-        ],
-      },
-      {
-        id: 'other',
-        name: 'Другие платформы',
-        badge: 'Сотни сайтов',
-        items: [
-          'Поддержка SoundCloud, Vimeo, Reddit, Facebook, Twitch, Dailymotion и прямых медиассылок',
-          'Автовыбор доступных качеств, конвертация в MP3 и загрузка субтитров',
-          'Быстрый анализ ссылки: название, автор, длительность и примерный размер файла',
-        ],
-      },
     ],
     infoFeaturesGeneral: [
       {
@@ -1999,26 +1939,6 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
           '多图轮播自动打包为 ZIP 下载，并支持应用内分页浏览全部图片',
           '支持下载视频图钉（MP4 与 HLS 流）、GIF 动图或提取 MP3 音频',
           '完整支持 pinterest.* 各地区域名及 pin.it 短链接',
-        ],
-      },
-      {
-        id: 'telegram',
-        name: 'Telegram',
-        badge: '公开频道与帖子',
-        items: [
-          '支持通过公开 Telegram 帖子链接 (t.me/...) 直接下载媒体',
-          '支持视频、音频、图片及共享媒体文件',
-          '兼容视频帖子支持应用内在线预览播放',
-        ],
-      },
-      {
-        id: 'other',
-        name: '其他支持平台',
-        badge: '数百个公开站点',
-        items: [
-          '支持 SoundCloud、Vimeo、Reddit、Facebook、Twitch、Dailymotion 及直链媒体',
-          '自动识别清晰度、MP3 音频提取及可用字幕下载',
-          '快速解析标题、作者、时长与预估文件大小',
         ],
       },
     ],

@@ -2230,7 +2230,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       {linkCopied ? <Check className="w-4 h-4 shrink-0" /> : <Link2 className="w-4 h-4 shrink-0" />}
                       <span>{linkCopied ? t.linkCopied : t.copyDownloadLink}</span>
                     </button>
-                    {isTelegramReady && (
+                    {isAdmin && isTelegramReady && (
                       <span className="min-h-[44px] px-3 rounded-xl border border-black/10 dark:border-white/15 bg-black/[0.03] dark:bg-white/[0.05] text-[11px] font-medium text-zinc-600 dark:text-zinc-300 inline-flex items-center gap-1.5">
                         <Send className="w-3.5 h-3.5 shrink-0" />
                         <span>Telegram</span>
@@ -2437,7 +2437,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     <span className="text-xs font-semibold text-white truncate">
                       {historyPlayer.item.title}
                     </span>
-                    {historyPlayer.fromTelegram && (
+                    {historyPlayer.fromTelegram && isAdmin && (
                       <span className="px-1.5 py-0.5 rounded-md bg-white/10 text-[10px] font-medium text-zinc-200 inline-flex items-center gap-1 shrink-0">
                         <Send className="w-2.5 h-2.5" />
                         <span>{t.historyTelegramStream}</span>
