@@ -5,6 +5,8 @@ import {
   Captions,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ClipboardPaste,
   CloudDownload,
   Copy,
@@ -41,7 +43,7 @@ export interface MediaSubtitleTrack {
   isAuto: boolean;
 }
 
-export type ProviderGlow = 'default' | 'red' | 'instagram' | 'tiktok' | 'x';
+export type ProviderGlow = 'default' | 'red' | 'instagram' | 'tiktok' | 'x' | 'pinterest';
 
 export interface MediaMetadata {
   url: string;
@@ -49,6 +51,7 @@ export interface MediaMetadata {
   author: string;
   durationSeconds: number | null;
   thumbnail: string | null;
+  previewImages?: string[];
   providerGlow: ProviderGlow;
   isVertical?: boolean;
   mediaKind?: string;
@@ -65,6 +68,9 @@ export interface MediaMetadata {
 export interface SavedItem {
   id: string;
   jobId?: string;
+  fileId?: string;
+  mimeType?: string;
+  fileName?: string;
   url: string;
   title: string;
   author: string;
@@ -100,6 +106,7 @@ interface DownloaderViewProps {
   defaultQuality: string;
   history: SavedItem[];
   onAddHistory: (item: SavedItem) => void;
+  onDeleteHistoryItem?: (itemId: string) => void;
   onProviderGlowChange: (glow: ProviderGlow) => void;
   isGuest?: boolean;
   isAdmin?: boolean;
@@ -192,8 +199,11 @@ export function isInstagramUrlString(raw: string): boolean {
 }
 
 export function isTikTokUrlString(raw: string): boolean {
-  const lower = raw.trim().toLowerCase();
-  if (!lower) return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const embedded = trimmed.match(/https?:\/\/\S+/i);
+  const candidate = (embedded ? embedded[0] : trimmed).replace(/[.,!?)\]'"»]+$/, '');
+  const lower = candidate.toLowerCase();
   try {
     const parsed = new URL(lower.startsWith('http') ? lower : `https://${lower}`);
     const h = parsed.hostname;
@@ -204,8 +214,11 @@ export function isTikTokUrlString(raw: string): boolean {
 }
 
 export function isXUrlString(raw: string): boolean {
-  const lower = raw.trim().toLowerCase();
-  if (!lower) return false;
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const embedded = trimmed.match(/https?:\/\/\S+/i);
+  const candidate = (embedded ? embedded[0] : trimmed).replace(/[.,!?)\]'"»]+$/, '');
+  const lower = candidate.toLowerCase();
   try {
     const parsed = new URL(lower.startsWith('http') ? lower : `https://${lower}`);
     const h = parsed.hostname;
@@ -224,6 +237,23 @@ export function isXUrlString(raw: string): boolean {
   }
 }
 
+export function isPinterestUrlString(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const embedded = trimmed.match(/https?:\/\/\S+/i);
+  const candidate = (embedded ? embedded[0] : trimmed).replace(/[.,!?)\]'"»]+$/, '');
+  const lower = candidate.toLowerCase();
+  try {
+    const parsed = new URL(lower.startsWith('http') ? lower : `https://${lower}`);
+    const h = parsed.hostname;
+    if (h === 'pin.it' || h.endsWith('.pin.it')) return true;
+    if (h === 'pinterest.com' || h.endsWith('.pinterest.com')) return true;
+    return /^(?:[a-z]{2,3}\.)?pinterest\.(?:com|co\.[a-z]{2}|[a-z]{2,3})$/i.test(h);
+  } catch {
+    return /(?:pinterest\.[a-z]{2,3}|pin\.it)/.test(lower);
+  }
+}
+
 function formatDuration(sec: number | null): string | null {
   if (sec === null || !Number.isFinite(sec) || sec <= 0) return null;
   const total = Math.floor(sec);
@@ -239,7 +269,24 @@ function formatDuration(sec: number | null): string | null {
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '—';
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function sanitizePreviewImageUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith('/api/media/thumbnail?')) return trimmed;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export const DownloaderView: React.FC<DownloaderViewProps> = ({
@@ -248,6 +295,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   defaultQuality,
   history,
   onAddHistory,
+  onDeleteHistoryItem,
   onProviderGlowChange,
   isGuest = false,
   isAdmin = false,
@@ -268,6 +316,11 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
 
   const [imgFailed, setImgFailed] = useState(false);
   const [showPlayer, setShowPlayer] = useState(false);
+  const [imagePageIdx, setImagePageIdx] = useState(0);
+  const [failedGalleryIndices, setFailedGalleryIndices] = useState<Record<number, boolean>>({});
+  const [previewTab, setPreviewTab] = useState<'video' | 'photos'>('video');
+  const galleryTouchStartXRef = useRef<number | null>(null);
+  const galleryThumbRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [audioOnlyMode, setAudioOnlyMode] = useState(false);
   const [selectedAudioFormatId, setSelectedAudioFormatId] = useState<string>('');
   const [selectedSubtitle, setSelectedSubtitle] = useState<MediaSubtitleTrack | null>(null);
@@ -285,6 +338,15 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   const pollTimerRef = useRef<number | null>(null);
   const activeJobIdRef = useRef<string | null>(null);
   const [cancellingJob, setCancellingJob] = useState(false);
+
+  const [historyPlayer, setHistoryPlayer] = useState<{
+    item: SavedItem;
+    src: string;
+    kind: 'video' | 'audio' | 'image';
+    fromTelegram: boolean;
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
 
   const [adminLogs, setAdminLogs] = useState<AdminLogEntry[]>([]);
   const [adminLogLevel, setAdminLogLevel] = useState<'all' | 'info' | 'warn' | 'error'>('all');
@@ -401,7 +463,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
           ? 'tiktok'
           : isXUrlString(urlInput) || media?.providerGlow === 'x'
             ? 'x'
-            : 'default';
+            : isPinterestUrlString(urlInput) || media?.providerGlow === 'pinterest'
+              ? 'pinterest'
+              : 'default';
 
   useEffect(() => {
     onProviderGlowChange(providerGlow);
@@ -410,6 +474,13 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
   useEffect(() => {
     setSelectedQuality(defaultQuality === 'audio' ? '1080p' : defaultQuality);
   }, [defaultQuality]);
+
+  useEffect(() => {
+    const activeThumb = galleryThumbRefs.current[imagePageIdx];
+    if (activeThumb) {
+      activeThumb.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    }
+  }, [imagePageIdx, showPlayer, previewTab]);
 
   useEffect(() => {
     return () => {
@@ -426,10 +497,11 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     }
   };
 
-  const inspectUrl = async (targetRaw: string) => {
+  const inspectUrl = async (targetRaw: string, force = false) => {
     const trimmed = targetRaw.trim();
     if (!trimmed) return;
-    let normalized = trimmed;
+    const embeddedMatch = trimmed.match(/https?:\/\/\S+/i);
+    let normalized = (embeddedMatch ? embeddedMatch[0] : trimmed).replace(/[.,!?)\]'"»]+$/, '');
     if (!/^https?:\/\//i.test(normalized)) {
       normalized = `https://${normalized}`;
     }
@@ -439,12 +511,16 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
         setErrorMsg(t.invalidUrlError);
         return;
       }
+      normalized = check.toString();
+      if (embeddedMatch && normalized !== urlInput) {
+        setUrlInput(normalized);
+      }
     } catch {
       setErrorMsg(t.invalidUrlError);
       return;
     }
 
-    if (lastInspectedRef.current === normalized && (media || inspecting)) return;
+    if (!force && lastInspectedRef.current === normalized && (media || inspecting)) return;
     lastInspectedRef.current = normalized;
 
     stopPolling();
@@ -455,6 +531,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     setSavedConfirmed(false);
     setImgFailed(false);
     setShowPlayer(false);
+    setImagePageIdx(0);
+    setFailedGalleryIndices({});
+    setPreviewTab('video');
     setAudioOnlyMode(false);
     setPlayerError(null);
     setUseYoutubeEmbed(false);
@@ -492,30 +571,64 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
         const normalizedQualities = filteredQualities.length
           ? filteredQualities
           : ['1080p', '720p', '480p', '360p'];
+        const qualitySizes: Record<string, number> | undefined =
+          data.qualitySizes && typeof data.qualitySizes === 'object'
+            ? Object.fromEntries(
+                Object.entries(data.qualitySizes as Record<string, unknown>).filter(
+                  ([, v]) => typeof v === 'number' && Number.isFinite(v) && v > 0
+                ) as Array<[string, number]>
+              )
+            : undefined;
         const nextGlow: ProviderGlow =
           data.providerGlow === 'red'
             ? 'red'
             : data.providerGlow === 'instagram'
               ? 'instagram'
-              : 'default';
+              : data.providerGlow === 'tiktok'
+                ? 'tiktok'
+                : data.providerGlow === 'x'
+                  ? 'x'
+                  : data.providerGlow === 'pinterest'
+                    ? 'pinterest'
+                    : 'default';
+        const safeThumb = sanitizePreviewImageUrl(data.thumbnail);
+        const rawPreviewImages: unknown[] = Array.isArray(data.previewImages) ? data.previewImages : [];
+        const previewSeen = new Set<string>();
+        const previewImages: string[] = [];
+        for (const candidate of rawPreviewImages) {
+          const clean = sanitizePreviewImageUrl(candidate);
+          if (clean && !previewSeen.has(clean)) {
+            previewSeen.add(clean);
+            previewImages.push(clean);
+          }
+        }
+        const resolvedHasVideo = typeof data.hasVideo === 'boolean' ? data.hasVideo : true;
+        if (!resolvedHasVideo && previewImages.length === 0 && safeThumb) {
+          previewImages.push(safeThumb);
+        }
         setSelectedQuality((prev) => (normalizedQualities.includes(prev) ? prev : normalizedQualities[0]));
         setMedia({
           url: normalized,
           title: data.title,
           author: data.author,
           durationSeconds: data.durationSeconds,
-          thumbnail: data.thumbnail,
+          thumbnail: safeThumb || previewImages[0] || null,
+          previewImages,
           providerGlow: nextGlow,
           isVertical: Boolean(data.isVertical) || isYouTubeShortsUrlString(normalized),
           mediaKind: typeof data.mediaKind === 'string' ? data.mediaKind : undefined,
-          hasVideo: typeof data.hasVideo === 'boolean' ? data.hasVideo : true,
+          hasVideo: resolvedHasVideo,
           itemCount: typeof data.itemCount === 'number' ? data.itemCount : undefined,
           qualities: normalizedQualities,
+          qualitySizes,
           engineMode: data.engineMode,
           audioTracks,
           manualSubtitles,
           autoSubtitles,
         });
+        if (!resolvedHasVideo && (previewImages.length > 0 || safeThumb)) {
+          setShowPlayer(true);
+        }
       }
     } catch {
       setErrorMsg(t.inspectFailed);
@@ -537,7 +650,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
       stopPolling();
       return;
     }
-    if (!/^https?:\/\/[^\s.]+\.[^\s]+/i.test(trimmed)) return;
+    if (!/https?:\/\/[^\s.]+\.[^\s]+/i.test(trimmed)) return;
     if (lastInspectedRef.current === trimmed) return;
     const timer = setTimeout(() => {
       inspectUrl(trimmed);
@@ -692,6 +805,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             onAddHistory({
               id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
               jobId,
+              ...(job.fileId ? { fileId: job.fileId } : {}),
               url: targetUrl,
               title,
               author,
@@ -829,21 +943,157 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
     startAppDownload(item.url, item.title, item.quality, item.thumbnail, item.author);
   };
 
+  const handleHistoryPlay = async (item: SavedItem) => {
+    if (historyPlayer?.item.id === item.id && !historyPlayer.error) {
+      setHistoryPlayer(null);
+      return;
+    }
+
+    setHistoryPlayer({
+      item,
+      src: '',
+      kind: item.quality === 'audio' ? 'audio' : 'video',
+      fromTelegram: Boolean(item.fileId),
+      loading: true,
+      error: null,
+    });
+
+    try {
+      let resolvedFileId = item.fileId || null;
+      let resolvedMime = (item.mimeType || '').toLowerCase();
+      let resolvedName = (item.fileName || '').toLowerCase();
+
+      if (!resolvedFileId && item.jobId) {
+        try {
+          const check = await fetch(`${apiBase}/api/media/jobs/${encodeURIComponent(item.jobId)}`);
+          if (check.ok) {
+            const data = (await check.json()) as { fileId?: string | null };
+            if (typeof data.fileId === 'string' && data.fileId) {
+              resolvedFileId = data.fileId;
+            }
+          }
+        } catch {
+          // Continue to stream fallback
+        }
+      }
+
+      if (resolvedFileId) {
+        try {
+          const infoRes = await fetch(`${apiBase}/api/download/${encodeURIComponent(resolvedFileId)}/info`);
+          if (infoRes.ok) {
+            const info = (await infoRes.json()) as { mimeType?: string; fileName?: string };
+            if (typeof info.mimeType === 'string') resolvedMime = info.mimeType.toLowerCase();
+            if (typeof info.fileName === 'string') resolvedName = info.fileName.toLowerCase();
+          }
+        } catch {
+          // Keep existing metadata
+        }
+
+        if (resolvedMime === 'application/zip' || resolvedName.endsWith('.zip')) {
+          setHistoryPlayer({
+            item,
+            src: '',
+            kind: 'video',
+            fromTelegram: true,
+            loading: false,
+            error: t.historyZipUnsupported,
+          });
+          return;
+        }
+
+        const streamUrl = `${apiBase}/api/download/${encodeURIComponent(resolvedFileId)}?inline=1`;
+        const probe = await fetch(streamUrl, { method: 'HEAD' });
+        if (!probe.ok) {
+          let detail = '';
+          try {
+            const failed = await fetch(streamUrl, { headers: { Range: 'bytes=0-0' } });
+            const body = (await failed.json()) as { error?: string };
+            if (typeof body?.error === 'string') detail = body.error;
+          } catch {
+            // ignore
+          }
+          setHistoryPlayer({
+            item,
+            src: '',
+            kind: 'video',
+            fromTelegram: true,
+            loading: false,
+            error: detail || t.historyStreamError,
+          });
+          return;
+        }
+
+        const kind: 'video' | 'audio' | 'image' =
+          resolvedMime.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(resolvedName)
+            ? 'image'
+            : resolvedMime.startsWith('audio/') ||
+                /\.(mp3|m4a|ogg|wav)$/i.test(resolvedName) ||
+                item.quality === 'audio'
+              ? 'audio'
+              : 'video';
+
+        setHistoryPlayer({
+          item,
+          src: streamUrl,
+          kind,
+          fromTelegram: true,
+          loading: false,
+          error: null,
+        });
+        return;
+      }
+
+      // Fallback when fileId is not directly attached: /api/media/stream also checks persisted Telegram files by jobId or URL+quality
+      const streamQuality = item.quality === 'audio' ? '360p' : item.quality;
+      const fallbackUrl = `${apiBase}/api/media/stream?url=${encodeURIComponent(
+        item.url
+      )}&quality=${encodeURIComponent(streamQuality)}${
+        item.jobId ? `&jobId=${encodeURIComponent(item.jobId)}` : ''
+      }`;
+      setHistoryPlayer({
+        item,
+        src: fallbackUrl,
+        kind: item.quality === 'audio' ? 'audio' : 'video',
+        fromTelegram: false,
+        loading: false,
+        error: null,
+      });
+    } catch {
+      setHistoryPlayer({
+        item,
+        src: '',
+        kind: 'video',
+        fromTelegram: Boolean(item.fileId),
+        loading: false,
+        error: t.historyStreamError,
+      });
+    }
+  };
+
+  const handleHistoryDelete = (item: SavedItem) => {
+    if (historyPlayer?.item.id === item.id) {
+      setHistoryPlayer(null);
+    }
+    onDeleteHistoryItem?.(item.id);
+  };
+
   const handleSubmitInspect = (e: React.FormEvent) => {
     e.preventDefault();
-    inspectUrl(urlInput);
+    inspectUrl(urlInput, true);
   };
 
   const isSocialMedia = Boolean(
     media &&
-      (['instagram', 'tiktok', 'x'].includes(media.providerGlow) ||
+      (['instagram', 'tiktok', 'x', 'pinterest'].includes(media.providerGlow) ||
         isInstagramUrlString(media.url) ||
         isTikTokUrlString(media.url) ||
-        isXUrlString(media.url))
+        isXUrlString(media.url) ||
+        isPinterestUrlString(media.url))
   ) ||
     isInstagramUrlString(urlInput) ||
     isTikTokUrlString(urlInput) ||
-    isXUrlString(urlInput);
+    isXUrlString(urlInput) ||
+    isPinterestUrlString(urlInput);
 
   const availableQualities = (media?.qualities || ['2160p', '1080p', '720p', '480p', '360p']).filter(
     (q) => q !== 'audio' && q !== 'best'
@@ -881,7 +1131,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     ? 'bg-gradient-to-r from-[#25f4ee]/45 via-[#fe2c55]/50 to-[#25f4ee]/45 dark:from-[#25f4ee]/50 dark:via-[#fe2c55]/55 dark:to-[#25f4ee]/50 opacity-100 scale-[1.01]'
                     : providerGlow === 'x'
                       ? 'bg-gradient-to-r from-[#1da1f2]/45 via-[#00b4d8]/50 to-[#1da1f2]/45 dark:from-[#1da1f2]/50 dark:via-[#00b4d8]/55 dark:to-[#1da1f2]/50 opacity-100 scale-[1.01]'
-                      : 'bg-black/5 dark:bg-white/20 opacity-85'
+                      : providerGlow === 'pinterest'
+                        ? 'bg-gradient-to-r from-[#e60023]/45 via-[#bd081c]/50 to-[#ff4d5a]/45 dark:from-[#e60023]/50 dark:via-[#bd081c]/55 dark:to-[#ff4d5a]/50 opacity-100 scale-[1.01]'
+                        : 'bg-black/5 dark:bg-white/20 opacity-85'
             }`}
           />
 
@@ -895,7 +1147,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     ? 'neon-tiktok-box'
                     : providerGlow === 'x'
                       ? 'neon-x-box'
-                      : 'neon-white-box'
+                      : providerGlow === 'pinterest'
+                        ? 'neon-pinterest-box'
+                        : 'neon-white-box'
             }`}
           >
             <div className="flex items-center gap-2">
@@ -948,7 +1202,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
 
         {/* Subtle theme-matched monochrome supported platform icons */}
         <div
-          aria-label="YouTube, Instagram, TikTok, X"
+          aria-label="YouTube, Instagram, TikTok, X, Pinterest"
           className="flex items-center justify-center gap-3 pt-0.5 text-black/35 dark:text-white/35 select-none"
         >
           <span
@@ -1028,6 +1282,24 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
               <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
             </svg>
           </span>
+          <span className="w-1 h-1 rounded-full bg-current opacity-50" aria-hidden="true" />
+          <span
+            title="Pinterest"
+            className={`inline-flex items-center transition-colors duration-200 cursor-pointer ${
+              isPinterestUrlString(urlInput) || media?.providerGlow === 'pinterest'
+                ? 'text-[#e60023] scale-110'
+                : 'hover:text-[#e60023] dark:hover:text-rose-400'
+            }`}
+          >
+            <svg
+              className="w-3.5 h-3.5 transition-transform duration-200"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              aria-hidden="true"
+            >
+              <path d="M12.017 2C6.486 2 2 6.486 2 12.017c0 4.249 2.64 7.878 6.364 9.338-.087-.793-.166-2.012.035-2.879.181-.781 1.169-4.956 1.169-4.956s-.298-.597-.298-1.48c0-1.387.804-2.422 1.805-2.422.851 0 1.262.639 1.262 1.405 0 .856-.545 2.136-.826 3.321-.235.993.498 1.803 1.477 1.803 1.773 0 3.136-1.87 3.136-4.568 0-2.388-1.716-4.058-4.167-4.058-2.838 0-4.504 2.129-4.504 4.33 0 .858.33 1.778.742 2.279.082.099.093.186.069.286-.076.313-.244.993-.277 1.132-.044.183-.145.222-.335.134-1.249-.581-2.03-2.407-2.03-3.874 0-3.154 2.292-6.052 6.608-6.052 3.469 0 6.165 2.473 6.165 5.776 0 3.447-2.173 6.22-5.19 6.22-1.013 0-1.965-.527-2.291-1.148l-.623 2.378c-.226.869-.835 1.958-1.244 2.621.937.29 1.931.446 2.962.446 5.531 0 10.017-4.486 10.017-10.017C22.034 6.486 17.548 2 12.017 2z" />
+            </svg>
+          </span>
         </div>
 
         {errorMsg && (
@@ -1066,7 +1338,35 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             </motion.div>
           )}
 
-          {media && (
+          {media && (() => {
+            const galleryImages =
+              media.previewImages && media.previewImages.length > 0
+                ? media.previewImages
+                : media.hasVideo === false && media.thumbnail
+                  ? [media.thumbnail]
+                  : [];
+            const hasMultiImages = galleryImages.length > 1;
+            const isMixedCarousel = media.hasVideo !== false && galleryImages.length > 0;
+            const showPhotoGallery =
+              showPlayer &&
+              galleryImages.length > 0 &&
+              (media.hasVideo === false || previewTab === 'photos');
+            const showVideoStage =
+              showPlayer &&
+              media.hasVideo !== false &&
+              (!isMixedCarousel || previewTab === 'video');
+            const safePageIdx = Math.min(imagePageIdx, Math.max(0, galleryImages.length - 1));
+            const activeImageSrc = galleryImages[safePageIdx] || media.thumbnail || '';
+            const goPrevPage = () => {
+              if (galleryImages.length <= 1) return;
+              setImagePageIdx((prev) => (prev > 0 ? prev - 1 : galleryImages.length - 1));
+            };
+            const goNextPage = () => {
+              if (galleryImages.length <= 1) return;
+              setImagePageIdx((prev) => (prev + 1 < galleryImages.length ? prev + 1 : 0));
+            };
+
+            return (
             <motion.div
               key={media.url}
               initial={{ opacity: 0, y: 14, scale: 0.99 }}
@@ -1085,8 +1385,12 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                   aria-label={
                     media.hasVideo === false
                       ? showPlayer
-                        ? t.hideImage
-                        : t.viewImage
+                        ? hasMultiImages
+                          ? t.hidePhotos
+                          : t.hideImage
+                        : hasMultiImages
+                          ? t.viewPhotos
+                          : t.viewImage
                       : showPlayer
                         ? t.hidePlayer
                         : t.watchOnline
@@ -1115,6 +1419,11 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       )}
                     </span>
                   </span>
+                  {hasMultiImages && (
+                    <span className="absolute bottom-1 end-1 px-1.5 py-0.5 rounded-md bg-black/75 text-white text-[10px] font-mono tabular-nums leading-none">
+                      {galleryImages.length}
+                    </span>
+                  )}
                 </button>
 
                 <div className="min-w-0 flex-1 space-y-2">
@@ -1151,7 +1460,7 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                     </div>
                   </div>
 
-                  {(media.hasVideo !== false || Boolean(media.thumbnail)) && (
+                  {(media.hasVideo !== false || galleryImages.length > 0) && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1173,8 +1482,12 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                       <span>
                         {media.hasVideo === false
                           ? showPlayer
-                            ? t.hideImage
-                            : t.viewImage
+                            ? hasMultiImages
+                              ? `${t.hidePhotos} (${galleryImages.length})`
+                              : t.hideImage
+                            : hasMultiImages
+                              ? `${t.viewPhotos} (${galleryImages.length})`
+                              : t.viewImage
                           : showPlayer
                             ? t.hidePlayer
                             : t.watchOnline}
@@ -1184,19 +1497,209 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                 </div>
               </div>
 
-              {/* Inline Online Video Player or Image Preview */}
-              {showPlayer && media.hasVideo === false && media.thumbnail && (
-                <div className="rounded-xl overflow-hidden bg-black/95 border border-black/15 dark:border-white/20 flex items-center justify-center max-h-[420px]">
-                  <img
-                    src={media.thumbnail}
-                    alt={media.title}
-                    referrerPolicy="no-referrer"
-                    className="w-full max-h-[420px] object-contain"
-                  />
+              {/* Mixed carousel Video / Photos switcher */}
+              {showPlayer && isMixedCarousel && (
+                <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/15">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewTab('video')}
+                    className={`min-h-[34px] px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+                      previewTab === 'video'
+                        ? 'bg-black text-white dark:bg-white dark:text-black shadow-sm'
+                        : 'text-zinc-600 dark:text-zinc-300 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    <Film className="w-3.5 h-3.5" />
+                    <span>{t.videoTab}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewTab('photos')}
+                    className={`min-h-[34px] px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+                      previewTab === 'photos'
+                        ? 'bg-black text-white dark:bg-white dark:text-black shadow-sm'
+                        : 'text-zinc-600 dark:text-zinc-300 hover:text-black dark:hover:text-white'
+                    }`}
+                  >
+                    <ImageIcon className="w-3.5 h-3.5" />
+                    <span>
+                      {t.photosTab} ({galleryImages.length})
+                    </span>
+                  </button>
                 </div>
               )}
 
-              {showPlayer && media.hasVideo !== false && (() => {
+              {/* Inline Paginated Image Viewer (single or multi-page carousel) */}
+              {showPhotoGallery && (
+                <div
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (galleryImages.length <= 1) return;
+                    if (e.key === 'ArrowLeft') {
+                      e.preventDefault();
+                      if (t.dir === 'rtl') goNextPage();
+                      else goPrevPage();
+                    } else if (e.key === 'ArrowRight') {
+                      e.preventDefault();
+                      if (t.dir === 'rtl') goPrevPage();
+                      else goNextPage();
+                    }
+                  }}
+                  onTouchStart={(e) => {
+                    galleryTouchStartXRef.current = e.touches[0]?.clientX ?? null;
+                  }}
+                  onTouchEnd={(e) => {
+                    const startX = galleryTouchStartXRef.current;
+                    galleryTouchStartXRef.current = null;
+                    if (startX === null || galleryImages.length <= 1) return;
+                    const endX = e.changedTouches[0]?.clientX ?? startX;
+                    const dx = endX - startX;
+                    if (Math.abs(dx) < 40) return;
+                    if (t.dir === 'rtl') {
+                      if (dx > 0) goNextPage();
+                      else goPrevPage();
+                    } else {
+                      if (dx < 0) goNextPage();
+                      else goPrevPage();
+                    }
+                  }}
+                  className="space-y-2.5 focus:outline-none"
+                >
+                  <div className="relative rounded-xl overflow-hidden bg-black/95 border border-black/15 dark:border-white/20 flex items-center justify-center min-h-[220px] max-h-[480px] select-none">
+                    {activeImageSrc && !failedGalleryIndices[safePageIdx] ? (
+                      <img
+                        key={`${media.url}-slide-${safePageIdx}`}
+                        src={activeImageSrc}
+                        alt={`${media.title} (${safePageIdx + 1}/${galleryImages.length})`}
+                        referrerPolicy="no-referrer"
+                        onError={() =>
+                          setFailedGalleryIndices((prev) => ({ ...prev, [safePageIdx]: true }))
+                        }
+                        className="w-full max-h-[480px] object-contain"
+                      />
+                    ) : (
+                      <div className="py-16 px-4 flex flex-col items-center justify-center gap-2 text-white/70">
+                        <ImageIcon className="w-8 h-8" />
+                        <span className="text-xs font-mono tabular-nums">
+                          {safePageIdx + 1} / {galleryImages.length}
+                        </span>
+                      </div>
+                    )}
+
+                    {hasMultiImages && (
+                      <>
+                        <div className="absolute top-2.5 end-2.5 px-2.5 py-1 rounded-lg bg-black/75 backdrop-blur-md text-white text-xs font-mono tabular-nums border border-white/15">
+                          {safePageIdx + 1} / {galleryImages.length}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={t.dir === 'rtl' ? goNextPage : goPrevPage}
+                          aria-label={t.dir === 'rtl' ? t.nextPage : t.previousPage}
+                          className="absolute left-2.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/65 hover:bg-black/85 text-white border border-white/20 backdrop-blur-md flex items-center justify-center transition active:scale-95"
+                        >
+                          <ChevronLeft className="w-5 h-5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={t.dir === 'rtl' ? goPrevPage : goNextPage}
+                          aria-label={t.dir === 'rtl' ? t.previousPage : t.nextPage}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-black/65 hover:bg-black/85 text-white border border-white/20 backdrop-blur-md flex items-center justify-center transition active:scale-95"
+                        >
+                          <ChevronRight className="w-5 h-5" />
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  {hasMultiImages && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={goPrevPage}
+                          className="min-h-[38px] px-3 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:border-black/40 dark:hover:border-white/40 transition active:scale-[0.98]"
+                        >
+                          {t.dir === 'rtl' ? (
+                            <ChevronRight className="w-4 h-4" />
+                          ) : (
+                            <ChevronLeft className="w-4 h-4" />
+                          )}
+                          <span>{t.previousPage}</span>
+                        </button>
+
+                        <span className="text-xs font-semibold font-mono tabular-nums text-zinc-600 dark:text-zinc-300">
+                          {t.pageLabel} {safePageIdx + 1} / {galleryImages.length}
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={goNextPage}
+                          className="min-h-[38px] px-3 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold inline-flex items-center gap-1.5 hover:border-black/40 dark:hover:border-white/40 transition active:scale-[0.98]"
+                        >
+                          <span>{t.nextPage}</span>
+                          {t.dir === 'rtl' ? (
+                            <ChevronLeft className="w-4 h-4" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4" />
+                          )}
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                        {galleryImages.map((imgUrl, idx) => {
+                          const active = idx === safePageIdx;
+                          return (
+                            <button
+                              key={`${media.url}-thumb-${idx}`}
+                              ref={(el) => {
+                                galleryThumbRefs.current[idx] = el;
+                              }}
+                              type="button"
+                              onClick={() => setImagePageIdx(idx)}
+                              aria-label={`${t.pageLabel} ${idx + 1}`}
+                              className={`relative w-12 h-12 rounded-lg overflow-hidden shrink-0 border-2 transition ${
+                                active
+                                  ? 'border-black dark:border-white scale-[1.03] shadow-md'
+                                  : 'border-black/10 dark:border-white/15 opacity-65 hover:opacity-100'
+                              }`}
+                            >
+                              {!failedGalleryIndices[idx] ? (
+                                <img
+                                  src={imgUrl}
+                                  alt={`${idx + 1}`}
+                                  loading="lazy"
+                                  referrerPolicy="no-referrer"
+                                  onError={() =>
+                                    setFailedGalleryIndices((prev) => ({ ...prev, [idx]: true }))
+                                  }
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <div className="w-full h-full bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center">
+                                  <ImageIcon className="w-4 h-4 text-zinc-500" />
+                                </div>
+                              )}
+                              <span
+                                className={`absolute bottom-0.5 end-0.5 px-1 rounded text-[9px] font-mono tabular-nums leading-tight ${
+                                  active
+                                    ? 'bg-black text-white dark:bg-white dark:text-black font-bold'
+                                    : 'bg-black/75 text-white'
+                                }`}
+                              >
+                                {idx + 1}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {showVideoStage && (() => {
                 const effectiveStreamQuality = isInstagramUrlString(media.url)
                   ? 'best'
                   : selectedQuality === 'audio'
@@ -1642,7 +2145,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                             ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee] text-black dark:text-white shadow-[0_0_28px_rgba(37,244,238,0.45)] hover:brightness-110'
                             : providerGlow === 'x'
                               ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2] text-white shadow-[0_0_28px_rgba(29,161,242,0.45)] hover:brightness-110'
-                              : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.35)] hover:opacity-90'
+                              : providerGlow === 'pinterest'
+                                ? 'bg-gradient-to-r from-[#e60023] via-[#bd081c] to-[#ff4d5a] text-white shadow-[0_0_28px_rgba(230,0,35,0.45)] hover:brightness-110'
+                                : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.35)] hover:opacity-90'
                     }`}
                   >
                     {savedConfirmed ? (
@@ -1679,7 +2184,9 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                               ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee] text-black dark:text-white shadow-[0_0_28px_rgba(37,244,238,0.45)] hover:brightness-110'
                               : providerGlow === 'x'
                                 ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2] text-white shadow-[0_0_28px_rgba(29,161,242,0.45)] hover:brightness-110'
-                                : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.3)] hover:opacity-90'
+                                : providerGlow === 'pinterest'
+                                  ? 'bg-gradient-to-r from-[#e60023] via-[#bd081c] to-[#ff4d5a] text-white shadow-[0_0_28px_rgba(230,0,35,0.45)] hover:brightness-110'
+                                  : 'bg-black text-white dark:bg-white dark:text-black shadow-[0_0_24px_rgba(255,255,255,0.3)] hover:opacity-90'
                       }`}
                     >
                       {isBusy ? (
@@ -1747,14 +2254,17 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
                               ? 'bg-gradient-to-r from-[#25f4ee] via-[#fe2c55] to-[#25f4ee]'
                               : providerGlow === 'x'
                                 ? 'bg-gradient-to-r from-[#1da1f2] via-[#00b4d8] to-[#1da1f2]'
-                                : 'bg-black dark:bg-white'
+                                : providerGlow === 'pinterest'
+                                  ? 'bg-gradient-to-r from-[#e60023] via-[#bd081c] to-[#ff4d5a]'
+                                  : 'bg-black dark:bg-white'
                       }`}
                     />
                   </div>
                 )}
               </div>
             </motion.div>
-          )}
+            );
+          })()}
         </AnimatePresence>
       </div>
 
@@ -1912,6 +2422,108 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             </span>
           </div>
 
+          <AnimatePresence initial={false}>
+            {historyPlayer && (
+              <motion.div
+                key={`history-player-${historyPlayer.item.id}`}
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.2 }}
+                className="rounded-xl overflow-hidden bg-black/95 border border-black/15 dark:border-white/20"
+              >
+                <div className="px-3 py-2 bg-zinc-900/90 border-b border-white/10 flex items-center justify-between gap-2">
+                  <div className="min-w-0 flex items-center gap-2">
+                    <span className="text-xs font-semibold text-white truncate">
+                      {historyPlayer.item.title}
+                    </span>
+                    {historyPlayer.fromTelegram && (
+                      <span className="px-1.5 py-0.5 rounded-md bg-white/10 text-[10px] font-medium text-zinc-200 inline-flex items-center gap-1 shrink-0">
+                        <Send className="w-2.5 h-2.5" />
+                        <span>{t.historyTelegramStream}</span>
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPlayer(null)}
+                    aria-label={t.close}
+                    className="min-h-[32px] min-w-[32px] rounded-lg flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition shrink-0"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {historyPlayer.loading ? (
+                  <div className="py-10 px-4 flex flex-col items-center justify-center gap-2 text-zinc-300 text-xs">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>{t.historyStreamLoading}</span>
+                  </div>
+                ) : historyPlayer.error ? (
+                  <div className="px-4 py-4 text-xs text-red-300 bg-red-950/50 flex items-center justify-between gap-2">
+                    <span className="min-w-0 flex-1 leading-relaxed">{historyPlayer.error}</span>
+                    <button
+                      type="button"
+                      onClick={() => void handleHistoryPlay(historyPlayer.item)}
+                      className="px-2.5 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white font-semibold shrink-0 transition"
+                    >
+                      {t.retryPlayback}
+                    </button>
+                  </div>
+                ) : historyPlayer.kind === 'image' ? (
+                  <div className="flex items-center justify-center max-h-[360px] bg-black">
+                    <img
+                      src={historyPlayer.src}
+                      alt={historyPlayer.item.title}
+                      className="w-full max-h-[360px] object-contain"
+                    />
+                  </div>
+                ) : historyPlayer.kind === 'audio' ? (
+                  <div className="p-3 bg-zinc-950 flex items-center gap-3">
+                    {historyPlayer.item.thumbnail ? (
+                      <img
+                        src={historyPlayer.item.thumbnail}
+                        alt={historyPlayer.item.title}
+                        referrerPolicy="no-referrer"
+                        className="w-12 h-12 rounded-lg object-cover shrink-0"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded-lg bg-white/10 flex items-center justify-center text-white shrink-0">
+                        <Music className="w-5 h-5" />
+                      </div>
+                    )}
+                    <audio
+                      key={historyPlayer.src}
+                      controls
+                      autoPlay
+                      src={historyPlayer.src}
+                      onError={() =>
+                        setHistoryPlayer((prev) =>
+                          prev ? { ...prev, error: t.historyStreamError } : prev
+                        )
+                      }
+                      className="w-full min-w-0"
+                    />
+                  </div>
+                ) : (
+                  <CustomVideoPlayer
+                    key={historyPlayer.src}
+                    src={historyPlayer.src}
+                    poster={historyPlayer.item.thumbnail || undefined}
+                    title={historyPlayer.item.title}
+                    apiBase={apiBase}
+                    mediaUrl={historyPlayer.item.url}
+                    onError={() =>
+                      setHistoryPlayer((prev) =>
+                        prev ? { ...prev, error: t.historyStreamError } : prev
+                      )
+                    }
+                  />
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {history.length === 0 ? (
             <div className="py-10 text-center space-y-2">
               <div className="w-11 h-11 rounded-2xl bg-black/5 dark:bg-white/10 mx-auto flex items-center justify-center text-zinc-500 dark:text-zinc-400">
@@ -1926,42 +2538,70 @@ export const DownloaderView: React.FC<DownloaderViewProps> = ({
             </div>
           ) : (
             <div className="divide-y divide-black/10 dark:divide-white/10">
-              {history.map((item) => (
-                <div key={item.id} className="py-3 first:pt-0 last:pb-0 flex items-center gap-3">
-                  <div className="w-14 h-10 rounded-lg overflow-hidden bg-zinc-200 dark:bg-zinc-900 shrink-0 flex items-center justify-center">
-                    {item.thumbnail ? (
-                      <img
-                        src={item.thumbnail}
-                        alt={item.title}
-                        referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <Film className="w-4 h-4 text-zinc-500" />
-                    )}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-semibold text-black dark:text-white truncate">
-                      {item.title}
+              {history.map((item) => {
+                const isPlayingThis = historyPlayer?.item.id === item.id;
+                return (
+                  <div key={item.id} className="py-3 first:pt-0 last:pb-0 flex items-center gap-2.5 sm:gap-3">
+                    <div className="w-14 h-10 rounded-lg overflow-hidden bg-zinc-200 dark:bg-zinc-900 shrink-0 flex items-center justify-center">
+                      {item.thumbnail ? (
+                        <img
+                          src={item.thumbnail}
+                          alt={item.title}
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <Film className="w-4 h-4 text-zinc-500" />
+                      )}
                     </div>
-                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400 font-mono tabular-nums mt-0.5 flex items-center gap-1.5">
-                      <span>{t.qualityLabels[item.quality]?.label || item.quality}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{formatBytes(item.sizeBytes)}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{item.savedAt}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-semibold text-black dark:text-white truncate">
+                        {item.title}
+                      </div>
+                      <div className="text-[11px] text-zinc-500 dark:text-zinc-400 font-mono tabular-nums mt-0.5 flex items-center gap-1.5 truncate">
+                        <span>{t.qualityLabels[item.quality]?.label || item.quality}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{formatBytes(item.sizeBytes)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{item.savedAt}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void handleHistoryPlay(item)}
+                        aria-label={t.historyPlay}
+                        title={t.historyPlay}
+                        className={`min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl active:scale-95 transition ${
+                          isPlayingThis
+                            ? 'bg-black text-white dark:bg-white dark:text-black'
+                            : 'text-black dark:text-white hover:bg-black/5 dark:hover:bg-white/10'
+                        }`}
+                      >
+                        <Play className={`w-4 h-4 ${isPlayingThis ? 'fill-current' : ''}`} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleHistoryDownload(item)}
+                        aria-label={t.reDownload}
+                        title={t.reDownload}
+                        className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-black dark:text-white hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
+                      >
+                        <ArrowDownToLine className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleHistoryDelete(item)}
+                        aria-label={t.historyDelete}
+                        title={t.historyDelete}
+                        className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-zinc-500 dark:text-zinc-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 active:scale-95 transition"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleHistoryDownload(item)}
-                    aria-label={t.reDownload}
-                    className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-black dark:text-white hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
-                  >
-                    <ArrowDownToLine className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

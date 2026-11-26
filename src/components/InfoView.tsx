@@ -1,13 +1,24 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowUpRight,
   Bot,
+  Camera,
+  ChevronDown,
+  Clapperboard,
   Film,
+  Globe,
   Info,
+  Layers,
+  Link2,
   Megaphone,
   Music,
+  Palette,
+  Play,
   Send,
+  Share2,
   Sparkles,
+  UserCheck,
   Youtube,
 } from 'lucide-react';
 import type { AppLanguage, TranslationDict } from '../i18n';
@@ -89,6 +100,9 @@ function formatAnnouncementDate(ts: number, language: AppLanguage): string {
 }
 
 export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }) => {
+  const [showFeatures, setShowFeatures] = useState(false);
+  const [featureFilter, setFeatureFilter] = useState<'all' | 'platforms' | 'general'>('all');
+
   const renderBotIcon = (kind: TelegramBotEntry['icon']) => {
     switch (kind) {
       case 'music':
@@ -99,6 +113,49 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
         return <Film className="w-4 h-4 text-black dark:text-white" />;
       default:
         return <Bot className="w-4 h-4 text-black dark:text-white" />;
+    }
+  };
+
+  const renderPlatformIcon = (
+    id: TranslationDict['infoFeaturesPlatforms'][number]['id']
+  ) => {
+    switch (id) {
+      case 'youtube':
+        return <Youtube className="w-4 h-4 text-black dark:text-white" />;
+      case 'instagram':
+        return <Camera className="w-4 h-4 text-black dark:text-white" />;
+      case 'tiktok':
+        return <Clapperboard className="w-4 h-4 text-black dark:text-white" />;
+      case 'x':
+        return <Share2 className="w-4 h-4 text-black dark:text-white" />;
+      case 'pinterest':
+        return (
+          <svg
+            className="w-4 h-4 text-black dark:text-white"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path d="M12.017 2C6.486 2 2 6.486 2 12.017c0 4.249 2.64 7.878 6.364 9.338-.087-.793-.166-2.012.035-2.879.181-.781 1.169-4.956 1.169-4.956s-.298-.597-.298-1.48c0-1.387.804-2.422 1.805-2.422.851 0 1.262.639 1.262 1.405 0 .856-.545 2.136-.826 3.321-.235.993.498 1.803 1.477 1.803 1.773 0 3.136-1.87 3.136-4.568 0-2.388-1.716-4.058-4.167-4.058-2.838 0-4.504 2.129-4.504 4.33 0 .858.33 1.778.742 2.279.082.099.093.186.069.286-.076.313-.244.993-.277 1.132-.044.183-.145.222-.335.134-1.249-.581-2.03-2.407-2.03-3.874 0-3.154 2.292-6.052 6.608-6.052 3.469 0 6.165 2.473 6.165 5.776 0 3.447-2.173 6.22-5.19 6.22-1.013 0-1.965-.527-2.291-1.148l-.623 2.378c-.226.869-.835 1.958-1.244 2.621.937.29 1.931.446 2.962.446 5.531 0 10.017-4.486 10.017-10.017C22.034 6.486 17.548 2 12.017 2z" />
+          </svg>
+        );
+      case 'telegram':
+        return <Send className="w-4 h-4 text-black dark:text-white" />;
+      default:
+        return <Globe className="w-4 h-4 text-black dark:text-white" />;
+    }
+  };
+
+  const renderGeneralIcon = (id: string) => {
+    switch (id) {
+      case 'download-flow':
+        return <Link2 className="w-4 h-4 text-black dark:text-white" />;
+      case 'player-tools':
+        return <Play className="w-4 h-4 text-black dark:text-white" />;
+      case 'account-history':
+        return <UserCheck className="w-4 h-4 text-black dark:text-white" />;
+      default:
+        return <Palette className="w-4 h-4 text-black dark:text-white" />;
     }
   };
 
@@ -186,6 +243,160 @@ export const InfoView: React.FC<InfoViewProps> = ({ t, language, announcements }
           <p className="text-xs sm:text-sm text-zinc-700 dark:text-zinc-300 leading-relaxed">
             {t.infoAboutBody}
           </p>
+
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setShowFeatures((prev) => !prev)}
+              aria-expanded={showFeatures}
+              className="w-full sm:w-auto min-h-[40px] px-4 py-2 rounded-xl bg-black text-white dark:bg-white dark:text-black text-xs font-semibold inline-flex items-center justify-between sm:justify-center gap-2 hover:opacity-90 transition-opacity cursor-pointer"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Layers className="w-3.5 h-3.5" />
+                <span>{t.infoFeaturesBtn}</span>
+              </span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                  showFeatures ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+          </div>
+
+          <AnimatePresence initial={false}>
+            {showFeatures && (
+              <motion.div
+                key="app-features-panel"
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.22, ease: 'easeOut' }}
+                className="overflow-hidden"
+              >
+                <div className="pt-3 mt-1 border-t border-black/10 dark:border-white/10 space-y-4">
+                  {/* Category Filter */}
+                  <div
+                    role="tablist"
+                    aria-label={t.infoFeaturesBtn}
+                    className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-black/5 dark:bg-white/5"
+                  >
+                    {(
+                      [
+                        { id: 'all', label: t.infoFeaturesTabAll },
+                        { id: 'platforms', label: t.infoFeaturesTabPlatforms },
+                        { id: 'general', label: t.infoFeaturesTabGeneral },
+                      ] as const
+                    ).map((tab) => {
+                      const active = featureFilter === tab.id;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          onClick={() => setFeatureFilter(tab.id)}
+                          className={`min-h-[34px] px-2.5 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                            active
+                              ? 'bg-black text-white dark:bg-white dark:text-black shadow-xs'
+                              : 'text-zinc-600 dark:text-zinc-400 hover:text-black dark:hover:text-white'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Section A: Supported Platforms */}
+                  {(featureFilter === 'all' || featureFilter === 'platforms') && (
+                    <div className="space-y-2.5">
+                      <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 px-0.5">
+                        {t.infoFeaturesPlatformsTitle}
+                      </h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {t.infoFeaturesPlatforms.map((platform) => (
+                          <div
+                            key={platform.id}
+                            className="rounded-xl bg-white dark:bg-black/60 border border-black/10 dark:border-white/10 p-3.5 space-y-2.5"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <span className="w-8 h-8 rounded-lg bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
+                                  {renderPlatformIcon(platform.id)}
+                                </span>
+                                <div className="min-w-0">
+                                  <div className="text-xs font-bold text-black dark:text-white truncate">
+                                    {platform.name}
+                                  </div>
+                                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
+                                    {platform.badge}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            <ul className="space-y-1.5">
+                              {platform.items.map((item, idx) => (
+                                <li
+                                  key={idx}
+                                  className="flex items-start gap-2 text-[11px] sm:text-xs text-zinc-700 dark:text-zinc-300 leading-relaxed"
+                                >
+                                  <span
+                                    className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 mt-1.5 shrink-0"
+                                    aria-hidden="true"
+                                  />
+                                  <span>{item}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Section B: General Public Features */}
+                  {(featureFilter === 'all' || featureFilter === 'general') && (
+                    <div className="space-y-2.5">
+                      <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 px-0.5">
+                        {t.infoFeaturesGeneralTitle}
+                      </h3>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {t.infoFeaturesGeneral.map((group) => (
+                          <div
+                            key={group.id}
+                            className="rounded-xl bg-white dark:bg-black/60 border border-black/10 dark:border-white/10 p-3.5 space-y-2"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <span className="w-7 h-7 rounded-lg bg-black/5 dark:bg-white/10 flex items-center justify-center shrink-0">
+                                {renderGeneralIcon(group.id)}
+                              </span>
+                              <div className="text-xs font-bold text-black dark:text-white">
+                                {group.title}
+                              </div>
+                            </div>
+                            <ul className="space-y-1.5">
+                              {group.items.map((item, idx) => (
+                                <li
+                                  key={idx}
+                                  className="flex items-start gap-2 text-[11px] sm:text-xs text-zinc-700 dark:text-zinc-300 leading-relaxed"
+                                >
+                                  <span
+                                    className="w-1.5 h-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 mt-1.5 shrink-0"
+                                    aria-hidden="true"
+                                  />
+                                  <span>{item}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </section>
 

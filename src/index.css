@@ -140,6 +140,20 @@
     inset 0 0 18px rgba(56, 189, 248, 0.14);
 }
 
+.neon-pinterest-box {
+  box-shadow:
+    0 0 0 1px rgba(230, 0, 35, 0.55),
+    0 0 38px rgba(230, 0, 35, 0.36),
+    0 12px 32px -10px rgba(189, 8, 28, 0.34);
+}
+
+.dark .neon-pinterest-box {
+  box-shadow:
+    0 0 0 1px rgba(251, 113, 133, 0.75),
+    0 0 44px rgba(230, 0, 35, 0.46),
+    inset 0 0 18px rgba(230, 0, 35, 0.14);
+}
+
 .neon-dock {
   box-shadow:
     0 10px 30px -6px rgba(0, 0, 0, 0.22),

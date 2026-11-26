@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronRight,
   ChevronLeft,
+  Cpu,
   Database,
   Download,
   Globe,
@@ -126,8 +127,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [xrayProfiles, setXrayProfiles] = useState<XrayProfileItem[]>([]);
   const [xrayActiveProfileId, setXrayActiveProfileId] = useState<string | null>(null);
   const [xrayTestYoutubeUrl, setXrayTestYoutubeUrl] = useState('https://www.youtube.com/watch?v=jNQXAC9IVRw');
-  const [xrayTestingProfileId, setXrayTestingProfileId] = useState<string | null>(null);
+  const [xrayTestConcurrency, setXrayTestConcurrency] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem('grovesave_xray_concurrency'));
+      if (Number.isFinite(saved) && saved >= 1 && saved <= 20) return Math.floor(saved);
+    } catch {}
+    return 3;
+  });
+  const [xrayTestingProfileIds, setXrayTestingProfileIds] = useState<string[]>([]);
+  const [xraySingleTesting, setXraySingleTesting] = useState(false);
   const [xrayTestingAll, setXrayTestingAll] = useState(false);
+  const [xrayTestProgress, setXrayTestProgress] = useState<{ done: number; total: number } | null>(null);
+  const xrayTestAbortControllersRef = useRef<Set<AbortController>>(new Set());
+  const xrayTestCancelledRef = useRef(false);
+  const xrayTestBatchIdRef = useRef<string | null>(null);
   const [xrayRunning, setXrayRunning] = useState(false);
   const [xrayBinaryInstalled, setXrayBinaryInstalled] = useState(true);
   const [xrayPorts, setXrayPorts] = useState<{ socks: number; http: number }>({ socks: 10808, http: 10809 });
@@ -143,6 +156,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [potPluginInstalled, setPotPluginInstalled] = useState(true);
   const [potRunning, setPotRunning] = useState(false);
   const [potVersion, setPotVersion] = useState<string | null>(null);
+  const [potJsRuntime, setPotJsRuntime] = useState<'auto' | 'deno' | 'node'>('auto');
+  const [potEjsRemoteComponents, setPotEjsRemoteComponents] = useState(true);
+  const [denoInstalled, setDenoInstalled] = useState(false);
+  const [denoVersion, setDenoVersion] = useState<string | null>(null);
+  const [nodeVersion, setNodeVersion] = useState<string | null>(null);
+  const [installingDeno, setInstallingDeno] = useState(false);
   const [potLoading, setPotLoading] = useState(false);
   const [potMessage, setPotMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -244,6 +263,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           activeProfileId?: string | null;
           profiles?: typeof xrayProfiles;
           testYoutubeUrl?: string;
+          testConcurrency?: number;
           running?: boolean;
           binaryInstalled?: boolean;
           socksPort?: number;
@@ -255,6 +275,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         setXrayActiveProfileId(data.activeProfileId || null);
         if (Array.isArray(data.profiles)) setXrayProfiles(data.profiles);
         if (data.testYoutubeUrl) setXrayTestYoutubeUrl(data.testYoutubeUrl);
+        if (typeof data.testConcurrency === 'number' && Number.isFinite(data.testConcurrency)) {
+          const clamped = Math.max(1, Math.min(20, Math.floor(data.testConcurrency)));
+          setXrayTestConcurrency(clamped);
+          try {
+            localStorage.setItem('grovesave_xray_concurrency', String(clamped));
+          } catch {}
+        }
         setXrayRunning(Boolean(data.running));
         setXrayBinaryInstalled(Boolean(data.binaryInstalled));
         if (data.socksPort && data.httpPort) {
@@ -332,6 +359,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           enabled: nextEnabled,
           configInput: xrayConfigInput,
           testYoutubeUrl: xrayTestYoutubeUrl,
+          testConcurrency: Math.max(1, Math.min(20, Math.floor(xrayTestConcurrency) || 3)),
         }),
       });
       const data = (await res.json()) as {
@@ -341,6 +369,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         activeProfileId?: string | null;
         profiles?: typeof xrayProfiles;
         testYoutubeUrl?: string;
+        testConcurrency?: number;
         running?: boolean;
         binaryInstalled?: boolean;
         lastError?: string | null;
@@ -354,6 +383,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         setXrayActiveProfileId(data.activeProfileId || null);
         if (Array.isArray(data.profiles)) setXrayProfiles(data.profiles);
         if (data.testYoutubeUrl) setXrayTestYoutubeUrl(data.testYoutubeUrl);
+        if (typeof data.testConcurrency === 'number' && Number.isFinite(data.testConcurrency)) {
+          const clamped = Math.max(1, Math.min(20, Math.floor(data.testConcurrency)));
+          setXrayTestConcurrency(clamped);
+          try {
+            localStorage.setItem('grovesave_xray_concurrency', String(clamped));
+          } catch {}
+        }
         setXrayRunning(Boolean(data.running));
         setXrayBinaryInstalled(Boolean(data.binaryInstalled));
         if (data.lastError && data.enabled && !data.running) {
@@ -504,12 +540,50 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const updateXrayConcurrency = (rawVal: number) => {
+    const next = Number.isFinite(rawVal) ? Math.max(1, Math.min(20, Math.floor(rawVal))) : 1;
+    setXrayTestConcurrency(next);
+    try {
+      localStorage.setItem('grovesave_xray_concurrency', String(next));
+    } catch {}
+  };
+
+  const cancelXrayTests = async () => {
+    xrayTestCancelledRef.current = true;
+    const batchId = xrayTestBatchIdRef.current;
+    for (const ctrl of xrayTestAbortControllersRef.current) {
+      try {
+        ctrl.abort();
+      } catch {}
+    }
+    xrayTestAbortControllersRef.current.clear();
+    setXrayTestingProfileIds([]);
+    setXraySingleTesting(false);
+    setXrayTestingAll(false);
+    setXrayTestProgress(null);
+    setXrayMessage({ type: 'error', text: t.xrayTestCancelledMsg });
+    try {
+      await fetch(`${apiBase}/api/admin/xray/test/cancel`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(true),
+        body: JSON.stringify({ batchId }),
+      });
+    } catch {}
+  };
+
   const testXrayVpn = async (profileId?: string) => {
     if (!isAdmin) return;
+    xrayTestCancelledRef.current = false;
+    const batchId = `single-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    xrayTestBatchIdRef.current = batchId;
+    const controller = new AbortController();
+    xrayTestAbortControllersRef.current.add(controller);
+
     if (profileId) {
-      setXrayTestingProfileId(profileId);
+      setXrayTestingProfileIds((prev) => (prev.includes(profileId) ? prev : [...prev, profileId]));
     } else {
-      setXrayLoading(true);
+      setXraySingleTesting(true);
     }
     setXrayMessage(null);
     try {
@@ -517,13 +591,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         method: 'POST',
         credentials: 'include',
         headers: getAuthHeaders(true),
+        signal: controller.signal,
         body: JSON.stringify({
           ...(profileId ? { profileId } : { configInput: xrayConfigInput }),
           youtubeUrl: xrayTestYoutubeUrl,
+          batchId,
         }),
       });
       const data = (await res.json()) as {
         success?: boolean;
+        cancelled?: boolean;
         downloadedBytes?: number;
         title?: string;
         exitIp?: string | null;
@@ -532,6 +609,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         profileId?: string | null;
         lastTest?: XrayProfileItem['lastTest'] | null;
       };
+      if (data.cancelled || xrayTestCancelledRef.current) {
+        setXrayMessage({ type: 'error', text: t.xrayTestCancelledMsg });
+        return;
+      }
       if (data.profileId && data.lastTest) {
         setXrayProfiles((prev) =>
           prev.map((p) => (p.id === data.profileId ? { ...p, lastTest: data.lastTest || undefined } : p))
@@ -549,55 +630,107 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       } else {
         setXrayMessage({ type: 'error', text: `${t.xrayTestFailed}: ${data.error || ''}` });
       }
-    } catch {
-      setXrayMessage({ type: 'error', text: t.xrayTestFailed });
-    } finally {
-      if (profileId) {
-        setXrayTestingProfileId(null);
+    } catch (err) {
+      if ((err instanceof DOMException && err.name === 'AbortError') || xrayTestCancelledRef.current) {
+        setXrayMessage({ type: 'error', text: t.xrayTestCancelledMsg });
       } else {
-        setXrayLoading(false);
+        setXrayMessage({ type: 'error', text: t.xrayTestFailed });
+      }
+    } finally {
+      xrayTestAbortControllersRef.current.delete(controller);
+      if (profileId) {
+        setXrayTestingProfileIds((prev) => prev.filter((id) => id !== profileId));
+      } else {
+        setXraySingleTesting(false);
       }
     }
   };
 
   const testAllXrayProfiles = async () => {
     if (!isAdmin || xrayProfiles.length === 0) return;
+    xrayTestCancelledRef.current = false;
+    const batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    xrayTestBatchIdRef.current = batchId;
+
+    const queue = [...xrayProfiles];
+    const total = queue.length;
+    const concurrency = Math.max(1, Math.min(total, Math.min(20, Math.floor(xrayTestConcurrency) || 3)));
+
     setXrayTestingAll(true);
+    setXrayTestProgress({ done: 0, total });
     setXrayMessage(null);
+
+    let nextIdx = 0;
+    let doneCount = 0;
     let passCount = 0;
-    try {
-      for (const profile of xrayProfiles) {
-        setXrayTestingProfileId(profile.id);
+
+    const runWorker = async () => {
+      while (!xrayTestCancelledRef.current) {
+        const idx = nextIdx;
+        nextIdx += 1;
+        if (idx >= queue.length) break;
+        const profile = queue[idx];
+
+        const controller = new AbortController();
+        xrayTestAbortControllersRef.current.add(controller);
+        setXrayTestingProfileIds((prev) => (prev.includes(profile.id) ? prev : [...prev, profile.id]));
+
         try {
           const res = await fetch(`${apiBase}/api/admin/xray/test`, {
             method: 'POST',
             credentials: 'include',
             headers: getAuthHeaders(true),
+            signal: controller.signal,
             body: JSON.stringify({
               profileId: profile.id,
               youtubeUrl: xrayTestYoutubeUrl,
+              batchId,
             }),
           });
           const data = (await res.json()) as {
             success?: boolean;
+            cancelled?: boolean;
             profileId?: string | null;
             lastTest?: XrayProfileItem['lastTest'] | null;
           };
-          if (data.success) passCount += 1;
-          if (data.profileId && data.lastTest) {
-            setXrayProfiles((prev) =>
-              prev.map((p) => (p.id === data.profileId ? { ...p, lastTest: data.lastTest || undefined } : p))
-            );
+          if (!data.cancelled && !xrayTestCancelledRef.current) {
+            if (data.success) passCount += 1;
+            if (data.profileId && data.lastTest) {
+              setXrayProfiles((prev) =>
+                prev.map((p) => (p.id === data.profileId ? { ...p, lastTest: data.lastTest || undefined } : p))
+              );
+            }
           }
-        } catch {}
+        } catch {
+          // Aborted or failed request
+        } finally {
+          xrayTestAbortControllersRef.current.delete(controller);
+          setXrayTestingProfileIds((prev) => prev.filter((id) => id !== profile.id));
+          if (!xrayTestCancelledRef.current) {
+            doneCount += 1;
+            setXrayTestProgress({ done: doneCount, total });
+          }
+        }
       }
-      setXrayMessage({
-        type: passCount > 0 ? 'success' : 'error',
-        text: `${passCount}/${xrayProfiles.length} ${t.xrayTestedPass}`,
-      });
+    };
+
+    try {
+      await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+      if (xrayTestCancelledRef.current) {
+        setXrayMessage({
+          type: 'error',
+          text: `${t.xrayTestCancelledMsg} (${doneCount}/${total})`,
+        });
+      } else {
+        setXrayMessage({
+          type: passCount > 0 ? 'success' : 'error',
+          text: `${passCount}/${total} ${t.xrayTestedPass}`,
+        });
+      }
     } finally {
-      setXrayTestingProfileId(null);
+      setXrayTestingProfileIds([]);
       setXrayTestingAll(false);
+      setXrayTestProgress(null);
     }
   };
 
@@ -614,6 +747,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           mode?: 'managed' | 'external';
           baseUrl?: string;
           port?: number;
+          jsRuntime?: 'auto' | 'deno' | 'node';
+          ejsRemoteComponents?: boolean;
+          denoInstalled?: boolean;
+          denoVersion?: string | null;
+          nodeVersion?: string | null;
           installed?: boolean;
           pluginInstalled?: boolean;
           running?: boolean;
@@ -624,6 +762,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         setPotMode(data.mode === 'external' ? 'external' : 'managed');
         if (data.baseUrl) setPotBaseUrl(data.baseUrl);
         if (typeof data.port === 'number') setPotPort(data.port);
+        if (data.jsRuntime === 'auto' || data.jsRuntime === 'deno' || data.jsRuntime === 'node') {
+          setPotJsRuntime(data.jsRuntime);
+        }
+        if (typeof data.ejsRemoteComponents === 'boolean') {
+          setPotEjsRemoteComponents(data.ejsRemoteComponents);
+        }
+        setDenoInstalled(Boolean(data.denoInstalled));
+        setDenoVersion(data.denoVersion || null);
+        setNodeVersion(data.nodeVersion || null);
         setPotInstalled(Boolean(data.installed));
         setPotPluginInstalled(Boolean(data.pluginInstalled));
         setPotRunning(Boolean(data.running));
@@ -635,9 +782,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     } catch {}
   };
 
-  const savePotProviderConfig = async (overrideEnabled?: boolean) => {
+  const savePotProviderConfig = async (
+    overrideEnabled?: boolean,
+    overrideJsRuntime?: 'auto' | 'deno' | 'node',
+    overrideEjsRemoteComponents?: boolean
+  ) => {
     if (!isAdmin) return;
     const nextEnabled = overrideEnabled !== undefined ? overrideEnabled : potEnabled;
+    const nextJsRuntime = overrideJsRuntime !== undefined ? overrideJsRuntime : potJsRuntime;
+    const nextEjsRemoteComponents =
+      overrideEjsRemoteComponents !== undefined ? overrideEjsRemoteComponents : potEjsRemoteComponents;
     setPotLoading(true);
     setPotMessage(null);
     try {
@@ -650,6 +804,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           mode: potMode,
           baseUrl: potBaseUrl,
           port: Number(potPort) || 4416,
+          jsRuntime: nextJsRuntime,
+          ejsRemoteComponents: nextEjsRemoteComponents,
         }),
       });
       const data = (await res.json()) as {
@@ -658,6 +814,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         mode?: 'managed' | 'external';
         baseUrl?: string;
         port?: number;
+        jsRuntime?: 'auto' | 'deno' | 'node';
+        ejsRemoteComponents?: boolean;
+        denoInstalled?: boolean;
+        denoVersion?: string | null;
+        nodeVersion?: string | null;
         installed?: boolean;
         pluginInstalled?: boolean;
         running?: boolean;
@@ -672,6 +833,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         setPotMode(data.mode === 'external' ? 'external' : 'managed');
         if (data.baseUrl) setPotBaseUrl(data.baseUrl);
         if (typeof data.port === 'number') setPotPort(data.port);
+        if (data.jsRuntime === 'auto' || data.jsRuntime === 'deno' || data.jsRuntime === 'node') {
+          setPotJsRuntime(data.jsRuntime);
+        }
+        if (typeof data.ejsRemoteComponents === 'boolean') {
+          setPotEjsRemoteComponents(data.ejsRemoteComponents);
+        }
+        setDenoInstalled(Boolean(data.denoInstalled));
+        setDenoVersion(data.denoVersion || null);
+        setNodeVersion(data.nodeVersion || null);
         setPotInstalled(Boolean(data.installed));
         setPotPluginInstalled(Boolean(data.pluginInstalled));
         setPotRunning(Boolean(data.running));
@@ -686,6 +856,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setPotMessage({ type: 'error', text: t.potTestFailed });
     } finally {
       setPotLoading(false);
+    }
+  };
+
+  const installDenoRuntime = async () => {
+    if (!isAdmin) return;
+    setInstallingDeno(true);
+    setPotMessage(null);
+    try {
+      const res = await fetch(`${apiBase}/api/admin/pot-provider/install-deno`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: getAuthHeaders(),
+      });
+      const data = (await res.json()) as {
+        success?: boolean;
+        denoInstalled?: boolean;
+        denoVersion?: string | null;
+        error?: string;
+      };
+      if (res.ok && data.success) {
+        setDenoInstalled(Boolean(data.denoInstalled));
+        setDenoVersion(data.denoVersion || null);
+        setPotMessage({
+          type: 'success',
+          text: data.denoVersion ? `${t.potDenoInstalledMsg} (v${data.denoVersion})` : t.potDenoInstalledMsg,
+        });
+      } else {
+        setPotMessage({ type: 'error', text: data.error || 'Deno install failed' });
+      }
+    } catch {
+      setPotMessage({ type: 'error', text: 'Deno install failed' });
+    } finally {
+      setInstallingDeno(false);
     }
   };
 
@@ -1401,14 +1604,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   {xrayLoading && <Loader2 className="w-4 h-4 animate-spin" />}
                   <span>{t.xraySaveBtn}</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => testXrayVpn()}
-                  disabled={xrayLoading || xrayTestingAll || !xrayConfigInput.trim()}
-                  className="min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
-                >
-                  {t.xrayTestBtn}
-                </button>
+                {xraySingleTesting ? (
+                  <button
+                    type="button"
+                    onClick={cancelXrayTests}
+                    className="min-h-[44px] px-4 rounded-xl border border-red-300 dark:border-red-800/70 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 text-sm font-semibold whitespace-nowrap flex items-center gap-1.5"
+                  >
+                    <X className="w-4 h-4" />
+                    <span>{t.xrayCancelTestBtn}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => testXrayVpn()}
+                    disabled={xrayLoading || xrayTestingAll || !xrayConfigInput.trim()}
+                    className="min-h-[44px] px-4 rounded-xl border border-black/10 dark:border-white/15 bg-white dark:bg-black text-black dark:text-white text-sm font-semibold whitespace-nowrap disabled:opacity-50"
+                  >
+                    {t.xrayTestBtn}
+                  </button>
+                )}
               </div>
 
               {xrayMessage && (
@@ -1434,19 +1648,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     {t.xrayProfilesTitle} ({xrayProfiles.length})
                   </div>
                   {xrayProfiles.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={testAllXrayProfiles}
-                      disabled={xrayTestingAll || xrayLoading}
-                      className="min-h-[40px] px-3 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
-                    >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="inline-flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+                        <span>{t.xrayTestConcurrencyLabel}</span>
+                        <input
+                          dir="ltr"
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={xrayTestConcurrency}
+                          disabled={xrayTestingAll}
+                          onChange={(e) => updateXrayConcurrency(Number(e.target.value))}
+                          className="w-16 min-h-[40px] px-2 rounded-xl bg-white dark:bg-black border border-black/10 dark:border-white/15 font-mono text-xs text-center text-black dark:text-white tabular-nums focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20 disabled:opacity-50"
+                        />
+                      </label>
                       {xrayTestingAll ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <button
+                          type="button"
+                          onClick={cancelXrayTests}
+                          className="min-h-[40px] px-3 rounded-xl border border-red-300 dark:border-red-800/70 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 tabular-nums"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          <span>
+                            {t.xrayCancelTestBtn}
+                            {xrayTestProgress ? ` (${xrayTestProgress.done}/${xrayTestProgress.total})` : ''}
+                          </span>
+                        </button>
                       ) : (
-                        <Play className="w-3.5 h-3.5" />
+                        <button
+                          type="button"
+                          onClick={testAllXrayProfiles}
+                          disabled={xrayTestingProfileIds.length > 0 || xraySingleTesting || xrayLoading}
+                          className="min-h-[40px] px-3 rounded-xl border border-black/15 dark:border-white/20 bg-white dark:bg-black text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          <span>{t.xrayTestAllBtn}</span>
+                        </button>
                       )}
-                      <span>{t.xrayTestAllBtn}</span>
-                    </button>
+                    </div>
                   )}
                 </div>
 
@@ -1458,7 +1697,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <div className="space-y-2">
                     {xrayProfiles.map((profile) => {
                       const isActive = profile.id === xrayActiveProfileId;
-                      const isTesting = xrayTestingProfileId === profile.id;
+                      const isTesting = xrayTestingProfileIds.includes(profile.id);
                       return (
                         <div
                           key={profile.id}
@@ -1480,19 +1719,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                             </div>
 
                             <div className="flex flex-wrap items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => testXrayVpn(profile.id)}
-                                disabled={isTesting || xrayTestingAll}
-                                className="min-h-[40px] px-3 rounded-lg border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-zinc-900 text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
-                              >
-                                {isTesting ? (
+                              {isTesting && !xrayTestingAll ? (
+                                <button
+                                  type="button"
+                                  onClick={cancelXrayTests}
+                                  className="min-h-[40px] px-3 rounded-lg border border-red-300 dark:border-red-800/70 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 text-xs font-semibold whitespace-nowrap flex items-center gap-1.5"
+                                >
                                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                ) : (
-                                  <Play className="w-3.5 h-3.5" />
-                                )}
-                                <span>{t.xrayTestProfileBtn}</span>
-                              </button>
+                                  <span>{t.xrayCancelTestBtn}</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => testXrayVpn(profile.id)}
+                                  disabled={isTesting || xrayTestingAll}
+                                  className="min-h-[40px] px-3 rounded-lg border border-black/10 dark:border-white/15 bg-zinc-50 dark:bg-zinc-900 text-black dark:text-white text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 disabled:opacity-50"
+                                >
+                                  {isTesting ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <Play className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>{t.xrayTestProfileBtn}</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => activateXrayProfile(profile.id)}
@@ -1705,6 +1955,103 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   />
                 </div>
               )}
+
+              <div className="pt-2 border-t border-black/10 dark:border-white/10 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <Cpu className="w-4 h-4 text-zinc-500 shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-black dark:text-white">
+                        {t.potJsRuntimeSection}
+                      </div>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                        {t.potJsRuntimeDesc}
+                      </p>
+                      <div className="mt-1.5 text-xs font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
+                        {denoInstalled
+                          ? `${t.potDenoReady}${denoVersion ? ` v${denoVersion}` : ''}`
+                          : t.potDenoMissing}
+                        {' · '}
+                        {`${t.potNodeReady}${nodeVersion ? ` v${nodeVersion}` : ''}`}
+                      </div>
+                    </div>
+                  </div>
+
+                  {!denoInstalled && (
+                    <button
+                      type="button"
+                      onClick={installDenoRuntime}
+                      disabled={installingDeno || potLoading}
+                      className="min-h-[38px] px-3 rounded-xl bg-black text-white dark:bg-white dark:text-black text-xs font-semibold whitespace-nowrap inline-flex items-center gap-1.5 disabled:opacity-50 shrink-0"
+                    >
+                      {installingDeno ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Download className="w-3.5 h-3.5" />
+                      )}
+                      <span>{t.potInstallDenoBtn}</span>
+                    </button>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-zinc-600 dark:text-zinc-400 mb-1.5">
+                    {t.potJsRuntimeModeLabel}
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {(
+                      [
+                        { id: 'auto', label: t.potJsRuntimeAuto },
+                        { id: 'deno', label: t.potJsRuntimeDeno },
+                        { id: 'node', label: t.potJsRuntimeNode },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setPotJsRuntime(opt.id)}
+                        className={`min-h-[44px] px-3 rounded-xl text-xs font-semibold border transition-colors ${
+                          potJsRuntime === opt.id
+                            ? 'bg-black text-white border-black dark:bg-white dark:text-black dark:border-white'
+                            : 'bg-white text-black border-black/10 dark:bg-black dark:text-white dark:border-white/15'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-4 pt-1">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-black dark:text-white">
+                      {t.potEjsRemoteLabel}
+                    </div>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                      {t.potEjsRemoteDesc}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={potEjsRemoteComponents}
+                    aria-label={t.potEjsRemoteLabel}
+                    disabled={potLoading}
+                    onClick={() => {
+                      const next = !potEjsRemoteComponents;
+                      setPotEjsRemoteComponents(next);
+                      void savePotProviderConfig(undefined, undefined, next);
+                    }}
+                    className={`relative inline-flex h-8 w-14 min-h-[44px] min-w-[56px] shrink-0 items-center justify-center rounded-xl transition-colors disabled:opacity-50 ${
+                      potEjsRemoteComponents
+                        ? 'bg-black text-white dark:bg-white dark:text-black'
+                        : 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400'
+                    }`}
+                  >
+                    <span className="text-xs font-bold">{potEjsRemoteComponents ? 'ON' : 'OFF'}</span>
+                  </button>
+                </div>
+              </div>
 
               <div className="flex flex-wrap gap-2 pt-1">
                 <button

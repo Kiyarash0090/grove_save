@@ -215,7 +215,7 @@ function ensureDataDir(): void {
   }
 }
 
-type DownloadFileExt = 'mp4' | 'mp3' | 'jpg' | 'png' | 'webp' | 'zip';
+type DownloadFileExt = 'mp4' | 'mp3' | 'jpg' | 'png' | 'webp' | 'gif' | 'zip';
 
 function getMimeTypeForExt(ext: DownloadFileExt): string {
   switch (ext) {
@@ -227,6 +227,8 @@ function getMimeTypeForExt(ext: DownloadFileExt): string {
       return 'image/png';
     case 'webp':
       return 'image/webp';
+    case 'gif':
+      return 'image/gif';
     case 'zip':
       return 'application/zip';
     default:
@@ -346,6 +348,9 @@ DB_FILE = path.resolve(DATA_DIR, 'grove.db');
 interface UserHistoryItem {
   id: string;
   jobId?: string;
+  fileId?: string;
+  mimeType?: string;
+  fileName?: string;
   url: string;
   title: string;
   author: string;
@@ -700,6 +705,40 @@ function cleanupExpiredSessions(): void {
 cleanupExpiredSessions();
 setInterval(cleanupExpiredSessions, 60 * 60 * 1000).unref();
 
+function findTelegramMetaForHistory(
+  jobId: string | null,
+  url: string,
+  quality: string
+): { fileId: string; mimeType: string | null; fileName: string | null } | null {
+  if (jobId) {
+    const byJob = db
+      .prepare(
+        'SELECT id, mime_type, file_name FROM telegram_files WHERE job_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1'
+      )
+      .get(jobId) as { id?: string; mime_type?: string | null; file_name?: string | null } | undefined;
+    if (byJob?.id) {
+      return {
+        fileId: byJob.id,
+        mimeType: typeof byJob.mime_type === 'string' ? byJob.mime_type : null,
+        fileName: typeof byJob.file_name === 'string' ? byJob.file_name : null,
+      };
+    }
+  }
+  const byUrl = db
+    .prepare(
+      'SELECT id, mime_type, file_name FROM telegram_files WHERE source_url = ? AND quality = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1'
+    )
+    .get(url, quality) as { id?: string; mime_type?: string | null; file_name?: string | null } | undefined;
+  if (byUrl?.id) {
+    return {
+      fileId: byUrl.id,
+      mimeType: typeof byUrl.mime_type === 'string' ? byUrl.mime_type : null,
+      fileName: typeof byUrl.file_name === 'string' ? byUrl.file_name : null,
+    };
+  }
+  return null;
+}
+
 function getUserHistory(userId: string): UserHistoryItem[] {
   const rows = db
     .prepare(`
@@ -711,17 +750,26 @@ function getUserHistory(userId: string): UserHistoryItem[] {
     `)
     .all(userId) as Array<Record<string, unknown>>;
 
-  return rows.map((r) => ({
-    id: String(r.id),
-    ...(typeof r.job_id === 'string' && r.job_id ? { jobId: r.job_id } : {}),
-    url: String(r.url),
-    title: String(r.title),
-    author: String(r.author),
-    quality: String(r.quality),
-    sizeBytes: Number(r.size_bytes || 0),
-    thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : null,
-    savedAt: String(r.saved_at),
-  }));
+  return rows.map((r) => {
+    const jobId = typeof r.job_id === 'string' && r.job_id ? r.job_id : null;
+    const url = String(r.url);
+    const quality = String(r.quality);
+    const tg = findTelegramMetaForHistory(jobId, url, quality);
+    return {
+      id: String(r.id),
+      ...(jobId ? { jobId } : {}),
+      ...(tg?.fileId ? { fileId: tg.fileId } : {}),
+      ...(tg?.mimeType ? { mimeType: tg.mimeType } : {}),
+      ...(tg?.fileName ? { fileName: tg.fileName } : {}),
+      url,
+      title: String(r.title),
+      author: String(r.author),
+      quality,
+      sizeBytes: Number(r.size_bytes || 0),
+      thumbnail: typeof r.thumbnail === 'string' ? r.thumbnail : null,
+      savedAt: String(r.saved_at),
+    };
+  });
 }
 
 function upsertUserHistoryItem(userId: string, item: UserHistoryItem): UserHistoryItem[] {
@@ -764,6 +812,11 @@ function upsertUserHistoryItem(userId: string, item: UserHistoryItem): UserHisto
 
 function clearUserHistoryInDb(userId: string): void {
   db.prepare('DELETE FROM download_history WHERE user_id = ?').run(userId);
+}
+
+function deleteUserHistoryItemInDb(userId: string, itemId: string): UserHistoryItem[] {
+  db.prepare('DELETE FROM download_history WHERE id = ? AND user_id = ?').run(itemId, userId);
+  return getUserHistory(userId);
 }
 
 interface AnnouncementRecord {
@@ -839,15 +892,20 @@ interface AdminXrayConfig {
   activeProfileId: string | null;
   profiles: XrayProfile[];
   testYoutubeUrl: string;
+  testConcurrency: number;
   socksPort: number;
   httpPort: number;
 }
+
+type PotJsRuntimeMode = 'auto' | 'deno' | 'node';
 
 interface AdminPotProviderConfig {
   enabled: boolean;
   mode: 'managed' | 'external';
   baseUrl: string;
   port: number;
+  jsRuntime: PotJsRuntimeMode;
+  ejsRemoteComponents: boolean;
 }
 
 interface AdminTelegramConfig {
@@ -884,6 +942,7 @@ function defaultAdminConfig(): AdminConfig {
       activeProfileId: null,
       profiles: [],
       testYoutubeUrl: DEFAULT_XRAY_TEST_YOUTUBE_URL,
+      testConcurrency: 3,
       socksPort: 10808,
       httpPort: 10809,
     },
@@ -892,6 +951,8 @@ function defaultAdminConfig(): AdminConfig {
       mode: 'managed',
       baseUrl: 'http://127.0.0.1:4416',
       port: 4416,
+      jsRuntime: 'auto',
+      ejsRemoteComponents: true,
     },
     telegram: {
       enabled: false,
@@ -958,6 +1019,10 @@ function loadAdminConfig(): AdminConfig {
             typeof parsed.xray?.testYoutubeUrl === 'string' && parsed.xray.testYoutubeUrl.trim()
               ? parsed.xray.testYoutubeUrl.trim()
               : DEFAULT_XRAY_TEST_YOUTUBE_URL,
+          testConcurrency:
+            typeof parsed.xray?.testConcurrency === 'number' && Number.isFinite(parsed.xray.testConcurrency)
+              ? Math.max(1, Math.min(20, Math.floor(parsed.xray.testConcurrency)))
+              : 3,
           socksPort:
             typeof parsed.xray?.socksPort === 'number' && parsed.xray.socksPort > 1024 && parsed.xray.socksPort < 65535
               ? parsed.xray.socksPort
@@ -978,6 +1043,14 @@ function loadAdminConfig(): AdminConfig {
             typeof parsed.potProvider?.port === 'number' && parsed.potProvider.port > 1024 && parsed.potProvider.port < 65535
               ? parsed.potProvider.port
               : 4416,
+          jsRuntime:
+            parsed.potProvider?.jsRuntime === 'deno' || parsed.potProvider?.jsRuntime === 'node'
+              ? parsed.potProvider.jsRuntime
+              : 'auto',
+          ejsRemoteComponents:
+            parsed.potProvider?.ejsRemoteComponents !== undefined
+              ? Boolean(parsed.potProvider.ejsRemoteComponents)
+              : true,
         },
         telegram: {
           enabled: Boolean(parsed.telegram?.enabled),
@@ -1976,6 +2049,22 @@ async function streamTelegramFile(
 ): Promise<void> {
   const cfg = adminConfig.telegram;
   const fileName = row.file_name || 'grove-save-media';
+  const effectiveMimeType = (() => {
+    const raw = (row.mime_type || '').trim();
+    if (raw && raw !== 'application/octet-stream') return raw;
+    const lower = fileName.toLowerCase();
+    if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'video/mp4';
+    if (lower.endsWith('.webm')) return 'video/webm';
+    if (lower.endsWith('.mov')) return 'video/quicktime';
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.m4a')) return 'audio/mp4';
+    if (lower.endsWith('.ogg')) return 'audio/ogg';
+    if (lower.endsWith('.wav')) return 'audio/wav';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    return raw || 'application/octet-stream';
+  })();
   const disposition = (() => {
     const ascii = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '_');
     const mode = inline ? 'inline' : 'attachment';
@@ -2001,7 +2090,7 @@ async function streamTelegramFile(
       if (req.method === 'HEAD') {
         const size = info.file_size || row.size_bytes || 0;
         res.status(200);
-        res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+        res.setHeader('Content-Type', effectiveMimeType);
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Disposition', disposition);
         if (size > 0) res.setHeader('Content-Length', String(size));
@@ -2027,7 +2116,7 @@ async function streamTelegramFile(
               return;
             }
             res.status(status);
-            res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+            res.setHeader('Content-Type', effectiveMimeType);
             res.setHeader('Accept-Ranges', 'bytes');
             res.setHeader('Content-Disposition', disposition);
             res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
@@ -2127,7 +2216,7 @@ async function streamTelegramFile(
   const length = Math.max(end - start + 1, 0);
 
   res.status(partial ? 206 : 200);
-  res.setHeader('Content-Type', row.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Type', effectiveMimeType);
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Disposition', disposition);
   res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
@@ -2539,6 +2628,207 @@ function isTikTokUrl(parsed: URL): boolean {
   return host === 'tiktok.com' || host.endsWith('.tiktok.com');
 }
 
+function extractCleanHttpUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const embedded = trimmed.match(/https?:\/\/\S+/i);
+  if (!embedded) return trimmed;
+  return embedded[0].replace(/[.,!?)\]'"]+$/, '');
+}
+
+function unwrapTikTokLoginRedirect(urlObj: URL): URL {
+  try {
+    if (!urlObj.pathname.toLowerCase().includes('login')) {
+      return urlObj;
+    }
+    const redirectParam = urlObj.searchParams.get('redirect_url');
+    if (!redirectParam) return urlObj;
+    let decoded = redirectParam.trim();
+    if (/%[0-9a-f]{2}/i.test(decoded)) {
+      try {
+        decoded = decodeURIComponent(decoded);
+      } catch {
+        // Keep partially decoded value
+      }
+    }
+    const cleanStr = decoded.replace(/[?&](_r|_t)=[^&]*/g, '').replace(/[?&]+$/, '');
+    const unwrapped = new URL(cleanStr);
+    unwrapped.searchParams.delete('_r');
+    unwrapped.searchParams.delete('_t');
+    if (unwrapped.protocol === 'http:' || unwrapped.protocol === 'https:') {
+      return unwrapped;
+    }
+  } catch {
+    // Keep original URL on parse failure
+  }
+  return urlObj;
+}
+
+function classifyTikTokUrl(urlStr: string): { kind: 'post' | 'profile' | 'other'; username: string | null } {
+  const isPost = /\/@[A-Za-z0-9_.\-]+\/(?:video|photo)\//i.test(urlStr);
+  const profileMatch = urlStr.match(/\/@([A-Za-z0-9_.\-]+)(?:[/?]|$)/);
+  if (profileMatch && !isPost) {
+    return { kind: 'profile', username: profileMatch[1] };
+  }
+  if (isPost) {
+    const creatorMatch = urlStr.match(/\/@([A-Za-z0-9_.\-]+)\//);
+    return { kind: 'post', username: creatorMatch ? creatorMatch[1] : null };
+  }
+  return { kind: 'other', username: null };
+}
+
+function cleanTikTokTitle(raw: string | undefined | null, fallback = 'TikTok Media'): string {
+  if (!raw) return fallback;
+  const base = raw.replace(/\.[a-z0-9]{1,5}$/i, '');
+  const cleaned = base.replace(/^\d+(_\d+)?\s*|\s*\[[a-f0-9]{32}\]\s*/gi, '').trim();
+  return (cleaned || fallback).slice(0, 120);
+}
+
+async function probeRedirectHopViaProxy(
+  targetUrl: string,
+  method: 'HEAD' | 'GET',
+  httpPort: number,
+  timeoutMs = 10000
+): Promise<{ statusCode: number; location: string | null }> {
+  const parsed = new URL(targetUrl);
+  const targetPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('TikTok redirect probe timed out'));
+    }, timeoutMs);
+
+    const connectReq = http.request({
+      host: '127.0.0.1',
+      port: httpPort,
+      method: 'CONNECT',
+      path: `${parsed.hostname}:${targetPort}`,
+    });
+
+    connectReq.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(new Error(`Proxy CONNECT failed (${res.statusCode})`));
+        return;
+      }
+      const mod = parsed.protocol === 'https:' ? https : http;
+      const createConnection = () =>
+        parsed.protocol === 'https:' ? tls.connect({ socket, servername: parsed.hostname }) : socket;
+      const req = mod.request(
+        {
+          hostname: parsed.hostname,
+          port: targetPort,
+          path: parsed.pathname + parsed.search,
+          method,
+          createConnection,
+          headers: {
+            Host: parsed.host,
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            Connection: 'close',
+          },
+        },
+        (resp) => {
+          const locHeader = resp.headers.location;
+          const location = Array.isArray(locHeader) ? locHeader[0] : locHeader || null;
+          resp.destroy();
+          clearTimeout(timer);
+          resolve({ statusCode: resp.statusCode || 0, location });
+        }
+      );
+      req.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      req.end();
+    });
+
+    connectReq.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    connectReq.end();
+  });
+}
+
+async function resolveTikTokShortUrl(parsed: URL): Promise<URL> {
+  let current = unwrapTikTokLoginRedirect(parsed);
+  const host = current.hostname.toLowerCase();
+  const needsResolution =
+    host === 'vm.tiktok.com' ||
+    host === 'vt.tiktok.com' ||
+    current.pathname.startsWith('/t/') ||
+    current.pathname.toLowerCase().includes('/login');
+
+  if (!needsResolution) {
+    return current;
+  }
+
+  try {
+    for (let hop = 0; hop < 6; hop += 1) {
+      const validCur = await validatePublicUrl(current.toString());
+      if (!validCur) break;
+
+      const doHop = async (method: 'HEAD' | 'GET') => {
+        if (adminConfig.xray.enabled && xrayState.running) {
+          return probeRedirectHopViaProxy(validCur.toString(), method, adminConfig.xray.httpPort, 10000);
+        }
+        const res = await fetch(validCur.toString(), {
+          method,
+          redirect: 'manual',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          },
+          signal: AbortSignal.timeout(10000),
+        });
+        const location = res.headers.get('location');
+        await res.body?.cancel().catch(() => {});
+        return { statusCode: res.status, location };
+      };
+
+      let probe = await doHop('HEAD');
+      if ((!probe.location && probe.statusCode >= 400) || probe.statusCode === 405) {
+        probe = await doHop('GET');
+      }
+
+      if (!probe.location) {
+        break;
+      }
+
+      const nextRaw = new URL(probe.location, validCur).toString();
+      const nextValid = await validatePublicUrl(nextRaw);
+      if (!nextValid) {
+        break;
+      }
+
+      const unwrapped = unwrapTikTokLoginRedirect(nextValid);
+      const unwrappedValid = await validatePublicUrl(unwrapped.toString());
+      if (!unwrappedValid) {
+        break;
+      }
+
+      current = unwrappedValid;
+      if (
+        !current.pathname.toLowerCase().includes('/login') &&
+        current.hostname.toLowerCase() !== 'vm.tiktok.com' &&
+        current.hostname.toLowerCase() !== 'vt.tiktok.com' &&
+        !current.pathname.startsWith('/t/')
+      ) {
+        break;
+      }
+    }
+  } catch (err) {
+    appendAppLog(
+      'warn',
+      'tiktok',
+      `TikTok short-link resolution warning (${parsed.toString()}): ${err instanceof Error ? err.message : 'redirect failed'}`
+    );
+  }
+
+  return unwrapTikTokLoginRedirect(current);
+}
+
 function isXUrl(parsed: URL): boolean {
   const host = parsed.hostname.toLowerCase();
   return (
@@ -2573,7 +2863,12 @@ function normalizeXUrl(parsed: URL): string {
 
 function maybeProxySocialThumbnail(rawUrl: string | undefined | null, parsedPageUrl: URL): string | null {
   if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return null;
-  if (isInstagramUrl(parsedPageUrl) || isTikTokUrl(parsedPageUrl) || isXUrl(parsedPageUrl)) {
+  if (
+    isInstagramUrl(parsedPageUrl) ||
+    isTikTokUrl(parsedPageUrl) ||
+    isXUrl(parsedPageUrl) ||
+    isPinterestUrl(parsedPageUrl)
+  ) {
     return `/api/media/thumbnail?url=${encodeURIComponent(rawUrl)}`;
   }
   return rawUrl;
@@ -2623,123 +2918,1267 @@ interface ResolvedFallbackMedia {
   thumbnail: string | null;
   videos: Array<{ url: string; width: number; height: number }>;
   photos: Array<{ url: string }>;
+  items?: Array<{ kind: 'video' | 'photo'; url: string; width: number; height: number }>;
   musicUrl?: string | null;
   referer?: string;
+  isVertical?: boolean;
+  isProfile?: boolean;
+}
+
+class XTextOnlyPostError extends Error {
+  constructor(message = 'This X post contains text only and has no downloadable photo or video media.') {
+    super(message);
+    this.name = 'XTextOnlyPostError';
+  }
+}
+
+class XMediaFallbackNeedsYtDlpError extends Error {
+  constructor(message = 'X API did not return playable media.') {
+    super(message);
+    this.name = 'XMediaFallbackNeedsYtDlpError';
+  }
+}
+
+const X_RESERVED_PROFILE_SEGMENTS = new Set([
+  'home',
+  'explore',
+  'search',
+  'notifications',
+  'messages',
+  'settings',
+  'i',
+  'intent',
+  'hashtag',
+  'compose',
+  'login',
+  'logout',
+  'signup',
+  'tos',
+  'privacy',
+  'rules',
+  'about',
+  'download',
+  'share',
+]);
+
+function classifyXUrl(
+  urlStr: string
+): { kind: 'post'; userPart: string; tweetId: string } | { kind: 'profile'; username: string } | { kind: 'other' } {
+  const statusMatch = urlStr.match(
+    /https?:\/\/(?:www\.|mobile\.)?(?:twitter|x|fxtwitter|vxtwitter|fixupx)\.com\/([^/]+)\/status(?:es)?\/(\d+)/i
+  );
+  if (statusMatch) {
+    return {
+      kind: 'post',
+      userPart: statusMatch[1] || 'i',
+      tweetId: statusMatch[2],
+    };
+  }
+  try {
+    const u = new URL(urlStr);
+    const profMatch = u.pathname.match(/^\/([A-Za-z0-9_]{1,15})\/?$/);
+    if (profMatch && !X_RESERVED_PROFILE_SEGMENTS.has(profMatch[1].toLowerCase())) {
+      return { kind: 'profile', username: profMatch[1] };
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return { kind: 'other' };
+}
+
+function getXScopedCookieHeader(): string {
+  const candidateSources: string[] = [];
+  if (adminConfig.youtubeCookies && adminConfig.youtubeCookies.trim()) {
+    candidateSources.push(adminConfig.youtubeCookies);
+  }
+  for (const fileCandidate of [path.join(DATA_DIR, 'cookies.txt'), path.resolve('cookies.txt')]) {
+    try {
+      if (fs.existsSync(fileCandidate)) {
+        candidateSources.push(fs.readFileSync(fileCandidate, 'utf8'));
+      }
+    } catch {
+      // Ignore unreadable file
+    }
+  }
+
+  const pairs = new Map<string, string>();
+  for (const raw of candidateSources) {
+    for (const rawLine of raw.split(/\r?\n/)) {
+      let line = rawLine.trim();
+      if (!line) continue;
+      if (line.startsWith('#HttpOnly_')) {
+        line = line.slice('#HttpOnly_'.length);
+      } else if (line.startsWith('#')) {
+        continue;
+      }
+      const parts = line.split('\t');
+      if (parts.length < 7) continue;
+      const domain = parts[0].trim().toLowerCase().replace(/^\./, '');
+      if (
+        domain !== 'x.com' &&
+        !domain.endsWith('.x.com') &&
+        domain !== 'twitter.com' &&
+        !domain.endsWith('.twitter.com') &&
+        domain !== 'twimg.com' &&
+        !domain.endsWith('.twimg.com')
+      ) {
+        continue;
+      }
+      const name = parts[5].trim();
+      const val = parts[6].trim();
+      if (name && val) {
+        pairs.set(name, val);
+      }
+    }
+  }
+
+  if (pairs.size === 0) return '';
+  return Array.from(pairs.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
+}
+
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const code = parseInt(hex, 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    })
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const code = parseInt(dec, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    });
+}
+
+function upgradeXAvatarUrl(avatarUrl: string): string {
+  return avatarUrl.replace(/_(normal|bigger|mini|200x200)(\.(?:jpg|jpeg|png|gif))/i, '_400x400$2');
+}
+
+async function fetchHttpTextOptionalXray(
+  targetUrl: string,
+  opts?: { timeoutMs?: number; headers?: Record<string, string>; maxBytes?: number }
+): Promise<{ statusCode: number; contentType: string; body: string }> {
+  const valid = await validatePublicUrl(targetUrl);
+  if (!valid) {
+    throw new Error('Disallowed URL.');
+  }
+  const timeoutMs = opts?.timeoutMs ?? 20000;
+  const maxBytes = opts?.maxBytes ?? 4 * 1024 * 1024;
+  const reqHeaders: Record<string, string> = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Accept: 'application/json, text/html;q=0.9, */*;q=0.8',
+    ...(opts?.headers || {}),
+  };
+
+  if (adminConfig.xray.enabled && xrayState.running) {
+    const targetPort = valid.port ? Number(valid.port) : valid.protocol === 'https:' ? 443 : 80;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Proxy request timed out')), timeoutMs);
+      const connectReq = http.request({
+        host: '127.0.0.1',
+        port: adminConfig.xray.httpPort,
+        method: 'CONNECT',
+        path: `${valid.hostname}:${targetPort}`,
+      });
+      connectReq.on('connect', (cRes, socket) => {
+        if (cRes.statusCode !== 200) {
+          clearTimeout(timer);
+          socket.destroy();
+          reject(new Error(`Proxy CONNECT failed (${cRes.statusCode})`));
+          return;
+        }
+        const mod = valid.protocol === 'https:' ? https : http;
+        const createConnection = () =>
+          valid.protocol === 'https:' ? tls.connect({ socket, servername: valid.hostname }) : socket;
+        const req = mod.request(
+          {
+            hostname: valid.hostname,
+            port: targetPort,
+            path: valid.pathname + valid.search,
+            method: 'GET',
+            createConnection,
+            headers: { ...reqHeaders, Host: valid.host, Connection: 'close' },
+          },
+          (resp) => {
+            const ct = String(resp.headers['content-type'] || '').toLowerCase();
+            const chunks: Buffer[] = [];
+            let total = 0;
+            resp.on('data', (d: Buffer) => {
+              total += d.byteLength;
+              if (total <= maxBytes) chunks.push(d);
+              else resp.destroy();
+            });
+            resp.on('end', () => {
+              clearTimeout(timer);
+              resolve({
+                statusCode: resp.statusCode || 0,
+                contentType: ct,
+                body: Buffer.concat(chunks).toString('utf8'),
+              });
+            });
+            resp.on('error', (err) => {
+              clearTimeout(timer);
+              reject(err);
+            });
+          }
+        );
+        req.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        req.end();
+      });
+      connectReq.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      connectReq.end();
+    });
+  }
+
+  const res = await fetch(valid.toString(), {
+    headers: reqHeaders,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  const text = await res.text();
+  return {
+    statusCode: res.status,
+    contentType: ct,
+    body: text.slice(0, maxBytes),
+  };
+}
+
+async function fetchJsonCheckedOptionalXray<T = Record<string, unknown>>(
+  targetUrl: string,
+  opts?: { timeoutMs?: number; headers?: Record<string, string> }
+): Promise<T | null> {
+  try {
+    const resp = await fetchHttpTextOptionalXray(targetUrl, opts);
+    if (resp.statusCode < 200 || resp.statusCode >= 300) return null;
+    if (resp.contentType && !resp.contentType.includes('json') && !resp.body.trim().startsWith('{')) {
+      return null;
+    }
+    const parsed = JSON.parse(resp.body);
+    return parsed && typeof parsed === 'object' ? (parsed as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function looksLikeMediaFile(filePath: string, expectedKind: 'video' | 'image' | 'photo'): Promise<boolean> {
+  let fh: fs.promises.FileHandle | null = null;
+  try {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile() || stat.size < 12) {
+      appendAppLog('warn', 'x', `Rejected empty/tiny X media file (${stat.size} bytes)`);
+      return false;
+    }
+    fh = await fs.promises.open(filePath, 'r');
+    const buf = Buffer.alloc(16);
+    const { bytesRead } = await fh.read(buf, 0, 16, 0);
+    if (bytesRead < 12) return false;
+
+    if (expectedKind === 'video') {
+      const isIsoBmff = buf.subarray(4, 8).toString('ascii') === 'ftyp';
+      const isEbml = buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3;
+      if (isIsoBmff || isEbml) return true;
+    } else {
+      const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+      const isPng =
+        buf[0] === 0x89 &&
+        buf[1] === 0x50 &&
+        buf[2] === 0x4e &&
+        buf[3] === 0x47 &&
+        buf[4] === 0x0d &&
+        buf[5] === 0x0a &&
+        buf[6] === 0x1a &&
+        buf[7] === 0x0a;
+      const gifHdr = buf.subarray(0, 6).toString('ascii');
+      const isGif = gifHdr === 'GIF87a' || gifHdr === 'GIF89a';
+      const isWebp =
+        buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP';
+      if (isJpeg || isPng || isGif || isWebp) return true;
+    }
+
+    appendAppLog(
+      'warn',
+      'x',
+      `Magic-byte check rejected X ${expectedKind} (${stat.size} bytes, head=${buf.subarray(0, bytesRead).toString('hex')})`
+    );
+    return false;
+  } catch {
+    return false;
+  } finally {
+    await fh?.close().catch(() => {});
+  }
 }
 
 async function resolveShortRedirectUrl(parsed: URL): Promise<URL> {
   if (parsed.hostname.toLowerCase() !== 't.co') return parsed;
+  let current = parsed;
   try {
-    const res = await fetch(parsed.toString(), {
-      method: 'HEAD',
-      redirect: 'manual',
-      signal: AbortSignal.timeout(6000),
-    });
-    const loc = res.headers.get('location');
-    if (loc) {
-      const valid = await validatePublicUrl(new URL(loc, parsed).toString());
-      if (valid) return valid;
+    for (let hop = 0; hop < 4; hop += 1) {
+      const validCur = await validatePublicUrl(current.toString());
+      if (!validCur) break;
+      let location: string | null = null;
+      if (adminConfig.xray.enabled && xrayState.running) {
+        let probe = await probeRedirectHopViaProxy(validCur.toString(), 'HEAD', adminConfig.xray.httpPort, 8000);
+        if (!probe.location && (probe.statusCode === 405 || probe.statusCode >= 400)) {
+          probe = await probeRedirectHopViaProxy(validCur.toString(), 'GET', adminConfig.xray.httpPort, 8000);
+        }
+        location = probe.location;
+      } else {
+        let res = await fetch(validCur.toString(), {
+          method: 'HEAD',
+          redirect: 'manual',
+          signal: AbortSignal.timeout(8000),
+        });
+        location = res.headers.get('location');
+        await res.body?.cancel().catch(() => {});
+        if (!location && (res.status === 405 || res.status >= 400)) {
+          res = await fetch(validCur.toString(), {
+            method: 'GET',
+            redirect: 'manual',
+            signal: AbortSignal.timeout(8000),
+          });
+          location = res.headers.get('location');
+          await res.body?.cancel().catch(() => {});
+        }
+      }
+      if (!location) break;
+      const validNext = await validatePublicUrl(new URL(location, validCur).toString());
+      if (!validNext) break;
+      current = validNext;
+      if (current.hostname.toLowerCase() !== 't.co') break;
     }
   } catch {
-    // Keep original URL
+    // Keep last valid URL
   }
-  return parsed;
+  return current;
 }
 
-async function resolveXMediaFallback(rawParsed: URL): Promise<ResolvedFallbackMedia> {
-  const resolvedParsed = await resolveShortRedirectUrl(rawParsed);
-  const pathMatch = resolvedParsed.pathname.match(/^\/(?:([A-Za-z0-9_]+)\/)?status(?:es)?\/(\d+)/i);
-  if (!pathMatch) {
-    throw new Error('Invalid X / Twitter post URL.');
-  }
-  const userPart = pathMatch[1] || 'i';
-  const statusId = pathMatch[2];
-  const apiUrl = `https://api.fxtwitter.com/${encodeURIComponent(userPart)}/status/${statusId}`;
-  const payload = await fetchJsonViaOptionalXray<{
-    code?: number;
-    message?: string;
-    tweet?: {
-      text?: string;
-      author?: { name?: string; screen_name?: string; avatar_url?: string };
-      media?: {
-        videos?: Array<{
-          url?: string;
-          thumbnail_url?: string;
-          duration?: number;
-          width?: number;
-          height?: number;
-          variants?: Array<{ url?: string; content_type?: string; bitrate?: number }>;
-        }>;
-        photos?: Array<{ url?: string; width?: number; height?: number }>;
-      };
+async function fetchXProfile(username: string): Promise<ResolvedFallbackMedia> {
+  const cleanUser = username.replace(/^@/, '').trim();
+  let name = '';
+  let screenName = cleanUser;
+  let avatarUrl: string | null = null;
+  let followers: number | null = null;
+
+  // Method 1: fxtwitter profile endpoint (no cookies)
+  const fxProf = await fetchJsonCheckedOptionalXray<{
+    user?: {
+      name?: string;
+      screen_name?: string;
+      description?: string;
+      avatar_url?: string;
+      followers?: number;
+      following?: number;
+      tweets?: number;
+      verified?: boolean;
     };
-  }>(apiUrl, 15000);
+  }>(`https://api.fxtwitter.com/${encodeURIComponent(cleanUser)}`, { timeoutMs: 20000 });
 
-  const tweet = payload?.tweet;
-  if (!tweet) {
-    throw new Error(payload?.message || 'Could not load X post.');
+  if (fxProf?.user) {
+    if (typeof fxProf.user.name === 'string' && fxProf.user.name.trim()) name = fxProf.user.name.trim();
+    if (typeof fxProf.user.screen_name === 'string' && fxProf.user.screen_name.trim()) {
+      screenName = fxProf.user.screen_name.trim();
+    }
+    if (typeof fxProf.user.followers === 'number') followers = fxProf.user.followers;
+    if (typeof fxProf.user.avatar_url === 'string' && fxProf.user.avatar_url.trim()) {
+      const upgraded = upgradeXAvatarUrl(fxProf.user.avatar_url.trim());
+      const valid = await validatePublicUrl(upgraded);
+      if (valid) avatarUrl = valid.toString();
+    }
   }
 
-  const videos: Array<{ url: string; width: number; height: number }> = [];
-  let durationSeconds: number | null = null;
-  let thumb: string | null = null;
-
-  for (const v of tweet.media?.videos || []) {
-    if (typeof v.duration === 'number' && durationSeconds === null) {
-      durationSeconds = Math.round(v.duration);
-    }
-    if (!thumb && typeof v.thumbnail_url === 'string') {
-      thumb = v.thumbnail_url;
-    }
-    const mp4Variants = Array.isArray(v.variants)
-      ? v.variants
-          .filter((vr) => typeof vr.url === 'string' && (!vr.content_type || vr.content_type.includes('mp4')))
-          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))
-      : [];
-    const primaryUrl = mp4Variants[0]?.url || v.url;
-    if (typeof primaryUrl === 'string') {
-      const valid = await validatePublicUrl(primaryUrl);
-      if (valid) {
-        videos.push({
-          url: valid.toString(),
-          width: Number(v.width || 0),
-          height: Number(v.height || 0),
-        });
+  // Method 2: HTML OG meta-tag fallback if fxtwitter missed avatar or name
+  if (!avatarUrl || !name) {
+    try {
+      const cookieHeader = getXScopedCookieHeader();
+      const htmlResp = await fetchHttpTextOptionalXray(`https://x.com/${encodeURIComponent(cleanUser)}`, {
+        timeoutMs: 15000,
+        headers: {
+          Referer: 'https://x.com/',
+          ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+        },
+      });
+      if (htmlResp.statusCode >= 200 && htmlResp.statusCode < 400 && htmlResp.body) {
+        const ogTitle = htmlResp.body.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+        const ogImage = htmlResp.body.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1];
+        if (ogTitle && !name) {
+          const decodedTitle = decodeHtmlEntities(ogTitle).replace(/\s*\/\s*X\s*$/i, '').trim();
+          const m = decodedTitle.match(/^(.*?)\s*\(@([A-Za-z0-9_]+)\)$/);
+          if (m) {
+            name = m[1].trim();
+            screenName = m[2].trim();
+          } else {
+            name = decodedTitle;
+          }
+        }
+        if (ogImage && !avatarUrl) {
+          const upgraded = upgradeXAvatarUrl(decodeHtmlEntities(ogImage).trim());
+          const valid = await validatePublicUrl(upgraded);
+          if (valid) avatarUrl = valid.toString();
+        }
       }
+    } catch {
+      // Ignore HTML scrape fallback error
     }
   }
 
-  const photos: Array<{ url: string }> = [];
-  for (const p of tweet.media?.photos || []) {
-    if (typeof p.url === 'string') {
-      const valid = await validatePublicUrl(p.url);
-      if (valid) {
-        if (!thumb) thumb = valid.toString();
-        photos.push({ url: valid.toString() });
-      }
-    }
+  if (!avatarUrl && !name) {
+    throw new Error(`Could not load X profile @${cleanUser}.`);
   }
 
-  if (videos.length === 0 && photos.length === 0) {
-    throw new Error('This X post does not contain downloadable video or photo media.');
-  }
-
-  const rawText = (tweet.text || '').replace(/https?:\/\/t\.co\/\S+/gi, '').trim();
-  const screenName = (tweet.author?.screen_name || '').trim();
-  const title = rawText ? rawText.slice(0, 90) : screenName ? `X Post by @${screenName}` : 'X Media';
+  const baseTitle = name && screenName && !name.toLowerCase().includes(screenName.toLowerCase())
+    ? `${name} (@${screenName})`
+    : name || `@${screenName}`;
+  const followerStr = formatCompactCount(followers);
 
   return {
-    title,
-    author: screenName ? `@${screenName}` : tweet.author?.name || 'X',
-    durationSeconds,
-    thumbnail: thumb || tweet.author?.avatar_url || null,
-    videos,
-    photos,
+    title: followerStr ? `${baseTitle} • ${followerStr} followers` : baseTitle,
+    author: `@${screenName}`,
+    durationSeconds: null,
+    thumbnail: avatarUrl,
+    videos: [],
+    photos: avatarUrl ? [{ url: avatarUrl }] : [],
     referer: 'https://x.com/',
+    isProfile: true,
   };
 }
 
-async function resolveTikTokMediaFallback(parsed: URL): Promise<ResolvedFallbackMedia> {
+function resolveXTextAndLinks(opts: {
+  rawText: string;
+  displayTextRange?: [number, number] | null;
+  linkMap?: Map<string, string>;
+  mediaLinks?: Set<string>;
+}): string {
+  let text = opts.rawText || '';
+  const range = opts.displayTextRange;
+  // Section 6: Only slice display_text_range when it does not truncate a longer Note Tweet
+  if (
+    Array.isArray(range) &&
+    range.length === 2 &&
+    typeof range[0] === 'number' &&
+    typeof range[1] === 'number' &&
+    range[0] >= 0 &&
+    range[1] <= text.length &&
+    (range[1] >= text.length - 5 || text.length <= 280)
+  ) {
+    text = text.slice(range[0], range[1]);
+  }
+
+  const linkMap = opts.linkMap;
+  const mediaLinks = opts.mediaLinks;
+  text = text.replace(/https?:\/\/t\.co\/[A-Za-z0-9]+/gi, (shortUrl) => {
+    const mapped = linkMap?.get(shortUrl) || linkMap?.get(shortUrl.replace(/^http:/i, 'https:'));
+    if (!mapped) {
+      return mediaLinks?.has(shortUrl) ? '' : shortUrl;
+    }
+    if (/https?:\/\/(?:pic\.(?:x|twitter)\.com|(?:x|twitter)\.com\/[^/]+\/status\/\d+\/(?:photo|video)\/)/i.test(mapped)) {
+      return '';
+    }
+    return mapped;
+  });
+
+  text = text.replace(/https?:\/\/pic\.(?:x|twitter)\.com\/\S+/gi, '');
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+  return text;
+}
+
+function xMediaIdentity(kind: 'video' | 'photo', urlStr: string): string {
+  if (kind === 'video') {
+    const m = urlStr.match(/(?:amplify_video|ext_tw_video|tweet_video)\/([A-Za-z0-9_-]+)/);
+    if (m) return `video:${m[1]}`;
+  } else {
+    const m = urlStr.match(/pbs\.twimg\.com\/(?:media|ext_tw_video_thumb|amplify_video_thumb)\/([A-Za-z0-9_-]+)/);
+    if (m) return `photo:${m[1]}`;
+  }
+  try {
+    const u = new URL(urlStr);
+    return `${kind}:${u.pathname}`;
+  } catch {
+    return `${kind}:${urlStr}`;
+  }
+}
+
+function chooseBestXVideoUrl(
+  variants?: Array<{ url?: string; content_type?: string; bitrate?: number }>,
+  primaryUrl?: string
+): string | null {
+  const list = Array.isArray(variants) ? variants : [];
+  const mp4s = list
+    .filter((v) => typeof v.url === 'string' && v.url.trim() && (!v.content_type || v.content_type.includes('mp4')))
+    .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+  if (mp4s[0]?.url) return mp4s[0].url.trim();
+  if (typeof primaryUrl === 'string' && primaryUrl.trim() && !primaryUrl.includes('.m3u8')) {
+    return primaryUrl.trim();
+  }
+  const anyVariant = list.find((v) => typeof v.url === 'string' && v.url.trim());
+  if (anyVariant?.url) return anyVariant.url.trim();
+  return typeof primaryUrl === 'string' && primaryUrl.trim() ? primaryUrl.trim() : null;
+}
+
+const X_VIDEO_MEDIA_TYPES = new Set(['video', 'gif', 'animated_gif']);
+
+async function resolveXMediaFallback(rawParsed: URL): Promise<ResolvedFallbackMedia> {
+  const resolvedParsed = await resolveShortRedirectUrl(rawParsed);
+  const classified = classifyXUrl(resolvedParsed.toString());
+
+  if (classified.kind === 'profile') {
+    return await fetchXProfile(classified.username);
+  }
+  if (classified.kind !== 'post') {
+    throw new XMediaFallbackNeedsYtDlpError('Non-status X URL requires fallback extractor.');
+  }
+
+  const tweetId = classified.tweetId;
+  const cookieHeader = getXScopedCookieHeader();
+
+  interface FxFormat {
+    url?: string;
+    content_type?: string;
+    bitrate?: number;
+    container?: string;
+  }
+  interface FxMediaItem {
+    type?: string;
+    url?: string;
+    thumbnail_url?: string;
+    duration?: number;
+    width?: number;
+    height?: number;
+    formats?: FxFormat[];
+    variants?: FxFormat[];
+  }
+  interface FxTweet {
+    text?: string;
+    raw_text?: {
+      text?: string;
+      facets?: Array<{ original?: string; replacement?: string; type?: string }>;
+    };
+    likes?: number;
+    replies?: number;
+    retweets?: number;
+    possibly_sensitive?: boolean;
+    author?: { name?: string; screen_name?: string; avatar_url?: string };
+    media?: {
+      all?: FxMediaItem[];
+      videos?: FxMediaItem[];
+      photos?: FxMediaItem[];
+    };
+  }
+  interface SyndMediaDetail {
+    type?: string;
+    url?: string;
+    expanded_url?: string;
+    media_url_https?: string;
+    original_info?: { width?: number; height?: number };
+    video_info?: {
+      duration_millis?: number;
+      variants?: Array<{ url?: string; content_type?: string; bitrate?: number }>;
+    };
+  }
+  interface SyndTweet {
+    __typename?: string;
+    text?: string;
+    display_text_range?: [number, number];
+    favorite_count?: number;
+    possibly_sensitive?: boolean;
+    user?: { name?: string; screen_name?: string; profile_image_url_https?: string };
+    entities?: {
+      urls?: Array<{ url?: string; expanded_url?: string }>;
+      media?: Array<{ url?: string; media_url_https?: string }>;
+    };
+    photos?: Array<string | { url?: string; media_url_https?: string; width?: number; height?: number }>;
+    mediaDetails?: SyndMediaDetail[];
+    video?: unknown;
+    videos?: unknown;
+  }
+
+  // Section 3: Fetch fxtwitter (no cookies) and Syndication (Referer + optional scoped X cookie) in parallel
+  const [fxSettled, syndSettled] = await Promise.allSettled([
+    fetchJsonCheckedOptionalXray<{ code?: number; message?: string; tweet?: FxTweet }>(
+      `https://api.fxtwitter.com/i/status/${tweetId}`,
+      { timeoutMs: 20000 }
+    ),
+    fetchJsonCheckedOptionalXray<SyndTweet>(
+      `https://cdn.syndication.twimg.com/tweet-result?id=${tweetId}&token=0`,
+      {
+        timeoutMs: 20000,
+        headers: {
+          Referer: 'https://x.com/',
+          ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+        },
+      }
+    ),
+  ]);
+
+  const fxTweet = fxSettled.status === 'fulfilled' ? fxSettled.value?.tweet || null : null;
+  const syndRaw = syndSettled.status === 'fulfilled' ? syndSettled.value : null;
+  const syndTweet = syndRaw && syndRaw.__typename !== 'TweetTombstone' ? syndRaw : null;
+
+  if (!fxTweet && !syndTweet) {
+    throw new XMediaFallbackNeedsYtDlpError('Both fxtwitter and X Syndication APIs returned no data.');
+  }
+
+  // Merge link_map and text (compare length so Note Tweets >280 chars from fxtwitter win)
+  const linkMap = new Map<string, string>();
+  const mediaLinks = new Set<string>();
+  for (const facet of fxTweet?.raw_text?.facets || []) {
+    if (typeof facet.original === 'string' && typeof facet.replacement === 'string') {
+      linkMap.set(facet.original, facet.replacement);
+      if (facet.type === 'media') mediaLinks.add(facet.original);
+    }
+  }
+  for (const ent of syndTweet?.entities?.urls || []) {
+    if (typeof ent.url === 'string' && typeof ent.expanded_url === 'string' && !linkMap.has(ent.url)) {
+      linkMap.set(ent.url, ent.expanded_url);
+    }
+  }
+  for (const entM of syndTweet?.entities?.media || []) {
+    if (typeof entM.url === 'string') mediaLinks.add(entM.url);
+  }
+
+  const fxText = (fxTweet?.raw_text?.text || fxTweet?.text || '').trim();
+  const syndText = (syndTweet?.text || '').trim();
+  const chosenRawText = fxText.length > syndText.length ? fxText : syndText;
+  const cleanedText = resolveXTextAndLinks({
+    rawText: chosenRawText,
+    displayTextRange: syndTweet?.display_text_range || null,
+    linkMap,
+    mediaLinks,
+  });
+
+  // Collect media across all 4 structures + deduplicate by canonical media_id
+  const seenIds = new Set<string>();
+  const items: Array<{ kind: 'video' | 'photo'; url: string; width: number; height: number }> = [];
+  const videos: Array<{ url: string; width: number; height: number }> = [];
+  const photos: Array<{ url: string }> = [];
+  let durationSeconds: number | null = null;
+  let thumb: string | null = null;
+
+  const pushMediaItem = async (
+    kind: 'video' | 'photo',
+    rawUrl: string | undefined | null,
+    width = 0,
+    height = 0,
+    thumbCandidate?: string | null
+  ) => {
+    if (!rawUrl || typeof rawUrl !== 'string' || !/^https?:\/\//i.test(rawUrl.trim())) return;
+    const trimmed = rawUrl.trim();
+    const idKey = xMediaIdentity(kind, trimmed);
+    if (seenIds.has(idKey)) return;
+    const valid = await validatePublicUrl(trimmed);
+    if (!valid) return;
+    seenIds.add(idKey);
+    const finalUrl = valid.toString();
+    items.push({ kind, url: finalUrl, width, height });
+    if (kind === 'video') {
+      videos.push({ url: finalUrl, width, height });
+      if (!thumb && thumbCandidate && /^https?:\/\//i.test(thumbCandidate)) {
+        const validThumb = await validatePublicUrl(thumbCandidate);
+        if (validThumb) thumb = validThumb.toString();
+      }
+    } else {
+      photos.push({ url: finalUrl });
+      if (!thumb) thumb = finalUrl;
+    }
+  };
+
+  // Structure 1: fxtwitter media.all[]
+  if (Array.isArray(fxTweet?.media?.all)) {
+    for (const m of fxTweet.media.all) {
+      const mType = String(m.type || '').toLowerCase();
+      if (typeof m.duration === 'number' && durationSeconds === null) {
+        durationSeconds = Math.round(m.duration);
+      }
+      if (X_VIDEO_MEDIA_TYPES.has(mType)) {
+        const chosen = chooseBestXVideoUrl(m.formats || m.variants, m.url);
+        await pushMediaItem('video', chosen, Number(m.width || 0), Number(m.height || 0), m.thumbnail_url);
+      } else {
+        await pushMediaItem('photo', m.url, Number(m.width || 0), Number(m.height || 0));
+      }
+    }
+  }
+
+  // Structure 2: fxtwitter media.videos[] & media.photos[]
+  for (const v of fxTweet?.media?.videos || []) {
+    if (typeof v.duration === 'number' && durationSeconds === null) {
+      durationSeconds = Math.round(v.duration);
+    }
+    const chosen = chooseBestXVideoUrl(v.variants || v.formats, v.url);
+    await pushMediaItem('video', chosen, Number(v.width || 0), Number(v.height || 0), v.thumbnail_url);
+  }
+  for (const p of fxTweet?.media?.photos || []) {
+    await pushMediaItem('photo', p.url, Number(p.width || 0), Number(p.height || 0));
+  }
+
+  // Structure 3: Syndication mediaDetails[]
+  for (const md of syndTweet?.mediaDetails || []) {
+    const mdType = String(md.type || '').toLowerCase();
+    const w = Number(md.original_info?.width || 0);
+    const h = Number(md.original_info?.height || 0);
+    if (X_VIDEO_MEDIA_TYPES.has(mdType)) {
+      if (typeof md.video_info?.duration_millis === 'number' && durationSeconds === null) {
+        durationSeconds = Math.round(md.video_info.duration_millis / 1000);
+      }
+      const chosen = chooseBestXVideoUrl(md.video_info?.variants, md.url);
+      await pushMediaItem('video', chosen, w, h, md.media_url_https);
+    } else {
+      await pushMediaItem('photo', md.media_url_https || md.url, w, h);
+    }
+  }
+
+  // Structure 4: Syndication photos[]
+  for (const sp of syndTweet?.photos || []) {
+    if (typeof sp === 'string') {
+      await pushMediaItem('photo', sp);
+    } else if (sp && typeof sp === 'object') {
+      await pushMediaItem('photo', sp.url || sp.media_url_https, Number(sp.width || 0), Number(sp.height || 0));
+    }
+  }
+
+  const hasMediaHint = Boolean(
+    fxTweet?.possibly_sensitive ||
+      syndTweet?.possibly_sensitive ||
+      (fxTweet?.media?.all && fxTweet.media.all.length > 0) ||
+      (fxTweet?.media?.videos && fxTweet.media.videos.length > 0) ||
+      (fxTweet?.media?.photos && fxTweet.media.photos.length > 0) ||
+      (syndTweet?.mediaDetails && syndTweet.mediaDetails.length > 0) ||
+      (syndTweet?.photos && syndTweet.photos.length > 0) ||
+      syndTweet?.video ||
+      syndTweet?.videos
+  );
+
+  if (items.length === 0) {
+    if (!hasMediaHint) {
+      throw new XTextOnlyPostError();
+    }
+    throw new XMediaFallbackNeedsYtDlpError('X post has media hint without accessible direct URLs.');
+  }
+
+  const rawScreenName = (fxTweet?.author?.screen_name || syndTweet?.user?.screen_name || '').trim();
+  const safeScreenName = rawScreenName && !/^\d+$/.test(rawScreenName) ? rawScreenName : '';
+  const authorDisplay = safeScreenName
+    ? `@${safeScreenName}`
+    : fxTweet?.author?.name || syndTweet?.user?.name || 'X';
+  const title = cleanedText ? cleanedText.slice(0, 90) : safeScreenName ? `X Post by @${safeScreenName}` : 'X Media';
+  const primaryVideo = videos[0];
+
+  return {
+    title,
+    author: authorDisplay,
+    durationSeconds,
+    thumbnail: thumb || fxTweet?.author?.avatar_url || syndTweet?.user?.profile_image_url_https || null,
+    videos,
+    photos,
+    items,
+    referer: 'https://x.com/',
+    isVertical: primaryVideo && primaryVideo.width > 0 && primaryVideo.height > 0 ? primaryVideo.height > primaryVideo.width : false,
+  };
+}
+
+async function fetchTikTokHtml(targetUrl: string, timeoutMs = 12000): Promise<string> {
+  const valid = await validatePublicUrl(targetUrl);
+  if (!valid) {
+    throw new Error('Disallowed TikTok URL.');
+  }
+  if (adminConfig.xray.enabled && xrayState.running) {
+    const resp = await proxyHttpGetFullText(valid.toString(), adminConfig.xray.httpPort, timeoutMs, 4 * 1024 * 1024);
+    if (resp.statusCode < 200 || resp.statusCode >= 400) {
+      throw new Error(`HTTP ${resp.statusCode}`);
+    }
+    return resp.body;
+  }
+  const res = await fetch(valid.toString(), {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+      Referer: 'https://www.tiktok.com/',
+    },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return await res.text();
+}
+
+function extractHtmlScriptJson(html: string, scriptId: string): Record<string, unknown> | null {
+  const re = new RegExp(`<script[^>]+id=["']${scriptId}["'][^>]*>([\\s\\S]*?)<\\/script>`, 'i');
+  const match = html.match(re);
+  if (!match || !match[1]) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseGalleryDlJsonOutput(stdout: string): Array<Record<string, unknown>> {
+  const trimmed = stdout.trim();
+  if (!trimmed) return [];
+  const entries: Array<Record<string, unknown>> = [];
+
+  const absorbItem = (item: unknown) => {
+    if (!item) return;
+    if (Array.isArray(item)) {
+      const merged: Record<string, unknown> = {};
+      if (typeof item[1] === 'string' && /^https?:\/\//i.test(item[1])) {
+        merged._mediaUrl = item[1];
+      }
+      for (const part of item) {
+        if (part && typeof part === 'object' && !Array.isArray(part)) {
+          Object.assign(merged, part as Record<string, unknown>);
+        }
+      }
+      if (Object.keys(merged).length > 0) {
+        entries.push(merged);
+      }
+      return;
+    }
+    if (typeof item === 'object') {
+      entries.push(item as Record<string, unknown>);
+    }
+  };
+
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        for (const el of parsed) {
+          absorbItem(el);
+        }
+        return entries;
+      }
+    } catch {
+      // Fall back to line-by-line JSON parsing
+    }
+  }
+
+  for (const line of trimmed.split(/\r?\n/)) {
+    const ln = line.trim();
+    if (!ln) continue;
+    try {
+      absorbItem(JSON.parse(ln));
+    } catch {
+      // Ignore malformed lines
+    }
+  }
+  return entries;
+}
+
+async function inspectTikTokWithGalleryDl(resolvedUrl: string): Promise<Array<Record<string, unknown>>> {
+  const gdlRunner = await getGalleryDlRunner();
+  if (!gdlRunner) return [];
+  const args = ['-j'];
+  if (adminConfig.xray.enabled && xrayState.running) {
+    args.push('--proxy', `http://127.0.0.1:${adminConfig.xray.httpPort}`);
+  }
+  args.push('--', resolvedUrl);
+  const { stdout } = await execFileAsync(gdlRunner.cmd, [...gdlRunner.baseArgs, ...args], {
+    timeout: 22000,
+    maxBuffer: 6 * 1024 * 1024,
+  });
+  return parseGalleryDlJsonOutput(stdout);
+}
+
+interface TikTokProfileInfo {
+  username: string;
+  nickname: string;
+  bio: string;
+  avatarUrl: string | null;
+  verified: boolean;
+  isPrivate: boolean;
+  followers: number | null;
+  likes: number | null;
+  videosCount: number | null;
+}
+
+function formatCompactCount(val: number | null): string | null {
+  if (val === null || !Number.isFinite(val)) return null;
+  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (val >= 1_000) return `${(val / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+  return String(Math.round(val));
+}
+
+async function fetchTikTokProfile(
+  resolvedUrl: URL,
+  fallbackUsername: string | null
+): Promise<TikTokProfileInfo> {
+  const cleanUser = (fallbackUsername || '').replace(/^@/, '').trim();
+  const profile: TikTokProfileInfo = {
+    username: cleanUser,
+    nickname: cleanUser ? `@${cleanUser}` : 'TikTok Profile',
+    bio: '',
+    avatarUrl: null,
+    verified: false,
+    isPrivate: false,
+    followers: null,
+    likes: null,
+    videosCount: null,
+  };
+
+  let html = '';
+  try {
+    html = await fetchTikTokHtml(resolvedUrl.toString(), 12000);
+  } catch {
+    // HTML fetch failed; Layer 2 (gallery-dl -j) can still succeed
+  }
+
+  // Layer 1: __UNIVERSAL_DATA_FOR_REHYDRATION__
+  if (html) {
+    const universal = extractHtmlScriptJson(html, '__UNIVERSAL_DATA_FOR_REHYDRATION__');
+    const scope = universal?.__DEFAULT_SCOPE__ as Record<string, unknown> | undefined;
+    const userDetail = scope?.['webapp.user-detail'] as Record<string, unknown> | undefined;
+    const userInfo = userDetail?.userInfo as Record<string, unknown> | undefined;
+    const user = userInfo?.user as Record<string, unknown> | undefined;
+    const stats = userInfo?.stats as Record<string, unknown> | undefined;
+    if (user) {
+      if (typeof user.uniqueId === 'string' && user.uniqueId.trim()) profile.username = user.uniqueId.trim();
+      if (typeof user.nickname === 'string' && user.nickname.trim()) profile.nickname = user.nickname.trim();
+      if (typeof user.signature === 'string') profile.bio = user.signature.trim();
+      if (typeof user.verified === 'boolean') profile.verified = user.verified;
+      if (typeof user.secret === 'boolean') profile.isPrivate = user.secret;
+      const avatar =
+        (typeof user.avatarLarger === 'string' && user.avatarLarger) ||
+        (typeof user.avatarMedium === 'string' && user.avatarMedium) ||
+        (typeof user.avatarThumb === 'string' && user.avatarThumb) ||
+        null;
+      if (avatar) {
+        const valid = await validatePublicUrl(avatar);
+        if (valid) profile.avatarUrl = valid.toString();
+      }
+      if (stats) {
+        if (typeof stats.followerCount === 'number') profile.followers = stats.followerCount;
+        if (typeof stats.heartCount === 'number') profile.likes = stats.heartCount;
+        if (typeof stats.videoCount === 'number') profile.videosCount = stats.videoCount;
+      }
+      if (profile.avatarUrl && profile.username) {
+        return profile;
+      }
+    }
+  }
+
+  // Layer 2: gallery-dl -j
+  try {
+    const gdlEntries = await inspectTikTokWithGalleryDl(resolvedUrl.toString());
+    if (gdlEntries.length > 0) {
+      const merged: Record<string, unknown> = {};
+      for (const entry of gdlEntries) {
+        for (const [k, v] of Object.entries(entry)) {
+          if (merged[k] === undefined || merged[k] === null || merged[k] === '') {
+            merged[k] = v;
+          }
+        }
+      }
+      const authorObj = (merged.author && typeof merged.author === 'object'
+        ? (merged.author as Record<string, unknown>)
+        : merged.user && typeof merged.user === 'object'
+          ? (merged.user as Record<string, unknown>)
+          : null);
+      if (authorObj) {
+        if (!profile.username && typeof authorObj.uniqueId === 'string') profile.username = authorObj.uniqueId;
+        if (typeof authorObj.nickname === 'string' && authorObj.nickname.trim()) profile.nickname = authorObj.nickname.trim();
+        if (!profile.bio && typeof authorObj.signature === 'string') profile.bio = authorObj.signature.trim();
+        if (!profile.avatarUrl && typeof authorObj.avatarLarger === 'string') {
+          const valid = await validatePublicUrl(authorObj.avatarLarger);
+          if (valid) profile.avatarUrl = valid.toString();
+        }
+      }
+      if (!profile.avatarUrl && typeof merged._mediaUrl === 'string') {
+        const valid = await validatePublicUrl(merged._mediaUrl);
+        if (valid) profile.avatarUrl = valid.toString();
+      }
+      if (profile.avatarUrl && profile.username) {
+        return profile;
+      }
+    }
+  } catch {
+    // Fall through to Layer 3
+  }
+
+  // Layer 3: SIGI_STATE
+  if (html) {
+    const sigi = extractHtmlScriptJson(html, 'SIGI_STATE');
+    const userModule = sigi?.UserModule as Record<string, unknown> | undefined;
+    const users = userModule?.users as Record<string, Record<string, unknown>> | undefined;
+    const statsMap = userModule?.stats as Record<string, Record<string, unknown>> | undefined;
+    if (users) {
+      const firstKey = Object.keys(users)[0];
+      const u = (profile.username && users[profile.username]) || (firstKey ? users[firstKey] : undefined);
+      if (u) {
+        if (typeof u.uniqueId === 'string' && u.uniqueId.trim()) profile.username = u.uniqueId.trim();
+        if (typeof u.nickname === 'string' && u.nickname.trim()) profile.nickname = u.nickname.trim();
+        if (!profile.bio && typeof u.signature === 'string') profile.bio = u.signature.trim();
+        if (typeof u.verified === 'boolean') profile.verified = u.verified;
+        if (typeof u.secret === 'boolean') profile.isPrivate = u.secret;
+        if (!profile.avatarUrl && typeof u.avatarLarger === 'string') {
+          const valid = await validatePublicUrl(u.avatarLarger);
+          if (valid) profile.avatarUrl = valid.toString();
+        }
+        const st = statsMap?.[profile.username] || (firstKey ? statsMap?.[firstKey] : undefined);
+        if (st) {
+          if (profile.followers === null && typeof st.followerCount === 'number') profile.followers = st.followerCount;
+          if (profile.likes === null && typeof st.heartCount === 'number') profile.likes = st.heartCount;
+          if (profile.videosCount === null && typeof st.videoCount === 'number') profile.videosCount = st.videoCount;
+        }
+      }
+    }
+  }
+
+  // Layer 4: Meta tags (og:title, og:image, description)
+  if (html) {
+    const ogTitle = html.match(/<meta[^>]+(?:property|name)=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+    const ogImage = html.match(/<meta[^>]+(?:property|name)=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1];
+    const desc = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)?.[1];
+    if (ogTitle) {
+      const m = ogTitle.match(/^(.*?)\s*\(@([A-Za-z0-9_.\-]+)\)/);
+      if (m) {
+        if (m[1]?.trim()) profile.nickname = m[1].trim();
+        if (!profile.username && m[2]?.trim()) profile.username = m[2].trim();
+      } else if (!profile.nickname || profile.nickname.startsWith('@')) {
+        profile.nickname = ogTitle.replace(/\s*\|\s*TikTok.*$/i, '').trim() || profile.nickname;
+      }
+    }
+    if (!profile.bio && desc) {
+      profile.bio = desc.trim();
+    }
+    if (!profile.avatarUrl && ogImage) {
+      const valid = await validatePublicUrl(ogImage.replace(/&amp;/g, '&'));
+      if (valid) profile.avatarUrl = valid.toString();
+    }
+  }
+
+  return profile;
+}
+
+async function extractTikTokItemFromHtml(html: string): Promise<ResolvedFallbackMedia | null> {
+  let item: Record<string, unknown> | null = null;
+
+  const universal = extractHtmlScriptJson(html, '__UNIVERSAL_DATA_FOR_REHYDRATION__');
+  const scope = universal?.__DEFAULT_SCOPE__ as Record<string, unknown> | undefined;
+  const videoDetail = scope?.['webapp.video-detail'] as Record<string, unknown> | undefined;
+  const itemInfo = videoDetail?.itemInfo as Record<string, unknown> | undefined;
+  if (itemInfo?.itemStruct && typeof itemInfo.itemStruct === 'object') {
+    item = itemInfo.itemStruct as Record<string, unknown>;
+  }
+
+  if (!item) {
+    const sigi = extractHtmlScriptJson(html, 'SIGI_STATE');
+    const itemModule = sigi?.ItemModule as Record<string, Record<string, unknown>> | undefined;
+    if (itemModule) {
+      const firstKey = Object.keys(itemModule)[0];
+      if (firstKey && itemModule[firstKey]) {
+        item = itemModule[firstKey];
+      }
+    }
+  }
+
+  if (!item) return null;
+
+  const photos: Array<{ url: string }> = [];
+  const imagePost = item.imagePost as Record<string, unknown> | undefined;
+  const rawImages = Array.isArray(imagePost?.images) ? (imagePost.images as Array<Record<string, unknown>>) : [];
+  for (const img of rawImages) {
+    const imgUrlObj = img.imageURL as Record<string, unknown> | undefined;
+    const urlList = Array.isArray(imgUrlObj?.urlList) ? (imgUrlObj.urlList as unknown[]) : [];
+    const candidate = urlList.find((u): u is string => typeof u === 'string' && /^https?:\/\//i.test(u));
+    if (candidate) {
+      const valid = await validatePublicUrl(candidate);
+      if (valid) photos.push({ url: valid.toString() });
+    }
+  }
+
+  const videos: Array<{ url: string; width: number; height: number }> = [];
+  const videoObj = item.video as Record<string, unknown> | undefined;
+  if (photos.length === 0 && videoObj) {
+    const candidates: string[] = [];
+    if (typeof videoObj.playAddr === 'string') candidates.push(videoObj.playAddr);
+    if (typeof videoObj.downloadAddr === 'string') candidates.push(videoObj.downloadAddr);
+    if (Array.isArray(videoObj.bitrateInfo)) {
+      for (const b of videoObj.bitrateInfo as Array<Record<string, unknown>>) {
+        const pa = b.PlayAddr as Record<string, unknown> | undefined;
+        const list = Array.isArray(pa?.UrlList) ? (pa.UrlList as unknown[]) : [];
+        for (const u of list) {
+          if (typeof u === 'string') candidates.push(u);
+        }
+      }
+    }
+    const width = Number(videoObj.width || 1080);
+    const height = Number(videoObj.height || 1920);
+    for (const c of candidates) {
+      if (!/^https?:\/\//i.test(c)) continue;
+      const valid = await validatePublicUrl(c);
+      if (valid) {
+        videos.push({ url: valid.toString(), width, height });
+        break;
+      }
+    }
+  }
+
+  let musicUrl: string | null = null;
+  const musicObj = item.music as Record<string, unknown> | undefined;
+  if (typeof musicObj?.playUrl === 'string' && /^https?:\/\//i.test(musicObj.playUrl)) {
+    const valid = await validatePublicUrl(musicObj.playUrl);
+    if (valid) musicUrl = valid.toString();
+  }
+
+  if (videos.length === 0 && photos.length === 0) return null;
+
+  const authorObj = item.author as Record<string, unknown> | undefined;
+  const uid = typeof authorObj?.uniqueId === 'string' ? authorObj.uniqueId.replace(/^@/, '').trim() : '';
+  const nick = typeof authorObj?.nickname === 'string' ? authorObj.nickname.trim() : '';
+  const author = uid ? `@${uid}` : nick || 'TikTok';
+  const desc = typeof item.desc === 'string' ? item.desc : '';
+  const cover =
+    (typeof videoObj?.cover === 'string' && videoObj.cover) ||
+    (typeof videoObj?.originCover === 'string' && videoObj.originCover) ||
+    photos[0]?.url ||
+    null;
+  const vW = Number(videoObj?.width || 0);
+  const vH = Number(videoObj?.height || 0);
+
+  return {
+    title: cleanTikTokTitle(desc, 'TikTok Video'),
+    author,
+    durationSeconds: typeof videoObj?.duration === 'number' && videoObj.duration > 0 ? videoObj.duration : null,
+    thumbnail: cover,
+    videos,
+    photos,
+    musicUrl,
+    referer: 'https://www.tiktok.com/',
+    isVertical: vW > 0 && vH > 0 ? vH >= vW : true,
+  };
+}
+
+async function resolveTikTokMediaFallback(rawParsed: URL): Promise<ResolvedFallbackMedia> {
+  const parsed = await resolveTikTokShortUrl(rawParsed);
+  const classified = classifyTikTokUrl(parsed.toString());
+
+  if (classified.kind === 'profile') {
+    const prof = await fetchTikTokProfile(parsed, classified.username);
+    if (!prof.avatarUrl) {
+      throw new Error('Could not load TikTok profile avatar.');
+    }
+    const statParts = [
+      formatCompactCount(prof.followers) ? `${formatCompactCount(prof.followers)} followers` : null,
+      formatCompactCount(prof.likes) ? `${formatCompactCount(prof.likes)} likes` : null,
+    ].filter(Boolean);
+    const titleBase = prof.nickname && prof.username && !prof.nickname.includes(prof.username)
+      ? `${prof.nickname} (@${prof.username})`
+      : prof.nickname || `@${prof.username}`;
+    return {
+      title: statParts.length > 0 ? `${titleBase} • ${statParts.join(' • ')}` : titleBase,
+      author: prof.username ? `@${prof.username}` : 'TikTok',
+      durationSeconds: null,
+      thumbnail: prof.avatarUrl,
+      videos: [],
+      photos: [{ url: prof.avatarUrl }],
+      musicUrl: null,
+      referer: 'https://www.tiktok.com/',
+      isProfile: true,
+    };
+  }
+
+  // Layer A: gallery-dl -j metadata (if binary is available)
+  try {
+    const gdlEntries = await inspectTikTokWithGalleryDl(parsed.toString());
+    if (gdlEntries.length > 0) {
+      const photos: Array<{ url: string }> = [];
+      const videos: Array<{ url: string; width: number; height: number }> = [];
+      const audios: string[] = [];
+      let title = '';
+      let author = '';
+      let thumb: string | null = null;
+      let durationSeconds: number | null = null;
+      let width = 1080;
+      let height = 1920;
+
+      for (const entry of gdlEntries) {
+        if (!title) {
+          const rawTitle =
+            (typeof entry.desc === 'string' && entry.desc) ||
+            (typeof entry.title === 'string' && entry.title) ||
+            (typeof entry.filename === 'string' && entry.filename) ||
+            '';
+          if (rawTitle) title = cleanTikTokTitle(rawTitle, '');
+        }
+        if (!author) {
+          const aObj = entry.author && typeof entry.author === 'object' ? (entry.author as Record<string, unknown>) : null;
+          const uid =
+            (typeof aObj?.uniqueId === 'string' && aObj.uniqueId) ||
+            (typeof entry.uploader === 'string' && entry.uploader) ||
+            (typeof entry.username === 'string' && entry.username) ||
+            '';
+          if (uid) author = `@${uid.replace(/^@/, '')}`;
+        }
+        if (durationSeconds === null && typeof entry.duration === 'number' && entry.duration > 0) {
+          durationSeconds = Math.round(entry.duration);
+        }
+        if (typeof entry.width === 'number' && entry.width > 0) width = entry.width;
+        if (typeof entry.height === 'number' && entry.height > 0) height = entry.height;
+
+        const mediaUrl = typeof entry._mediaUrl === 'string' ? entry._mediaUrl : typeof entry.url === 'string' ? entry.url : '';
+        if (mediaUrl && /^https?:\/\//i.test(mediaUrl)) {
+          const valid = await validatePublicUrl(mediaUrl);
+          if (valid) {
+            const ext = typeof entry.extension === 'string' ? entry.extension.toLowerCase() : '';
+            const lowerUrl = valid.pathname.toLowerCase();
+            if (['jpg', 'jpeg', 'png', 'webp'].includes(ext) || /\.(jpe?g|png|webp)$/i.test(lowerUrl)) {
+              photos.push({ url: valid.toString() });
+              if (!thumb) thumb = valid.toString();
+            } else if (['mp3', 'm4a'].includes(ext) || /\.(mp3|m4a)$/i.test(lowerUrl)) {
+              audios.push(valid.toString());
+            } else if (ext === 'mp4' || /\.mp4$/i.test(lowerUrl) || entry.video) {
+              videos.push({ url: valid.toString(), width, height });
+            }
+          }
+        }
+      }
+
+      // Section 7 rule: photos win over cover mp4s
+      const effectiveVideos = photos.length > 0 ? [] : videos;
+      if (photos.length > 0 || effectiveVideos.length > 0) {
+        return {
+          title: title || 'TikTok Media',
+          author: author || (classified.username ? `@${classified.username}` : 'TikTok'),
+          durationSeconds,
+          thumbnail: thumb || photos[0]?.url || null,
+          videos: effectiveVideos,
+          photos,
+          musicUrl: audios[0] || null,
+          referer: 'https://www.tiktok.com/',
+          isVertical: height >= width,
+        };
+      }
+    }
+  } catch {
+    // Fall through to Layer B (HTML JSON extraction)
+  }
+
+  // Layer B: Native HTML JSON (__UNIVERSAL_DATA_FOR_REHYDRATION__ / SIGI_STATE)
+  try {
+    const html = await fetchTikTokHtml(parsed.toString(), 10000);
+    const fromHtml = await extractTikTokItemFromHtml(html);
+    if (fromHtml) {
+      return fromHtml;
+    }
+  } catch {
+    // Fall through to Layer C (tikwm API)
+  }
+
+  // Layer C: tikwm.com API fallback using resolved URL
   const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(parsed.toString())}&hd=1`;
   const payload = await fetchJsonViaOptionalXray<{
     code?: number;
@@ -2795,9 +4234,9 @@ async function resolveTikTokMediaFallback(parsed: URL): Promise<ResolvedFallback
     throw new Error('No downloadable TikTok video or photo found.');
   }
 
-  const cleanTitle = (data.title || '').trim().slice(0, 90) || 'TikTok Video';
+  const cleanTitle = cleanTikTokTitle(data.title, 'TikTok Video').slice(0, 90);
   const uid = (data.author?.unique_id || '').replace(/^@/, '').trim();
-  const author = uid ? `@${uid}` : data.author?.nickname || 'TikTok';
+  const author = uid ? `@${uid}` : data.author?.nickname || (classified.username ? `@${classified.username}` : 'TikTok');
 
   return {
     title: cleanTitle,
@@ -2808,7 +4247,621 @@ async function resolveTikTokMediaFallback(parsed: URL): Promise<ResolvedFallback
     photos,
     musicUrl,
     referer: 'https://www.tiktok.com/',
+    isVertical: true,
   };
+}
+
+const PINTEREST_CSS_ASSET_HASH = 'd53b014d86a6b6761bf649a0ed813c2b';
+const PINTEREST_QUALITY_LEVELS = ['originals', '1200x', '736x'] as const;
+
+function isPinterestUrl(parsed: URL): boolean {
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'pin.it' || host.endsWith('.pin.it')) return true;
+  if (host === 'pinterest.com' || host.endsWith('.pinterest.com')) return true;
+  return /^(?:[a-z]{2,3}\.)?pinterest\.(?:com|co\.[a-z]{2}|[a-z]{2,3})$/i.test(host);
+}
+
+function extractPinterestPinIdFromUrl(urlStr: string): string | null {
+  const m = urlStr.match(/\/pin\/(\d+)(?:\/|$|\?|#)/i);
+  return m ? m[1] : null;
+}
+
+function cleanPinterestEscapedUrl(raw: string): string {
+  return decodeHtmlEntities(raw.trim())
+    .replace(/\\u002F/gi, '/')
+    .replace(/\\\//g, '/')
+    .replace(/[.,!?)\]'"»]+$/, '');
+}
+
+function buildPinimgUrl(hash32: string, size: 'originals' | '1200x' | '736x'): string {
+  const h = hash32.toLowerCase();
+  return `https://i.pinimg.com/${size}/${h.slice(0, 2)}/${h.slice(2, 4)}/${h.slice(4, 6)}/${h}.jpg`;
+}
+
+function extractPinimgHash32(urlOrPath: string): string | null {
+  const m = urlOrPath.match(/([a-f0-9]{32})\.(?:jpe?g|png|webp)/i);
+  if (!m) return null;
+  const h = m[1].toLowerCase();
+  return h === PINTEREST_CSS_ASSET_HASH ? null : h;
+}
+
+async function resolvePinterestPinUrl(rawParsed: URL): Promise<{
+  resolvedUrl: URL;
+  pinId: string | null;
+  isNonPinPath: boolean;
+}> {
+  let current = rawParsed;
+  let pinId = extractPinterestPinIdFromUrl(current.toString());
+
+  if (!pinId) {
+    try {
+      for (let hop = 0; hop < 6; hop += 1) {
+        const validCur = await validatePublicUrl(current.toString());
+        if (!validCur) break;
+        let location: string | null = null;
+        if (adminConfig.xray.enabled && xrayState.running) {
+          let probe = await probeRedirectHopViaProxy(validCur.toString(), 'HEAD', adminConfig.xray.httpPort, 10000);
+          if (!probe.location && (probe.statusCode === 405 || probe.statusCode >= 400)) {
+            probe = await probeRedirectHopViaProxy(validCur.toString(), 'GET', adminConfig.xray.httpPort, 10000);
+          }
+          location = probe.location;
+        } else {
+          let res = await fetch(validCur.toString(), {
+            method: 'HEAD',
+            redirect: 'manual',
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            },
+            signal: AbortSignal.timeout(10000),
+          });
+          location = res.headers.get('location');
+          await res.body?.cancel().catch(() => {});
+          if (!location && (res.status === 405 || res.status >= 400)) {
+            res = await fetch(validCur.toString(), {
+              method: 'GET',
+              redirect: 'manual',
+              headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+              },
+              signal: AbortSignal.timeout(10000),
+            });
+            location = res.headers.get('location');
+            await res.body?.cancel().catch(() => {});
+          }
+        }
+        if (!location) break;
+        const nextValid = await validatePublicUrl(new URL(location, validCur).toString());
+        if (!nextValid) break;
+        const hopPinId = extractPinterestPinIdFromUrl(nextValid.toString());
+        if (hopPinId) pinId = hopPinId;
+        current = nextValid;
+        if (pinId && !nextValid.pathname.includes('/sent/')) break;
+      }
+    } catch (err) {
+      appendAppLog(
+        'warn',
+        'pinterest',
+        `Pinterest link resolve warning (${rawParsed.toString()}): ${err instanceof Error ? err.message : 'redirect failed'}`
+      );
+    }
+  }
+
+  if (pinId) {
+    return {
+      resolvedUrl: new URL(`https://www.pinterest.com/pin/${pinId}/`),
+      pinId,
+      isNonPinPath: false,
+    };
+  }
+
+  const host = current.hostname.toLowerCase();
+  const isShort = host === 'pin.it' || host.endsWith('.pin.it');
+  return {
+    resolvedUrl: current,
+    pinId: null,
+    isNonPinPath: !isShort && !/^\/pin\/\d+/i.test(current.pathname),
+  };
+}
+
+async function headCheckImageOptionalXray(
+  targetUrl: string,
+  timeoutMs = 8000
+): Promise<{ ok: boolean; contentLength: number | null; contentType: string }> {
+  const valid = await validatePublicUrl(targetUrl);
+  if (!valid) return { ok: false, contentLength: null, contentType: '' };
+  const targetPort = valid.port ? Number(valid.port) : valid.protocol === 'https:' ? 443 : 80;
+  const reqHeaders = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    Referer: 'https://www.pinterest.com/',
+    Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+  };
+
+  if (adminConfig.xray.enabled && xrayState.running) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false, contentLength: null, contentType: '' }), timeoutMs);
+      const connectReq = http.request({
+        host: '127.0.0.1',
+        port: adminConfig.xray.httpPort,
+        method: 'CONNECT',
+        path: `${valid.hostname}:${targetPort}`,
+      });
+      connectReq.on('connect', (cRes, socket) => {
+        if (cRes.statusCode !== 200) {
+          clearTimeout(timer);
+          socket.destroy();
+          resolve({ ok: false, contentLength: null, contentType: '' });
+          return;
+        }
+        const mod = valid.protocol === 'https:' ? https : http;
+        const createConnection = () =>
+          valid.protocol === 'https:' ? tls.connect({ socket, servername: valid.hostname }) : socket;
+        const req = mod.request(
+          {
+            hostname: valid.hostname,
+            port: targetPort,
+            path: valid.pathname + valid.search,
+            method: 'HEAD',
+            createConnection,
+            headers: { ...reqHeaders, Host: valid.host, Connection: 'close' },
+          },
+          (resp) => {
+            const status = resp.statusCode || 0;
+            const ct = String(resp.headers['content-type'] || '').toLowerCase();
+            const lenRaw = Number(resp.headers['content-length'] || 0);
+            const contentLength = Number.isFinite(lenRaw) && lenRaw > 0 ? lenRaw : null;
+            resp.destroy();
+            clearTimeout(timer);
+            resolve({
+              ok: status >= 200 && status < 300 && ct.startsWith('image/') && (contentLength === null || contentLength > 2000),
+              contentLength,
+              contentType: ct,
+            });
+          }
+        );
+        req.on('error', () => {
+          clearTimeout(timer);
+          resolve({ ok: false, contentLength: null, contentType: '' });
+        });
+        req.end();
+      });
+      connectReq.on('error', () => {
+        clearTimeout(timer);
+        resolve({ ok: false, contentLength: null, contentType: '' });
+      });
+      connectReq.end();
+    });
+  }
+
+  try {
+    const res = await fetch(valid.toString(), {
+      method: 'HEAD',
+      headers: reqHeaders,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const lenRaw = Number(res.headers.get('content-length') || 0);
+    const contentLength = Number.isFinite(lenRaw) && lenRaw > 0 ? lenRaw : null;
+    await res.body?.cancel().catch(() => {});
+    return {
+      ok: res.ok && ct.startsWith('image/') && (contentLength === null || contentLength > 2000),
+      contentLength,
+      contentType: ct,
+    };
+  } catch {
+    return { ok: false, contentLength: null, contentType: '' };
+  }
+}
+
+async function resolvePinimgBestQualityUrl(hash32: string, fallbackUrl?: string | null): Promise<string> {
+  for (const level of PINTEREST_QUALITY_LEVELS) {
+    const candidate = buildPinimgUrl(hash32, level);
+    const check = await headCheckImageOptionalXray(candidate, 7000);
+    if (check.ok) {
+      return candidate;
+    }
+  }
+  return fallbackUrl || buildPinimgUrl(hash32, '736x');
+}
+
+interface PinterestResolvedMedia extends ResolvedFallbackMedia {
+  pinId: string | null;
+  photoHashes: string[];
+  isGif?: boolean;
+  isHlsVideo?: boolean;
+}
+
+const pinterestResolveCache = new Map<string, { data: PinterestResolvedMedia; expiresAt: number }>();
+
+function extractPinterestVideoCandidates(html: string): string[] {
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  const pushCandidate = (raw: string | undefined | null) => {
+    if (!raw) return;
+    const cleaned = cleanPinterestEscapedUrl(raw);
+    if (!/^https?:\/\//i.test(cleaned) || seen.has(cleaned)) return;
+    seen.add(cleaned);
+    candidates.push(cleaned);
+  };
+
+  // Layer 1 & 2: og:video meta tags (both attribute orders)
+  for (const m of html.matchAll(
+    /<meta[^>]+(?:property|name)=["']og:video(?::secure_url|:url)?["'][^>]+content=["']([^"']+)["']/gi
+  )) {
+    pushCandidate(m[1]);
+  }
+  for (const m of html.matchAll(
+    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']og:video(?::secure_url|:url)?["']/gi
+  )) {
+    pushCandidate(m[1]);
+  }
+
+  // Layer 3: Structured pin video_list block (prefer highest quality mp4, then HLS m3u8)
+  const videoListMatch = html.match(/"video_list"\s*:\s*\{/);
+  if (videoListMatch && videoListMatch.index !== undefined) {
+    const vChunk = html.slice(videoListMatch.index, videoListMatch.index + 12000);
+    for (const key of ['"V_1080P"', '"V_720P"', '"V_480P"', '"V_360P"']) {
+      const kIdx = vChunk.indexOf(key);
+      if (kIdx !== -1) {
+        const sub = vChunk.slice(kIdx, kIdx + 1000);
+        const u = sub.match(/"url"\s*:\s*"(https?:[^"]+)"/i);
+        if (u?.[1]) pushCandidate(u[1]);
+      }
+    }
+    for (const m of vChunk.matchAll(/"url"\s*:\s*"(https?:[^"]+\.(?:mp4|webm|m3u8)[^"]*)"/gi)) {
+      pushCandidate(m[1]);
+    }
+  }
+
+  // Layer 4: v\d*.pinimg.com/*.mp4
+  for (const m of html.matchAll(/https?:\\?\/\\?\/v\d*\.pinimg\.com[^\s"'<>\\]+\.mp4(?:[^\s"'<>\\]*)?/gi)) {
+    pushCandidate(m[0]);
+  }
+  // Layer 5: videos.pinimg.com/*.mp4
+  for (const m of html.matchAll(/https?:\\?\/\\?\/videos\.pinimg\.com[^\s"'<>\\]+\.mp4(?:[^\s"'<>\\]*)?/gi)) {
+    pushCandidate(m[0]);
+  }
+  // Layer 6: /expMp4/...mp4 (StoryPin / IdeaPin)
+  for (const m of html.matchAll(/https?:\\?\/\\?\/[^\s"'<>\\]*pinimg\.com[^\s"'<>\\]*\/expMp4\/[^\s"'<>\\]+\.mp4(?:[^\s"'<>\\]*)?/gi)) {
+    pushCandidate(m[0]);
+  }
+  // Layer 7: Any pinimg/pinterest .mp4, .webm, or .m3u8
+  for (const m of html.matchAll(/https?:\\?\/\\?\/[^\s"'<>\\]*(?:pinimg|pinterest)[^\s"'<>\\]+\.(?:mp4|webm|m3u8)(?:[^\s"'<>\\]*)?/gi)) {
+    pushCandidate(m[0]);
+  }
+
+  return candidates;
+}
+
+function extractPinterestGifCandidate(html: string): string | null {
+  for (const re of [
+    /https?:\\?\/\\?\/i\.pinimg\.com\\?\/originals\\?\/[^\s"'<>\\]+\.gif(?:\?[^\s"'<>\\]*)?/gi,
+    /https?:\\?\/\\?\/[^\s"'<>\\]*(?:i\.pinimg\.com|media\.giphy\.com|media\d*\.tenor\.com)[^\s"'<>\\]+\.gif(?:\?[^\s"'<>\\]*)?/gi,
+  ]) {
+    const m = html.match(re);
+    if (m?.[0]) {
+      const cleaned = cleanPinterestEscapedUrl(m[0]);
+      if (/^https?:\/\//i.test(cleaned)) return cleaned;
+    }
+  }
+  return null;
+}
+
+function extractPinterestCarouselHashes(html: string): string[] {
+  const seg = html.match(/"(?:carouselData|carousel_data)"\s*:\s*\{/);
+  if (!seg || seg.index === undefined) return [];
+  const chunk = html.slice(seg.index, seg.index + 200_000);
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+
+  // Preserve original carousel slide order (do NOT sort)
+  for (const m of chunk.matchAll(/"imageSignature"\s*:\s*"([a-f0-9]{32})"/gi)) {
+    const h = m[1].toLowerCase();
+    if (h !== PINTEREST_CSS_ASSET_HASH && !seen.has(h)) {
+      seen.add(h);
+      ordered.push(h);
+    }
+  }
+
+  // Secondary check if carouselSlots uses direct pinimg URLs without imageSignature
+  if (ordered.length === 0) {
+    for (const m of chunk.matchAll(/https?:\\?\/\\?\/i\.pinimg\.com[^\s"'<>\\]*\/([a-f0-9]{32})\.(?:jpe?g|png|webp)/gi)) {
+      const h = m[1].toLowerCase();
+      if (h !== PINTEREST_CSS_ASSET_HASH && !seen.has(h)) {
+        seen.add(h);
+        ordered.push(h);
+      }
+    }
+  }
+  return ordered;
+}
+
+function extractPinterestSingleImage(html: string): { hash: string | null; fallbackUrl: string | null } {
+  let fallbackUrl: string | null = null;
+
+  // Layer 1: og:image meta tag (both attribute orders)
+  const ogImg =
+    html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i)?.[1];
+  if (ogImg) {
+    const cleaned = cleanPinterestEscapedUrl(ogImg);
+    if (/^https?:\/\//i.test(cleaned)) {
+      fallbackUrl = cleaned;
+      const hash = extractPinimgHash32(cleaned);
+      if (hash) return { hash, fallbackUrl };
+    }
+  }
+
+  // Layer 2: id="pin-image-preload"
+  const preload =
+    html.match(/<link[^>]+id=["']pin-image-preload["'][^>]+href=["']([^"']+)["']/i)?.[1] ||
+    html.match(/<link[^>]+href=["']([^"']+)["'][^>]+id=["']pin-image-preload["']/i)?.[1];
+  if (preload) {
+    const cleaned = cleanPinterestEscapedUrl(preload);
+    if (/^https?:\/\//i.test(cleaned)) {
+      if (!fallbackUrl) fallbackUrl = cleaned;
+      const hash = extractPinimgHash32(cleaned);
+      if (hash) return { hash, fallbackUrl };
+    }
+  }
+
+  // Layer 3: Most frequent i.pinimg.com hash in page (excluding CSS asset hash)
+  const counts = new Map<string, number>();
+  for (const m of html.matchAll(/i\.pinimg\.com\\?\/[^\s"'<>\\]*?([a-f0-9]{32})\.(?:jpe?g|png|webp)/gi)) {
+    const h = m[1].toLowerCase();
+    if (h === PINTEREST_CSS_ASSET_HASH) continue;
+    counts.set(h, (counts.get(h) || 0) + 1);
+  }
+  let topHash: string | null = null;
+  let topCount = 0;
+  for (const [h, c] of counts.entries()) {
+    if (c > topCount) {
+      topCount = c;
+      topHash = h;
+    }
+  }
+  if (topHash) {
+    return { hash: topHash, fallbackUrl: fallbackUrl || buildPinimgUrl(topHash, '736x') };
+  }
+  return { hash: null, fallbackUrl };
+}
+
+async function resolvePinterestMediaFallback(rawParsed: URL): Promise<PinterestResolvedMedia> {
+  const { resolvedUrl, pinId: initialPinId, isNonPinPath } = await resolvePinterestPinUrl(rawParsed);
+  if (isNonPinPath) {
+    throw new Error('Please paste a specific Pinterest Pin link (e.g. pinterest.com/pin/... or pin.it/...). Boards and profiles are not supported.');
+  }
+
+  const xrayFingerprint = `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${xrayState.running}`;
+  const cacheKey = `${initialPinId || resolvedUrl.toString()}::${xrayFingerprint}`;
+  const cached = pinterestResolveCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+  if (cached) pinterestResolveCache.delete(cacheKey);
+
+  const pageResp = await fetchHttpTextOptionalXray(resolvedUrl.toString(), {
+    timeoutMs: 15000,
+    headers: {
+      Referer: 'https://www.pinterest.com/',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+  });
+  if (pageResp.statusCode < 200 || pageResp.statusCode >= 400 || !pageResp.body) {
+    throw new Error(`Pinterest returned HTTP ${pageResp.statusCode || 502}.`);
+  }
+
+  const html = pageResp.body;
+  const htmlPinId =
+    html.match(/"pin_id"\s*:\s*"?(\d+)"?/i)?.[1] ||
+    html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["'][^"']*\/pin\/(\d+)/i)?.[1] ||
+    initialPinId;
+
+  // Extract creator username & title/description from shared HTML
+  const pinnerUserMatch =
+    html.match(/"pinner"\s*:\s*\{[^}]*"username"\s*:\s*"([A-Za-z0-9_.-]+)"/i)?.[1] ||
+    html.match(/"username"\s*:\s*"([A-Za-z0-9_.-]+)"/i)?.[1];
+  const author = pinnerUserMatch ? `@${pinnerUserMatch.replace(/^@/, '')}` : 'Pinterest';
+
+  const rawOgTitle =
+    html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1] ||
+    html.match(/<title>([^<]+)<\/title>/i)?.[1] ||
+    '';
+  const cleanedOgTitle = decodeHtmlEntities(rawOgTitle)
+    .replace(/\s*\|\s*Pinterest\s*$/i, '')
+    .trim();
+  const rawOgDesc =
+    html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["']/i)?.[1] ||
+    '';
+  const cleanedDesc = decodeHtmlEntities(rawOgDesc).trim();
+  const titleCandidate =
+    cleanedOgTitle && !/^pinterest$/i.test(cleanedOgTitle)
+      ? cleanedOgTitle
+      : cleanedDesc && !/^explore the best of pinterest\.?$/i.test(cleanedDesc)
+        ? cleanedDesc
+        : htmlPinId
+          ? `Pinterest Pin #${htmlPinId}`
+          : 'Pinterest Pin';
+  const title = titleCandidate.replace(/\s+/g, ' ').trim().slice(0, 120);
+
+  // Extract poster thumbnail
+  const singleImg = extractPinterestSingleImage(html);
+  const posterThumb = singleImg.fallbackUrl || (singleImg.hash ? buildPinimgUrl(singleImg.hash, '736x') : null);
+
+  // Priority 1: Video (direct MP4/WebM preferred over HLS m3u8)
+  const rawVideoCandidates = extractPinterestVideoCandidates(html);
+  const validVideos: Array<{ url: string; isHls: boolean }> = [];
+  for (const cand of rawVideoCandidates) {
+    const validVid = await validatePublicUrl(cand);
+    if (validVid) {
+      validVideos.push({
+        url: validVid.toString(),
+        isHls: /\.m3u8(?:$|\?)/i.test(validVid.pathname + validVid.search),
+      });
+    }
+  }
+  const directVid = validVideos.find((v) => !v.isHls);
+  const chosenVideo = directVid || validVideos[0] || null;
+
+  // Also check carousel hashes (in case a carousel exists alongside or without video)
+  const carouselHashes = extractPinterestCarouselHashes(html);
+
+  if (chosenVideo) {
+    let previewPhotos: Array<{ url: string }> = [];
+    if (carouselHashes.length > 1) {
+      const resolvedUrls = await Promise.all(
+        carouselHashes.map((h) => resolvePinimgBestQualityUrl(h))
+      );
+      previewPhotos = resolvedUrls.map((u) => ({ url: u }));
+    }
+    const result: PinterestResolvedMedia = {
+      pinId: htmlPinId || null,
+      title,
+      author,
+      durationSeconds: null,
+      thumbnail: posterThumb,
+      videos: [{ url: chosenVideo.url, width: 0, height: 0 }],
+      photos: previewPhotos,
+      photoHashes: carouselHashes,
+      referer: 'https://www.pinterest.com/',
+      isVertical: true,
+      isHlsVideo: chosenVideo.isHls,
+    };
+    setBoundedCache(pinterestResolveCache, cacheKey, { data: result, expiresAt: Date.now() + 3 * 60 * 1000 }, 100);
+    return result;
+  }
+
+  // Priority 2: GIF
+  const rawGif = extractPinterestGifCandidate(html);
+  if (rawGif) {
+    const validGif = await validatePublicUrl(rawGif);
+    if (validGif) {
+      const gifUrl = validGif.toString();
+      const result: PinterestResolvedMedia = {
+        pinId: htmlPinId || null,
+        title,
+        author,
+        durationSeconds: null,
+        thumbnail: gifUrl,
+        videos: [],
+        photos: [{ url: gifUrl }],
+        photoHashes: [],
+        referer: 'https://www.pinterest.com/',
+        isGif: true,
+      };
+      setBoundedCache(pinterestResolveCache, cacheKey, { data: result, expiresAt: Date.now() + 3 * 60 * 1000 }, 100);
+      return result;
+    }
+  }
+
+  // Priority 3: Carousel (preserving order!)
+  if (carouselHashes.length > 0) {
+    const resolvedSlideUrls: string[] = [];
+    const BATCH = 6;
+    for (let i = 0; i < carouselHashes.length; i += BATCH) {
+      const slice = carouselHashes.slice(i, i + BATCH);
+      const urls = await Promise.all(slice.map((h) => resolvePinimgBestQualityUrl(h)));
+      resolvedSlideUrls.push(...urls);
+    }
+    const result: PinterestResolvedMedia = {
+      pinId: htmlPinId || null,
+      title,
+      author,
+      durationSeconds: null,
+      thumbnail: resolvedSlideUrls[0] || posterThumb,
+      videos: [],
+      photos: resolvedSlideUrls.map((url) => ({ url })),
+      photoHashes: carouselHashes,
+      referer: 'https://www.pinterest.com/',
+    };
+    setBoundedCache(pinterestResolveCache, cacheKey, { data: result, expiresAt: Date.now() + 3 * 60 * 1000 }, 100);
+    return result;
+  }
+
+  // Priority 4: Single image
+  if (singleImg.hash || singleImg.fallbackUrl) {
+    const bestUrl = singleImg.hash
+      ? await resolvePinimgBestQualityUrl(singleImg.hash, singleImg.fallbackUrl)
+      : singleImg.fallbackUrl!;
+    const validImg = await validatePublicUrl(bestUrl);
+    if (validImg) {
+      const finalImgUrl = validImg.toString();
+      const result: PinterestResolvedMedia = {
+        pinId: htmlPinId || null,
+        title,
+        author,
+        durationSeconds: null,
+        thumbnail: finalImgUrl,
+        videos: [],
+        photos: [{ url: finalImgUrl }],
+        photoHashes: singleImg.hash ? [singleImg.hash] : [],
+        referer: 'https://www.pinterest.com/',
+      };
+      setBoundedCache(pinterestResolveCache, cacheKey, { data: result, expiresAt: Date.now() + 3 * 60 * 1000 }, 100);
+      return result;
+    }
+  }
+
+  throw new Error('Could not find downloadable image, GIF, or video on this Pinterest link.');
+}
+
+async function downloadPinterestImageWithQualityCascade(
+  photoUrl: string,
+  hash32: string | undefined,
+  destDir: string,
+  indexOneBased: number,
+  signal?: AbortSignal
+): Promise<{ filePath: string; fileName: string; ext: DownloadFileExt } | null> {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const addCand = (u?: string | null) => {
+    if (u && /^https?:\/\//i.test(u) && !seen.has(u)) {
+      seen.add(u);
+      candidates.push(u);
+    }
+  };
+  if (hash32) {
+    for (const q of PINTEREST_QUALITY_LEVELS) {
+      addCand(buildPinimgUrl(hash32, q));
+    }
+  }
+  addCand(photoUrl);
+
+  for (const cand of candidates) {
+    const tmpPath = path.join(destDir, `pin_slide_${indexOneBased}.tmp`);
+    try {
+      const { contentType } = await downloadUrlFastToFile(cand, tmpPath, {
+        referer: 'https://www.pinterest.com/',
+        concurrency: 2,
+        signal,
+      });
+      const stat = await fs.promises.stat(tmpPath).catch(() => null);
+      if (!stat || stat.size <= 2000 || !(await looksLikeMediaFile(tmpPath, 'image'))) {
+        await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+        continue;
+      }
+      const lowerCand = cand.toLowerCase();
+      const ext: DownloadFileExt =
+        contentType.includes('gif') || lowerCand.includes('.gif')
+          ? 'gif'
+          : contentType.includes('png')
+            ? 'png'
+            : contentType.includes('webp')
+              ? 'webp'
+              : 'jpg';
+      const fileName = `pin_${indexOneBased}.${ext}`;
+      const filePath = path.join(destDir, fileName);
+      await fs.promises.rename(tmpPath, filePath);
+      return { filePath, fileName, ext };
+    } catch {
+      await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+    }
+  }
+  return null;
 }
 
 async function downloadRemoteUrlToFile(
@@ -3408,12 +5461,16 @@ function buildYtDlpVideoFormatSelector(
   opts?: { audioFid?: string; isTikTok?: boolean; forStream?: boolean }
 ): string {
   const h = String(targetH);
+  const hNum = Number(h) || 1080;
+  const minH = Math.max(100, Math.floor(hNum * 0.9));
   const audioFid = opts?.audioFid;
   if (audioFid) {
     return [
-      `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+${audioFid}`,
+      `bestvideo[width<=${h}][width>=${minH}][aspect_ratio<1][vcodec^=avc][protocol!*=m3u8]+${audioFid}`,
+      `bestvideo[height<=${h}][height>=${minH}][vcodec^=avc][protocol!*=m3u8]+${audioFid}`,
+      `bestvideo[width<=${h}][aspect_ratio<1][protocol!*=m3u8]+${audioFid}`,
+      `bestvideo[height<=${h}][protocol!*=m3u8]+${audioFid}`,
       `bestvideo[width<=${h}][aspect_ratio<1]+${audioFid}`,
-      `bestvideo[height<=${h}][vcodec^=avc]+${audioFid}`,
       `bestvideo[height<=${h}]+${audioFid}`,
       `best[width<=${h}][aspect_ratio<1]`,
       `best[height<=${h}]`,
@@ -3434,29 +5491,30 @@ function buildYtDlpVideoFormatSelector(
     ].join('/');
   }
   if (opts?.forStream) {
-    const hNum = Number(h) || 1080;
     if (hNum <= 360) {
       return [
-        `best[width<=${h}][aspect_ratio<1][ext=mp4][vcodec^=avc][acodec^=mp4a]`,
-        `best[height<=360][ext=mp4][vcodec^=avc][acodec^=mp4a]`,
-        `best[width<=${h}][aspect_ratio<1][ext=mp4][vcodec!=none][acodec!=none]`,
-        `best[height<=360][ext=mp4][vcodec!=none][acodec!=none]`,
-        `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
-        `bestvideo[height<=360][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
-        `bestvideo[width<=${h}][aspect_ratio<1]+bestaudio`,
-        `bestvideo[height<=360]+bestaudio`,
+        `best[width<=${h}][aspect_ratio<1][ext=mp4][vcodec^=avc][acodec^=mp4a][protocol!*=m3u8]`,
+        `best[height<=${h}][ext=mp4][vcodec^=avc][acodec^=mp4a][protocol!*=m3u8]`,
+        `best[width<=${h}][aspect_ratio<1][ext=mp4][vcodec!=none][acodec!=none][protocol!*=m3u8]`,
+        `best[height<=${h}][ext=mp4][vcodec!=none][acodec!=none][protocol!*=m3u8]`,
+        `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+        `bestvideo[height<=${h}][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+        `bestvideo[width<=${h}][aspect_ratio<1][protocol!*=m3u8]+bestaudio`,
+        `bestvideo[height<=${h}][protocol!*=m3u8]+bestaudio`,
         `best[width<=${h}][aspect_ratio<1]`,
-        `best[height<=360]`,
+        `best[height<=${h}]`,
         'best',
       ].join('/');
     }
     return [
-      `best[width<=${h}][width>=480][aspect_ratio<1][ext=mp4][vcodec!=none][acodec!=none]`,
-      `best[height<=${h}][height>=480][ext=mp4][vcodec!=none][acodec!=none]`,
-      `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
-      `bestvideo[height<=${h}][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
-      `bestvideo[width<=${h}][aspect_ratio<1]+bestaudio`,
-      `bestvideo[height<=${h}]+bestaudio`,
+      `best[width<=${h}][width>=${minH}][aspect_ratio<1][ext=mp4][vcodec!=none][acodec!=none][protocol!*=m3u8]`,
+      `best[height<=${h}][height>=${minH}][ext=mp4][vcodec!=none][acodec!=none][protocol!*=m3u8]`,
+      `bestvideo[width<=${h}][width>=${minH}][aspect_ratio<1][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[height<=${h}][height>=${minH}][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[width<=${h}][aspect_ratio<1][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[height<=${h}][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[width<=${h}][aspect_ratio<1][protocol!*=m3u8]+bestaudio`,
+      `bestvideo[height<=${h}][protocol!*=m3u8]+bestaudio`,
       `best[width<=${h}][aspect_ratio<1][ext=mp4]`,
       `best[height<=${h}][ext=mp4]`,
       `best[width<=${h}][aspect_ratio<1]`,
@@ -3464,13 +5522,32 @@ function buildYtDlpVideoFormatSelector(
       'best',
     ].join('/');
   }
+  if (hNum <= 360) {
+    return [
+      `best[width<=${h}][aspect_ratio<1][ext=mp4][vcodec^=avc][acodec^=mp4a][protocol!*=m3u8]`,
+      `best[height<=${h}][ext=mp4][vcodec^=avc][acodec^=mp4a][protocol!*=m3u8]`,
+      `bestvideo[width<=${h}][width>=${minH}][aspect_ratio<1][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[height<=${h}][height>=${minH}][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[width<=${h}][aspect_ratio<1][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[height<=${h}][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+      `bestvideo[width<=${h}][aspect_ratio<1]+bestaudio`,
+      `bestvideo[height<=${h}]+bestaudio`,
+      `best[width<=${h}][aspect_ratio<1]`,
+      `best[height<=${h}]`,
+      'best',
+    ].join('/');
+  }
   return [
-    `best[width<=${h}][aspect_ratio<1][vcodec^=avc][acodec^=mp4a]`,
-    `best[height<=${h}][vcodec^=avc][acodec^=mp4a]`,
-    `best[width<=${h}][aspect_ratio<1][vcodec^=avc]`,
-    `best[height<=${h}][vcodec^=avc]`,
-    `bestvideo[width<=${h}][aspect_ratio<1][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
-    `bestvideo[height<=${h}][vcodec^=avc]+bestaudio[acodec^=mp4a]`,
+    `best[width<=${h}][width>=${minH}][aspect_ratio<1][ext=mp4][vcodec^=avc][acodec^=mp4a][protocol!*=m3u8]`,
+    `best[height<=${h}][height>=${minH}][ext=mp4][vcodec^=avc][acodec^=mp4a][protocol!*=m3u8]`,
+    `bestvideo[width<=${h}][width>=${minH}][aspect_ratio<1][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+    `bestvideo[height<=${h}][height>=${minH}][vcodec^=avc][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+    `bestvideo[width<=${h}][aspect_ratio<1][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+    `bestvideo[height<=${h}][protocol!*=m3u8]+bestaudio[acodec^=mp4a]`,
+    `bestvideo[width<=${h}][aspect_ratio<1][protocol!*=m3u8]+bestaudio`,
+    `bestvideo[height<=${h}][protocol!*=m3u8]+bestaudio`,
+    `bestvideo[width<=${h}][aspect_ratio<1]+bestaudio`,
+    `bestvideo[height<=${h}]+bestaudio`,
     `best[width<=${h}][aspect_ratio<1]`,
     `best[height<=${h}]`,
     'best',
@@ -3631,7 +5708,10 @@ async function installParthDlPackage(): Promise<boolean> {
         timeout: 15000,
       });
       await fs.promises.rm(PARTH_DL_DIR, { recursive: true, force: true }).catch(() => {});
-      await fs.promises.rename(tmpDir, PARTH_DL_DIR);
+      await fs.promises.mkdir(PARTH_DL_DIR, { recursive: true });
+      await execFileAsync('python3', ['-m', 'zipfile', '-e', whlPath, PARTH_DL_DIR], {
+        timeout: 15000,
+      });
       tmpDir = '';
       const ok = await canImportParthDl();
       parthDlReadyCache = ok;
@@ -3873,6 +5953,28 @@ function pickInstagramThumbnail(info: ParthDlInfo): string | null {
   return null;
 }
 
+function pickInstagramPreviewImages(info: ParthDlInfo, parsedPageUrl: URL): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const entries = Array.isArray(info.entries) ? info.entries : [];
+  for (const entry of entries) {
+    if (entry.kind !== 'image' || !Array.isArray(entry.formats)) continue;
+    const validFormats = entry.formats.filter((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url));
+    if (validFormats.length === 0) continue;
+    const sorted = [...validFormats].sort((a, b) => {
+      const areaA = (a.width || 0) * (a.height || 0);
+      const areaB = (b.width || 0) * (b.height || 0);
+      return areaB - areaA;
+    });
+    const chosenUrl = sorted[0]?.url;
+    if (!chosenUrl || seen.has(chosenUrl)) continue;
+    seen.add(chosenUrl);
+    const proxied = maybeProxySocialThumbnail(chosenUrl, parsedPageUrl);
+    if (proxied) out.push(proxied);
+  }
+  return out;
+}
+
 function selectInstagramVideoFormat(entry: ParthDlEntry, targetH: number): ParthDlFormat | null {
   const valid = (entry.formats || []).filter((f) => typeof f.url === 'string' && /^https?:\/\//i.test(f.url));
   if (!valid.length) return null;
@@ -3982,6 +6084,163 @@ async function getYtDlpVersion(): Promise<string | null> {
   return cachedYtDlpVersion || null;
 }
 
+let cachedGalleryDlRunner: { cmd: string; baseArgs: string[] } | null | undefined;
+
+async function getGalleryDlRunner(): Promise<{ cmd: string; baseArgs: string[] } | null> {
+  if (cachedGalleryDlRunner !== undefined) return cachedGalleryDlRunner;
+  const managedBin = path.join(BIN_DIR, process.platform === 'win32' ? 'gallery-dl.exe' : 'gallery-dl');
+  const candidates: { cmd: string; baseArgs: string[] }[] =
+    process.platform === 'win32'
+      ? [
+          { cmd: managedBin, baseArgs: [] },
+          { cmd: 'python', baseArgs: ['-m', 'gallery_dl'] },
+          { cmd: 'gallery-dl', baseArgs: [] },
+        ]
+      : [
+          { cmd: 'gallery-dl', baseArgs: [] },
+          { cmd: '/usr/local/bin/gallery-dl', baseArgs: [] },
+          { cmd: '/usr/bin/gallery-dl', baseArgs: [] },
+          { cmd: managedBin, baseArgs: [] },
+          { cmd: 'python3', baseArgs: ['-m', 'gallery_dl'] },
+        ];
+
+  for (const c of candidates) {
+    try {
+      if (c.cmd === managedBin && !fs.existsSync(managedBin)) continue;
+      const { stdout } = await execFileAsync(c.cmd, [...c.baseArgs, '--version'], { timeout: 6000 });
+      if (stdout.trim()) {
+        cachedGalleryDlRunner = c;
+        return cachedGalleryDlRunner;
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+  cachedGalleryDlRunner = null;
+  return null;
+}
+
+async function walkFilesRecursive(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...(await walkFilesRecursive(full)));
+    } else if (entry.isFile()) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+interface GalleryDlTikTokResult {
+  imageFiles: string[];
+  videoFiles: string[];
+  audioFiles: string[];
+  cleanedTitle: string | null;
+}
+
+async function runGalleryDlTikTokFiles(
+  resolvedUrl: URL,
+  workDir: string,
+  job: DownloadJob
+): Promise<GalleryDlTikTokResult | null> {
+  const gdlRunner = await getGalleryDlRunner();
+  if (!gdlRunner) return null;
+
+  const args = ['-d', workDir];
+  if (adminConfig.xray.enabled && xrayState.running) {
+    args.push('--proxy', `http://127.0.0.1:${adminConfig.xray.httpPort}`);
+  }
+  args.push('--', resolvedUrl.toString());
+
+  await new Promise<void>((resolve, reject) => {
+    if (job.cancelled) {
+      reject(new Error('Download cancelled'));
+      return;
+    }
+    const child = spawn(gdlRunner.cmd, [...gdlRunner.baseArgs, ...args], { shell: false });
+    const unreg = registerJobCancel(job, () => {
+      if (child.exitCode === null && !child.killed) {
+        try {
+          child.kill('SIGTERM');
+        } catch {}
+        setTimeout(() => {
+          if (child.exitCode === null) {
+            try {
+              child.kill('SIGKILL');
+            } catch {}
+          }
+        }, 300).unref();
+      }
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+      if (stderr.length < 4096) stderr += d.toString();
+    });
+    child.on('error', (err) => {
+      unreg();
+      reject(err);
+    });
+    child.on('close', (code) => {
+      unreg();
+      if (job.cancelled) reject(new Error('Download cancelled'));
+      else if (code === 0) resolve();
+      else reject(new Error(stderr || `gallery-dl exited with code ${code}`));
+    });
+  });
+
+  // Section 5: Recursively collect files, rename sequentially to 1.ext, 2.ext..., keep original names for caption, delete unsupported extensions
+  const rawFiles = await walkFilesRecursive(workDir);
+  if (rawFiles.length === 0) return null;
+
+  const supportedImageExts = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+  const supportedVideoExts = new Set(['.mp4']);
+  const supportedAudioExts = new Set(['.mp3', '.m4a']);
+
+  const originalFilenames = new Map<string, string>();
+  const imageFiles: string[] = [];
+  const videoFiles: string[] = [];
+  const audioFiles: string[] = [];
+
+  let idx = 1;
+  for (const originalPath of rawFiles) {
+    const resolvedOrig = path.resolve(originalPath);
+    if (!resolvedOrig.startsWith(path.resolve(workDir) + path.sep)) continue;
+    const origBase = path.basename(resolvedOrig);
+    const ext = path.extname(origBase).toLowerCase();
+    const newName = `${idx}${ext}`;
+    idx += 1;
+    const newPath = path.join(workDir, newName);
+    if (resolvedOrig !== newPath) {
+      await fs.promises.rename(resolvedOrig, newPath);
+    }
+    originalFilenames.set(newName, origBase);
+
+    if (supportedImageExts.has(ext)) {
+      imageFiles.push(newPath);
+    } else if (supportedVideoExts.has(ext)) {
+      videoFiles.push(newPath);
+    } else if (supportedAudioExts.has(ext)) {
+      audioFiles.push(newPath);
+    } else {
+      await fs.promises.rm(newPath, { force: true }).catch(() => {});
+    }
+  }
+
+  if (imageFiles.length === 0 && videoFiles.length === 0 && audioFiles.length === 0) {
+    return null;
+  }
+
+  const firstMediaPath = imageFiles[0] || videoFiles[0] || audioFiles[0];
+  const firstOrigName = firstMediaPath ? originalFilenames.get(path.basename(firstMediaPath)) : undefined;
+  const cleanedTitle = firstOrigName ? cleanTikTokTitle(firstOrigName, '') || null : null;
+
+  return { imageFiles, videoFiles, audioFiles, cleanedTitle };
+}
+
 function getBgutilPluginDirIfPresent(): string | null {
   const managedExtractor = path.join(YT_DLP_PLUGINS_DIR, 'yt_dlp_plugins', 'extractor');
   if (
@@ -4005,6 +6264,139 @@ function getBgutilPluginDirIfPresent(): string | null {
   return null;
 }
 
+let cachedDenoPath: string | null | undefined;
+let cachedDenoVersion: string | null | undefined;
+let denoInstallPromise: Promise<string | null> | null = null;
+
+function findDenoBinarySync(): string | null {
+  if (cachedDenoPath && fs.existsSync(cachedDenoPath)) {
+    return cachedDenoPath;
+  }
+  const binName = process.platform === 'win32' ? 'deno.exe' : 'deno';
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const candidates = [
+    path.join(BIN_DIR, binName),
+    ...(homeDir ? [path.join(homeDir, '.deno', 'bin', binName)] : []),
+    '/usr/local/bin/deno',
+    '/usr/bin/deno',
+    '/root/.deno/bin/deno',
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  return null;
+}
+
+async function getDenoStatus(forceRefresh = false): Promise<{
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+}> {
+  if (!forceRefresh && cachedDenoPath && cachedDenoVersion && fs.existsSync(cachedDenoPath)) {
+    return { installed: true, path: cachedDenoPath, version: cachedDenoVersion };
+  }
+  const binName = process.platform === 'win32' ? 'deno.exe' : 'deno';
+  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+  const candidates = [
+    path.join(BIN_DIR, binName),
+    ...(homeDir ? [path.join(homeDir, '.deno', 'bin', binName)] : []),
+    '/usr/local/bin/deno',
+    '/usr/bin/deno',
+    '/root/.deno/bin/deno',
+    'deno',
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (candidate !== 'deno' && !fs.existsSync(candidate)) continue;
+      const { stdout } = await execFileAsync(candidate, ['--version'], { timeout: 8000 });
+      const firstLine = stdout.trim().split(/\r?\n/)[0] || '';
+      const versionMatch = firstLine.match(/deno\s+([^\s]+)/i);
+      const version = versionMatch ? versionMatch[1] : firstLine || null;
+      let resolvedPath = candidate;
+      if (candidate === 'deno') {
+        try {
+          const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+          const { stdout: whichOut } = await execFileAsync(whichCmd, ['deno'], { timeout: 5000 });
+          const first = whichOut.trim().split(/\r?\n/)[0]?.trim();
+          if (first) resolvedPath = first;
+        } catch {
+          resolvedPath = 'deno';
+        }
+      }
+      cachedDenoPath = resolvedPath;
+      cachedDenoVersion = version;
+      return { installed: true, path: resolvedPath, version };
+    } catch {
+      // Try next candidate
+    }
+  }
+  cachedDenoPath = null;
+  cachedDenoVersion = null;
+  return { installed: false, path: null, version: null };
+}
+
+async function installDenoBinary(): Promise<string | null> {
+  if (process.platform !== 'linux') {
+    throw new Error('Automatic Deno installation is supported on Linux hosts only. Install deno in PATH.');
+  }
+  if (denoInstallPromise) return denoInstallPromise;
+
+  denoInstallPromise = (async () => {
+    try {
+      const targetTriple =
+        process.arch === 'arm64'
+          ? 'aarch64-unknown-linux-gnu'
+          : process.arch === 'x64'
+            ? 'x86_64-unknown-linux-gnu'
+            : null;
+      if (!targetTriple) {
+        throw new Error(`Unsupported CPU architecture for Deno: ${process.arch}`);
+      }
+
+      ensureDataDir();
+      if (!fs.existsSync(BIN_DIR)) {
+        fs.mkdirSync(BIN_DIR, { recursive: true });
+      }
+
+      const downloadUrl = `https://github.com/denoland/deno/releases/latest/download/deno-${targetTriple}.zip`;
+      const zipPath = path.join(BIN_DIR, 'deno.zip');
+      const res = await fetch(downloadUrl, { signal: AbortSignal.timeout(90000) });
+      if (!res.ok) {
+        throw new Error(`Failed to download Deno (HTTP ${res.status}).`);
+      }
+      const arrayBuf = await res.arrayBuffer();
+      await fs.promises.writeFile(zipPath, Buffer.from(arrayBuf));
+
+      try {
+        await execFileAsync('unzip', ['-o', zipPath, 'deno', '-d', BIN_DIR], { timeout: 30000 });
+      } finally {
+        await fs.promises.rm(zipPath, { force: true }).catch(() => {});
+      }
+
+      const binPath = path.join(BIN_DIR, 'deno');
+      await fs.promises.chmod(binPath, 0o755);
+      const { stdout } = await execFileAsync(binPath, ['--version'], { timeout: 10000 });
+      const firstLine = stdout.trim().split(/\r?\n/)[0] || '';
+      const versionMatch = firstLine.match(/deno\s+([^\s]+)/i);
+      cachedDenoPath = binPath;
+      cachedDenoVersion = versionMatch ? versionMatch[1] : firstLine || null;
+      resetYouTubeCachesAndCooldown();
+      appendAppLog('info', 'yt-dlp', `Deno runtime installed (${cachedDenoVersion || 'unknown'}) at ${binPath}`);
+      return binPath;
+    } finally {
+      denoInstallPromise = null;
+    }
+  })();
+
+  return denoInstallPromise;
+}
+
 function buildYtDlpArgs(
   baseArgs: string[],
   options?: { isYouTube?: boolean; isDownload?: boolean; isSubtitle?: boolean }
@@ -4014,14 +6406,32 @@ function buildYtDlpArgs(
     options?.isYouTube !== undefined
       ? options.isYouTube
       : baseArgs.some((a) => /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/i.test(a));
+
+  const jsRuntimeMode: PotJsRuntimeMode = adminConfig.potProvider.jsRuntime || 'auto';
+  const denoBin = findDenoBinarySync();
+  const nodeBin = process.execPath || 'node';
+  const jsRuntimeArgs: string[] = ['--no-js-runtimes'];
+  if (jsRuntimeMode === 'deno') {
+    jsRuntimeArgs.push('--js-runtimes', denoBin ? `deno:${denoBin}` : 'deno');
+  } else if (jsRuntimeMode === 'node') {
+    jsRuntimeArgs.push('--js-runtimes', `node:${nodeBin}`);
+  } else {
+    if (denoBin) {
+      jsRuntimeArgs.push('--js-runtimes', `deno:${denoBin}`);
+    }
+    jsRuntimeArgs.push('--js-runtimes', `node:${nodeBin}`);
+  }
+
+  const ejsRemoteArgs = adminConfig.potProvider.ejsRemoteComponents
+    ? ['--remote-components', 'ejs:github']
+    : ['--no-remote-components'];
+
   const args = [
-    '--js-runtimes',
-    'node',
+    ...jsRuntimeArgs,
     '--no-check-certificate',
     '--cache-dir',
     YT_DLP_CACHE_DIR,
-    '--remote-components',
-    'ejs:github',
+    ...ejsRemoteArgs,
     '--force-ipv4',
     '--retries',
     '3',
@@ -4183,6 +6593,141 @@ function buildStreamSettings(params: {
   return stream;
 }
 
+function isPrivateOrLoopbackHost(host: string): boolean {
+  const clean = host.trim().replace(/^\[|\]$/g, '').toLowerCase();
+  if (!clean) return false;
+  if (clean === 'localhost' || clean.endsWith('.local') || clean.endsWith('.internal')) return true;
+  if (!clean.includes('.') && !clean.includes(':')) return true;
+  if (/^(127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0)/.test(clean)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(clean)) return true;
+  if (clean === '::1' || /^(fc|fd|fe80:)/i.test(clean)) return true;
+  return false;
+}
+
+function formatHostPortTarget(address: string, port: number): string {
+  const clean = address.trim().replace(/^\[|\]$/g, '');
+  return clean.includes(':') ? `[${clean}]:${port}` : `${clean}:${port}`;
+}
+
+function normalizeXrayConfigForCompatibility(config: Record<string, unknown>): Record<string, unknown> {
+  const outbounds = Array.isArray(config.outbounds)
+    ? (config.outbounds as Record<string, unknown>[])
+    : null;
+  if (!outbounds || outbounds.length === 0) return config;
+
+  const extraDialerOutbounds: Record<string, unknown>[] = [];
+  const normalizedOutbounds = outbounds.map((ob, idx) => {
+    if (!ob || typeof ob !== 'object') return ob;
+    const proto = String(ob.protocol || '').toLowerCase();
+    if (proto !== 'vless') return ob;
+
+    const cloned: Record<string, unknown> = { ...ob };
+    const streamRaw: Record<string, unknown> =
+      ob.streamSettings && typeof ob.streamSettings === 'object'
+        ? { ...(ob.streamSettings as Record<string, unknown>) }
+        : { network: 'tcp', security: 'none' };
+
+    let security = String(streamRaw.security || 'none').toLowerCase();
+    if (security === 'xtls') {
+      security = 'tls';
+      streamRaw.security = 'tls';
+    } else if (security === 'none' && streamRaw.realitySettings && typeof streamRaw.realitySettings === 'object') {
+      const rs = streamRaw.realitySettings as Record<string, unknown>;
+      if (typeof rs.publicKey === 'string' && rs.publicKey.trim()) {
+        security = 'reality';
+        streamRaw.security = 'reality';
+      }
+    }
+
+    const settingsRaw =
+      ob.settings && typeof ob.settings === 'object' ? { ...(ob.settings as Record<string, unknown>) } : null;
+    const vnext = settingsRaw && Array.isArray(settingsRaw.vnext) ? [...(settingsRaw.vnext as Record<string, unknown>[])] : null;
+
+    if (security === 'none' && vnext && vnext.length > 0) {
+      const firstServer = vnext[0];
+      const users = Array.isArray(firstServer?.users) ? (firstServer.users as Record<string, unknown>[]) : [];
+      const hasVlessEncryption =
+        users.length > 0 &&
+        users.every((u) => typeof u?.encryption === 'string' && u.encryption.trim().toLowerCase() !== 'none');
+
+      const origAddress = typeof firstServer?.address === 'string' ? firstServer.address.trim() : '';
+      const origPort = Number(firstServer?.port || 80);
+      const sockopt =
+        streamRaw.sockopt && typeof streamRaw.sockopt === 'object'
+          ? { ...(streamRaw.sockopt as Record<string, unknown>) }
+          : {};
+
+      // Xray v26.7+ rejects VLESS without TLS/encryption on public IP/domain; route via freedom dialerProxy redirect
+      if (!hasVlessEncryption && origAddress && origPort > 0 && !isPrivateOrLoopbackHost(origAddress) && !sockopt.dialerProxy) {
+        const netType = String(streamRaw.network || 'tcp').toLowerCase();
+        if (netType === 'ws') {
+          const ws =
+            streamRaw.wsSettings && typeof streamRaw.wsSettings === 'object'
+              ? { ...(streamRaw.wsSettings as Record<string, unknown>) }
+              : {};
+          const headers =
+            ws.headers && typeof ws.headers === 'object' ? { ...(ws.headers as Record<string, unknown>) } : {};
+          if (!headers.Host && !headers.host) {
+            headers.Host = origAddress;
+          }
+          ws.headers = headers;
+          streamRaw.wsSettings = ws;
+        } else if (netType === 'httpupgrade') {
+          const hu =
+            streamRaw.httpupgradeSettings && typeof streamRaw.httpupgradeSettings === 'object'
+              ? { ...(streamRaw.httpupgradeSettings as Record<string, unknown>) }
+              : {};
+          if (!hu.host) hu.host = origAddress;
+          streamRaw.httpupgradeSettings = hu;
+        } else if (netType === 'xhttp' || netType === 'splithttp') {
+          const xh =
+            streamRaw.xhttpSettings && typeof streamRaw.xhttpSettings === 'object'
+              ? { ...(streamRaw.xhttpSettings as Record<string, unknown>) }
+              : {};
+          if (!xh.host) xh.host = origAddress;
+          streamRaw.xhttpSettings = xh;
+        }
+
+        const dialerTag = `vless-direct-dialer-${idx}`;
+        extraDialerOutbounds.push({
+          tag: dialerTag,
+          protocol: 'freedom',
+          settings: {
+            redirect: formatHostPortTarget(origAddress, origPort),
+          },
+        });
+        vnext[0] = {
+          ...firstServer,
+          address: '127.0.0.1',
+        };
+        settingsRaw!.vnext = vnext;
+        cloned.settings = settingsRaw;
+        sockopt.dialerProxy = dialerTag;
+        streamRaw.sockopt = sockopt;
+      }
+    }
+
+    cloned.streamSettings = streamRaw;
+    return cloned;
+  });
+
+  if (extraDialerOutbounds.length === 0) return config;
+  return {
+    ...config,
+    outbounds: [...normalizedOutbounds, ...extraDialerOutbounds],
+  };
+}
+
+function getQueryParamCI(q: URLSearchParams, name: string): string | undefined {
+  const direct = q.get(name);
+  if (direct !== null && direct !== '') return direct;
+  const target = name.toLowerCase();
+  for (const [k, v] of q.entries()) {
+    if (k.toLowerCase() === target && v !== '') return v;
+  }
+  return undefined;
+}
+
 function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: number): Record<string, unknown> {
   const input = rawInput.trim();
   if (!input) {
@@ -4217,11 +6762,11 @@ function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: n
     const filteredInbounds = existingInbounds.filter(
       (ib) => ib && ib.port !== socksPort && ib.port !== httpPort && ib.tag !== 'socks-in' && ib.tag !== 'http-in'
     );
-    return {
+    return normalizeXrayConfigForCompatibility({
       ...parsed,
       log: { loglevel: 'warning' },
       inbounds: [...localInbounds, ...filteredInbounds],
-    };
+    });
   }
 
   // Share link parsing (take first non-empty line if multiple lines pasted)
@@ -4242,8 +6787,11 @@ function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: n
     const address = u.hostname;
     const port = Number(u.port || 443);
     if (!uuid || !address || !port) throw new Error('Invalid VLESS link.');
-    const flow = q.get('flow') || '';
-    const encryption = q.get('encryption') || 'none';
+    const flow = getQueryParamCI(q, 'flow') || '';
+    const encryption = getQueryParamCI(q, 'encryption') || 'none';
+    const pbk = getQueryParamCI(q, 'pbk');
+    let security = (getQueryParamCI(q, 'security') || (pbk ? 'reality' : 'none')).toLowerCase();
+    if (security === 'xtls') security = 'tls';
     outbound = {
       tag: 'proxy',
       protocol: 'vless',
@@ -4263,20 +6811,22 @@ function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: n
         ],
       },
       streamSettings: buildStreamSettings({
-        network: q.get('type') || 'tcp',
-        security: q.get('security') || 'none',
-        sni: q.get('sni') || undefined,
-        fp: q.get('fp') || undefined,
-        alpn: q.get('alpn') || undefined,
-        host: q.get('host') || undefined,
-        path: q.get('path') || undefined,
-        serviceName: q.get('serviceName') || undefined,
-        mode: q.get('mode') || undefined,
-        pbk: q.get('pbk') || undefined,
-        sid: q.get('sid') || undefined,
-        spx: q.get('spx') || undefined,
-        headerType: q.get('headerType') || undefined,
-        allowInsecure: q.get('allowInsecure') === '1' || q.get('allowInsecure') === 'true',
+        network: getQueryParamCI(q, 'type') || 'tcp',
+        security,
+        sni: getQueryParamCI(q, 'sni'),
+        fp: getQueryParamCI(q, 'fp'),
+        alpn: getQueryParamCI(q, 'alpn'),
+        host: getQueryParamCI(q, 'host'),
+        path: getQueryParamCI(q, 'path'),
+        serviceName: getQueryParamCI(q, 'serviceName'),
+        mode: getQueryParamCI(q, 'mode'),
+        pbk,
+        sid: getQueryParamCI(q, 'sid'),
+        spx: getQueryParamCI(q, 'spx'),
+        headerType: getQueryParamCI(q, 'headerType'),
+        allowInsecure:
+          getQueryParamCI(q, 'allowInsecure') === '1' ||
+          getQueryParamCI(q, 'allowInsecure') === 'true',
       }),
     };
   } else if (linkLine.startsWith('vmess://')) {
@@ -4386,7 +6936,7 @@ function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: n
     throw new Error('Unsupported config format. Use vless://, vmess://, trojan://, ss://, or Xray JSON.');
   }
 
-  return {
+  return normalizeXrayConfigForCompatibility({
     log: { loglevel: 'warning' },
     inbounds: localInbounds,
     outbounds: [
@@ -4394,7 +6944,7 @@ function buildXrayRuntimeConfig(rawInput: string, socksPort: number, httpPort: n
       { tag: 'direct', protocol: 'freedom' },
       { tag: 'block', protocol: 'blackhole' },
     ],
-  };
+  });
 }
 
 function safeDecodeURIComponent(value: string): string {
@@ -4774,11 +7324,20 @@ async function proxyHttpGet(
   });
 }
 
+interface ActiveXrayTestEntry {
+  controller: AbortController;
+  batchId: string | null;
+}
+
+const activeXrayTests = new Map<string, ActiveXrayTestEntry>();
+
 async function testXrayConfigWithYouTubeDownload(
   configInput: string,
-  rawYoutubeUrl?: string
+  rawYoutubeUrl?: string,
+  abortSignal?: AbortSignal
 ): Promise<{
   success: boolean;
+  cancelled?: boolean;
   latencyMs: number;
   downloadedBytes?: number;
   title?: string;
@@ -4791,6 +7350,16 @@ async function testXrayConfigWithYouTubeDownload(
     (rawYoutubeUrl && rawYoutubeUrl.trim()) ||
     adminConfig.xray.testYoutubeUrl ||
     DEFAULT_XRAY_TEST_YOUTUBE_URL;
+
+  if (abortSignal?.aborted) {
+    return {
+      success: false,
+      cancelled: true,
+      latencyMs: 0,
+      youtubeUrl: targetUrl,
+      error: 'Test cancelled',
+    };
+  }
 
   const parsedUrl = await validatePublicUrl(targetUrl);
   if (!parsedUrl) {
@@ -4834,6 +7403,16 @@ async function testXrayConfigWithYouTubeDownload(
     };
   }
 
+  if (abortSignal?.aborted) {
+    return {
+      success: false,
+      cancelled: true,
+      latencyMs: Date.now() - started,
+      youtubeUrl: parsedUrl.toString(),
+      error: 'Test cancelled',
+    };
+  }
+
   const socksPort = await getFreeLocalPort();
   let httpPort = await getFreeLocalPort();
   if (httpPort === socksPort) httpPort = await getFreeLocalPort();
@@ -4873,8 +7452,26 @@ async function testXrayConfigWithYouTubeDownload(
   child.stdout.on('data', pushLog);
   child.stderr.on('data', pushLog);
 
+  const onAbort = () => {
+    try {
+      if (!child.killed && child.exitCode === null) {
+        child.kill('SIGTERM');
+      }
+    } catch {}
+  };
+  abortSignal?.addEventListener('abort', onAbort, { once: true });
+
   try {
     const portReady = await waitForLocalPort(socksPort, 3500);
+    if (abortSignal?.aborted) {
+      return {
+        success: false,
+        cancelled: true,
+        latencyMs: Date.now() - started,
+        youtubeUrl: parsedUrl.toString(),
+        error: 'Test cancelled',
+      };
+    }
     if (!portReady || child.killed || child.exitCode !== null) {
       return {
         success: false,
@@ -4893,6 +7490,16 @@ async function testXrayConfigWithYouTubeDownload(
       }
     } catch {
       // Optional IP lookup; proceed directly to actual YouTube download test
+    }
+
+    if (abortSignal?.aborted) {
+      return {
+        success: false,
+        cancelled: true,
+        latencyMs: Date.now() - started,
+        youtubeUrl: parsedUrl.toString(),
+        error: 'Test cancelled',
+      };
     }
 
     const { extraArgs, env } = await getYtDlpAuthAndProxy({ skipProxy: true });
@@ -4938,6 +7545,7 @@ async function testXrayConfigWithYouTubeDownload(
       timeout: 45000,
       maxBuffer: 4 * 1024 * 1024,
       env: testEnv,
+      signal: abortSignal,
     });
 
     const files = await fs.promises.readdir(tempDir);
@@ -4974,6 +7582,15 @@ async function testXrayConfigWithYouTubeDownload(
       youtubeUrl: parsedUrl.toString(),
     };
   } catch (err: unknown) {
+    if (abortSignal?.aborted) {
+      return {
+        success: false,
+        cancelled: true,
+        latencyMs: Date.now() - started,
+        youtubeUrl: parsedUrl.toString(),
+        error: 'Test cancelled',
+      };
+    }
     const errObj = err as { stderr?: string; message?: string };
     const stderrLines = (errObj.stderr || '')
       .split(/\r?\n/)
@@ -4987,6 +7604,7 @@ async function testXrayConfigWithYouTubeDownload(
       error: reason.slice(0, 260),
     };
   } finally {
+    abortSignal?.removeEventListener('abort', onAbort);
     try {
       if (!child.killed && child.exitCode === null) {
         child.kill('SIGTERM');
@@ -5451,13 +8069,20 @@ async function getYtDlpAuthAndProxy(overrides?: {
 
   syncBgutilPluginFromRepo();
 
-  const cookies = overrides?.cookies !== undefined ? overrides.cookies.trim() : adminConfig.youtubeCookies.trim();
+  const rawCookies = overrides?.cookies !== undefined ? overrides.cookies.trim() : adminConfig.youtubeCookies.trim();
+  const cookies = rawCookies ? rawCookies.replace(/\r\n/g, '\n') + '\n' : '';
   const poToken = overrides?.poToken !== undefined ? overrides.poToken.trim() : adminConfig.youtubePoToken.trim();
 
   if (cookies) {
     ensureDataDir();
-    await fs.promises.writeFile(YT_COOKIES_FILE, cookies, { encoding: 'utf8', mode: 0o600 });
-    extraArgs.push('--cookies', YT_COOKIES_FILE);
+    const cookieHash = crypto.createHash('sha256').update(cookies).digest('hex').slice(0, 12);
+    const cookiePath = path.join(DATA_DIR, `yt-cookies-${cookieHash}.txt`);
+    if (!fs.existsSync(cookiePath)) {
+      const tmpPath = `${cookiePath}.${crypto.randomUUID()}.tmp`;
+      await fs.promises.writeFile(tmpPath, cookies, { encoding: 'utf8', mode: 0o600 });
+      await fs.promises.rename(tmpPath, cookiePath);
+    }
+    extraArgs.push('--cookies', cookiePath);
   }
   if (adminConfig.potProvider.enabled) {
     if (adminConfig.potProvider.mode === 'managed' && !bgutilState.running && findBgutilPotEntry()) {
@@ -5539,7 +8164,13 @@ const youtubeSubtitleInflight = new Map<string, Promise<string | null>>();
 const youtubeCooldownMap = new Map<string, { until: number; strikes: number }>();
 
 function getYouTubeConfigFingerprint(): string {
-  return `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${xrayState.running}:${adminConfig.potProvider.enabled}:${adminConfig.potProvider.mode}:${Boolean(adminConfig.youtubeCookies.trim())}:${Boolean(adminConfig.youtubePoToken.trim())}`;
+  const cookieSig = adminConfig.youtubeCookies.trim()
+    ? crypto.createHash('sha256').update(adminConfig.youtubeCookies.trim()).digest('hex').slice(0, 8)
+    : 'none';
+  const potSig = adminConfig.youtubePoToken.trim()
+    ? crypto.createHash('sha256').update(adminConfig.youtubePoToken.trim()).digest('hex').slice(0, 8)
+    : 'none';
+  return `${adminConfig.xray.enabled}:${adminConfig.xray.activeProfileId || ''}:${xrayState.running}:${adminConfig.potProvider.enabled}:${adminConfig.potProvider.mode}:${adminConfig.potProvider.jsRuntime}:${adminConfig.potProvider.ejsRemoteComponents}:${Boolean(findDenoBinarySync())}:${cookieSig}:${potSig}`;
 }
 
 function isYouTubeBotOrRateLimitError(err: unknown): boolean {
@@ -6004,21 +8635,33 @@ function publicUserView(u: StoredUser) {
   };
 }
 
-function selectTargetHeight(quality: string): number {
-  switch (quality) {
-    case '2160p':
-      return 2160;
-    case '1080p':
-      return 1080;
-    case '720p':
-      return 720;
-    case '480p':
-      return 480;
-    case '360p':
-      return 360;
-    default:
-      return 1080;
+function normalizeDownloadQuality(raw: unknown): string {
+  if (typeof raw !== 'string') return '1080p';
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === 'best' || trimmed === 'audio') return trimmed;
+  const match = trimmed.match(/^(\d{3,4})p$/);
+  if (match) {
+    const h = Number(match[1]);
+    if (h >= 144 && h <= 4320) return `${h}p`;
   }
+  return '1080p';
+}
+
+function selectTargetHeight(quality: string): number {
+  const match = String(quality || '').trim().match(/^(\d{3,4})p$/i);
+  if (match) {
+    const h = Number(match[1]);
+    if (h >= 144 && h <= 4320) return h;
+  }
+  return 1080;
+}
+
+function qualityToFallbackScale(quality: string): string {
+  const h = selectTargetHeight(quality);
+  if (h >= 2160) return '1920x1080';
+  if (h >= 720) return '1280x720';
+  if (h >= 480) return '854x480';
+  return '640x360';
 }
 
 async function startServer() {
@@ -6266,11 +8909,7 @@ async function startServer() {
       typeof body.author === 'string' && body.author.trim()
         ? body.author.trim().slice(0, 120)
         : parsedUrl.hostname;
-    const quality =
-      typeof body.quality === 'string' &&
-      ['2160p', '1080p', '720p', '480p', '360p', 'best', 'audio'].includes(body.quality.trim())
-        ? body.quality.trim()
-        : '1080p';
+    const quality = normalizeDownloadQuality(body.quality);
     const sizeBytes =
       typeof body.sizeBytes === 'number' && Number.isFinite(body.sizeBytes)
         ? Math.max(0, Math.floor(body.sizeBytes))
@@ -6311,6 +8950,16 @@ async function startServer() {
   app.delete('/api/user/history', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     clearUserHistoryInDb(req.authUser!.id);
     res.json({ success: true });
+  });
+
+  app.delete('/api/user/history/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const itemId = typeof req.params.id === 'string' ? req.params.id.trim() : '';
+    if (!itemId || itemId.length > 80) {
+      res.status(400).json({ error: 'Invalid history item identifier.' });
+      return;
+    }
+    const items = deleteUserHistoryItemInDb(req.authUser!.id, itemId);
+    res.json({ success: true, items });
   });
 
   /* -------------------- Announcements (public read, admin write) -------------------- */
@@ -7183,6 +9832,7 @@ async function startServer() {
       activeProfileId: adminConfig.xray.activeProfileId,
       profiles: adminConfig.xray.profiles,
       testYoutubeUrl: adminConfig.xray.testYoutubeUrl,
+      testConcurrency: adminConfig.xray.testConcurrency,
       socksPort: adminConfig.xray.socksPort,
       httpPort: adminConfig.xray.httpPort,
       running: xrayState.running,
@@ -7202,10 +9852,14 @@ async function startServer() {
       enabled?: unknown;
       configInput?: unknown;
       testYoutubeUrl?: unknown;
+      testConcurrency?: unknown;
     };
     const nextEnabled = typeof body.enabled === 'boolean' ? body.enabled : adminConfig.xray.enabled;
     const nextConfigInput =
       typeof body.configInput === 'string' ? body.configInput.trim() : adminConfig.xray.configInput;
+    if (typeof body.testConcurrency === 'number' && Number.isFinite(body.testConcurrency)) {
+      adminConfig.xray.testConcurrency = Math.max(1, Math.min(20, Math.floor(body.testConcurrency)));
+    }
 
     if (typeof body.testYoutubeUrl === 'string' && body.testYoutubeUrl.trim()) {
       const validTestUrl = await validatePublicUrl(body.testYoutubeUrl.trim());
@@ -7288,6 +9942,7 @@ async function startServer() {
       activeProfileId: adminConfig.xray.activeProfileId,
       profiles: adminConfig.xray.profiles,
       testYoutubeUrl: adminConfig.xray.testYoutubeUrl,
+      testConcurrency: adminConfig.xray.testConcurrency,
       socksPort: adminConfig.xray.socksPort,
       httpPort: adminConfig.xray.httpPort,
       running: xrayState.running,
@@ -7442,7 +10097,10 @@ async function startServer() {
       return;
     }
     const entryPath = findBgutilPotEntry();
-    const pluginInstalled = await isBgutilPipPluginInstalled();
+    const [pluginInstalled, denoStatus] = await Promise.all([
+      isBgutilPipPluginInstalled(),
+      getDenoStatus(),
+    ]);
     const effectiveUrl = getEffectivePotBaseUrl();
     const ping =
       adminConfig.potProvider.enabled && (adminConfig.potProvider.mode === 'external' || bgutilState.running)
@@ -7454,6 +10112,14 @@ async function startServer() {
       mode: adminConfig.potProvider.mode,
       baseUrl: adminConfig.potProvider.baseUrl,
       port: adminConfig.potProvider.port,
+      jsRuntime: adminConfig.potProvider.jsRuntime,
+      ejsRemoteComponents: adminConfig.potProvider.ejsRemoteComponents,
+      denoInstalled: denoStatus.installed,
+      denoVersion: denoStatus.version,
+      denoPath: denoStatus.path,
+      nodeInstalled: true,
+      nodeVersion: process.version.replace(/^v/, ''),
+      nodePath: process.execPath,
       installed: Boolean(entryPath),
       pluginInstalled,
       running: adminConfig.potProvider.mode === 'external' ? ping.ok : bgutilState.running,
@@ -7473,6 +10139,8 @@ async function startServer() {
       mode?: unknown;
       baseUrl?: unknown;
       port?: unknown;
+      jsRuntime?: unknown;
+      ejsRemoteComponents?: unknown;
     };
     const nextEnabled =
       typeof body.enabled === 'boolean' ? body.enabled : adminConfig.potProvider.enabled;
@@ -7482,6 +10150,14 @@ async function startServer() {
       typeof body.port === 'number' && body.port > 1024 && body.port < 65535
         ? Math.floor(body.port)
         : adminConfig.potProvider.port;
+    const nextJsRuntime: PotJsRuntimeMode =
+      body.jsRuntime === 'auto' || body.jsRuntime === 'deno' || body.jsRuntime === 'node'
+        ? body.jsRuntime
+        : adminConfig.potProvider.jsRuntime;
+    const nextEjsRemoteComponents =
+      typeof body.ejsRemoteComponents === 'boolean'
+        ? body.ejsRemoteComponents
+        : adminConfig.potProvider.ejsRemoteComponents;
     let nextBaseUrl = adminConfig.potProvider.baseUrl;
 
     if (typeof body.baseUrl === 'string' && body.baseUrl.trim()) {
@@ -7503,6 +10179,8 @@ async function startServer() {
       mode: nextMode,
       baseUrl: nextBaseUrl,
       port: nextPort,
+      jsRuntime: nextJsRuntime,
+      ejsRemoteComponents: nextEjsRemoteComponents,
     };
     saveAdminConfig(adminConfig);
     resetYouTubeCachesAndCooldown();
@@ -7514,7 +10192,10 @@ async function startServer() {
     }
 
     const entryPath = findBgutilPotEntry();
-    const pluginInstalled = await isBgutilPipPluginInstalled();
+    const [pluginInstalled, denoStatus] = await Promise.all([
+      isBgutilPipPluginInstalled(),
+      getDenoStatus(),
+    ]);
     const ping =
       nextEnabled && (nextMode === 'external' || bgutilState.running)
         ? await pingBgutilServer(getEffectivePotBaseUrl())
@@ -7526,6 +10207,14 @@ async function startServer() {
       mode: adminConfig.potProvider.mode,
       baseUrl: adminConfig.potProvider.baseUrl,
       port: adminConfig.potProvider.port,
+      jsRuntime: adminConfig.potProvider.jsRuntime,
+      ejsRemoteComponents: adminConfig.potProvider.ejsRemoteComponents,
+      denoInstalled: denoStatus.installed,
+      denoVersion: denoStatus.version,
+      denoPath: denoStatus.path,
+      nodeInstalled: true,
+      nodeVersion: process.version.replace(/^v/, ''),
+      nodePath: process.execPath,
       installed: Boolean(entryPath),
       pluginInstalled,
       running: nextMode === 'external' ? ping.ok : bgutilState.running,
@@ -7555,6 +10244,29 @@ async function startServer() {
       res.status(500).json({
         success: false,
         error: err instanceof Error ? err.message : 'bgutil POT server installation failed',
+      });
+    }
+  });
+
+  app.post('/api/admin/pot-provider/install-deno', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    try {
+      await installDenoBinary();
+      const denoStatus = await getDenoStatus(true);
+      res.json({
+        success: true,
+        denoInstalled: denoStatus.installed,
+        denoVersion: denoStatus.version,
+        denoPath: denoStatus.path,
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Deno installation failed',
       });
     }
   });
@@ -7639,8 +10351,10 @@ async function startServer() {
       profileId?: unknown;
       configInput?: unknown;
       youtubeUrl?: unknown;
+      batchId?: unknown;
     };
     const profileId = typeof body.profileId === 'string' ? body.profileId : '';
+    const batchId = typeof body.batchId === 'string' && body.batchId.trim() ? body.batchId.trim() : null;
     const youtubeUrl = typeof body.youtubeUrl === 'string' ? body.youtubeUrl.trim() : undefined;
     if (youtubeUrl) {
       const valid = await validatePublicUrl(youtubeUrl);
@@ -7666,26 +10380,63 @@ async function startServer() {
       return;
     }
 
-    const testResult = await testXrayConfigWithYouTubeDownload(rawConfigToTest, youtubeUrl);
+    const testKey = crypto.randomUUID();
+    const controller = new AbortController();
+    activeXrayTests.set(testKey, { controller, batchId });
+    const onClientClose = () => {
+      if (!res.writableEnded) {
+        controller.abort();
+      }
+    };
+    res.on('close', onClientClose);
 
-    if (targetProfile) {
-      targetProfile.lastTest = {
-        ok: testResult.success,
-        testedAt: Date.now(),
-        latencyMs: testResult.latencyMs,
-        downloadedBytes: testResult.downloadedBytes,
-        title: testResult.title,
-        exitIp: testResult.exitIp,
-        error: testResult.error,
-      };
-      saveAdminConfig(adminConfig);
+    try {
+      const testResult = await testXrayConfigWithYouTubeDownload(rawConfigToTest, youtubeUrl, controller.signal);
+
+      if (targetProfile && !testResult.cancelled) {
+        targetProfile.lastTest = {
+          ok: testResult.success,
+          testedAt: Date.now(),
+          latencyMs: testResult.latencyMs,
+          downloadedBytes: testResult.downloadedBytes,
+          title: testResult.title,
+          exitIp: testResult.exitIp,
+          error: testResult.error,
+        };
+        saveAdminConfig(adminConfig);
+      }
+
+      if (!res.writableEnded) {
+        res.json({
+          ...testResult,
+          profileId: targetProfile?.id || null,
+          lastTest: targetProfile?.lastTest || null,
+        });
+      }
+    } finally {
+      res.off('close', onClientClose);
+      activeXrayTests.delete(testKey);
     }
+  });
 
-    res.json({
-      ...testResult,
-      profileId: targetProfile?.id || null,
-      lastTest: targetProfile?.lastTest || null,
-    });
+  app.post('/api/admin/xray/test/cancel', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const body = (req.body || {}) as { batchId?: unknown };
+    const batchId = typeof body.batchId === 'string' && body.batchId.trim() ? body.batchId.trim() : null;
+    let cancelledCount = 0;
+    for (const entry of activeXrayTests.values()) {
+      if (!batchId || entry.batchId === batchId) {
+        if (!entry.controller.signal.aborted) {
+          entry.controller.abort();
+        }
+        cancelledCount += 1;
+      }
+    }
+    res.json({ success: true, cancelledCount });
   });
 
   const PREFERRED_LANG_ORDER = ['fa', 'en', 'en-US', 'en-GB', 'ar', 'ru', 'zh-Hans', 'zh', 'tr', 'de', 'fr', 'es'];
@@ -7717,14 +10468,20 @@ async function startServer() {
   }
 
   function heightToQualityStr(h: number): string {
-    if (h >= 2160) return '2160p';
-    if (h >= 1440) return '1440p';
-    if (h >= 1080) return '1080p';
-    if (h >= 720) return '720p';
-    if (h >= 480) return '480p';
-    if (h >= 360) return '360p';
-    if (h >= 240) return '240p';
+    if (h >= 4300) return '4320p';
+    if (h >= 2100) return '2160p';
+    if (h >= 1400) return '1440p';
+    if (h >= 1050) return '1080p';
+    if (h >= 700) return '720p';
+    if (h >= 460) return '480p';
+    if (h >= 340) return '360p';
+    if (h >= 220) return '240p';
     return '144p';
+  }
+
+  function qualityTierToRank(q: string): number {
+    const m = q.match(/^(\d{3,4})p$/);
+    return m ? Number(m[1]) : 0;
   }
 
   function extractYtDlpQualitiesAndSizes(info: Record<string, unknown>): {
@@ -7732,38 +10489,117 @@ async function startServer() {
     qualitySizes: Record<string, number>;
   } {
     const formats = Array.isArray(info.formats) ? (info.formats as Array<Record<string, unknown>>) : [];
-    const qualitySizes: Record<string, number> = {};
-    const foundHeights = new Set<number>();
-    const duration = typeof info.duration === 'number' ? info.duration : 0;
+    const duration = typeof info.duration === 'number' && Number.isFinite(info.duration) ? info.duration : 0;
+
+    // Estimate the default audio stream size so video-only streams reflect total merged file size
+    let defaultAudioBytes = 0;
+    let bestAudioScore = -1;
+    for (const f of formats) {
+      const vcodec = typeof f.vcodec === 'string' ? f.vcodec : 'none';
+      const acodec = typeof f.acodec === 'string' ? f.acodec : 'none';
+      if (vcodec !== 'none' || acodec === 'none') continue;
+      const proto = typeof f.protocol === 'string' ? f.protocol.toLowerCase() : '';
+      const isDirect = proto !== 'm3u8_native' && proto !== 'm3u8' && proto !== 'http_dash_segments';
+      const ext = typeof f.ext === 'string' ? f.ext.toLowerCase() : '';
+      const langPref = typeof f.language_preference === 'number' ? f.language_preference : 0;
+      const fSize = Number(f.filesize || f.filesize_approx || 0);
+      const abr = Number(f.abr || f.tbr || 0);
+      const estAudio = fSize > 0 ? fSize : duration > 0 && abr > 0 ? Math.round((abr * 1000 / 8) * duration) : 0;
+      if (estAudio <= 0) continue;
+      const score =
+        (isDirect ? 10000 : 0) +
+        (ext === 'm4a' || acodec.includes('mp4a') ? 1000 : 0) +
+        (langPref > 0 ? 100 : 0) +
+        abr;
+      if (score > bestAudioScore) {
+        bestAudioScore = score;
+        defaultAudioBytes = estAudio;
+      }
+    }
+
+    interface VideoFmtCandidate {
+      totalBytes: number;
+      hasExactSize: boolean;
+      isDirect: boolean;
+      isMuxedMp4Avc: boolean;
+      isAvc: boolean;
+      isAv01: boolean;
+      isMp4: boolean;
+      tbr: number;
+    }
+
+    const byQuality = new Map<string, VideoFmtCandidate[]>();
 
     for (const f of formats) {
       const vcodec = typeof f.vcodec === 'string' ? f.vcodec : 'none';
       if (vcodec === 'none') continue;
-      const h = typeof f.height === 'number' ? f.height : 0;
-      if (h <= 0) continue;
-      foundHeights.add(h);
+      const ext = typeof f.ext === 'string' ? f.ext.toLowerCase() : '';
+      const proto = typeof f.protocol === 'string' ? f.protocol.toLowerCase() : '';
+      const note = typeof f.format_note === 'string' ? f.format_note : '';
+      if (ext === 'mhtml' || proto === 'mhtml' || /storyboard/i.test(note)) continue;
 
-      const q = heightToQualityStr(h);
+      const w = typeof f.width === 'number' && Number.isFinite(f.width) ? f.width : 0;
+      const h = typeof f.height === 'number' && Number.isFinite(f.height) ? f.height : 0;
+      const noteMatch = note.match(/\b(4320|2160|1440|1080|720|480|360|240|144)p/i);
+      let q = '';
+      if (noteMatch) {
+        q = `${noteMatch[1]}p`;
+      } else {
+        const res = w > 0 && h > 0 ? Math.min(w, h) : h || w;
+        if (res <= 0) continue;
+        q = heightToQualityStr(res);
+      }
+
+      const acodec = typeof f.acodec === 'string' ? f.acodec : 'none';
+      const isMuxed = acodec !== 'none';
+      const isDirect = proto !== 'm3u8_native' && proto !== 'm3u8' && proto !== 'http_dash_segments';
       const fSize = Number(f.filesize || f.filesize_approx || 0);
       const tbr = Number(f.tbr || f.vbr || 0);
-      const estSize = fSize > 0 ? fSize : (duration > 0 && tbr > 0 ? Math.round((tbr * 1024 / 8) * duration) : 0);
+      const videoBytes =
+        fSize > 0 ? fSize : duration > 0 && tbr > 0 ? Math.round((tbr * 1000 / 8) * duration) : 0;
+      const totalBytes = videoBytes > 0 ? (isMuxed ? videoBytes : videoBytes + defaultAudioBytes) : 0;
 
-      if (estSize > 0) {
-        if (!qualitySizes[q] || estSize > qualitySizes[q]) {
-          qualitySizes[q] = estSize;
-        }
-      }
+      const list = byQuality.get(q) || [];
+      list.push({
+        totalBytes,
+        hasExactSize: fSize > 0,
+        isDirect,
+        isMuxedMp4Avc: isMuxed && ext === 'mp4' && vcodec.startsWith('avc') && acodec.includes('mp4a'),
+        isAvc: vcodec.startsWith('avc'),
+        isAv01: vcodec.startsWith('av01'),
+        isMp4: ext === 'mp4',
+        tbr,
+      });
+      byQuality.set(q, list);
     }
 
-    if (foundHeights.size === 0) {
+    if (byQuality.size === 0) {
       return {
         qualities: ['1080p', '720p', '480p', '360p'],
         qualitySizes: {},
       };
     }
 
-    const sortedHeights = Array.from(foundHeights).sort((a, b) => b - a);
-    const qualities = Array.from(new Set(sortedHeights.map((h) => heightToQualityStr(h))));
+    const qualities = Array.from(byQuality.keys()).sort((a, b) => qualityTierToRank(b) - qualityTierToRank(a));
+    const qualitySizes: Record<string, number> = {};
+
+    for (const q of qualities) {
+      const candidates = (byQuality.get(q) || []).filter((c) => c.totalBytes > 0);
+      if (candidates.length === 0) continue;
+      const qNum = qualityTierToRank(q);
+      // Pick the format that best matches what buildYtDlpVideoFormatSelector downloads
+      candidates.sort((a, b) => {
+        if (a.isDirect !== b.isDirect) return a.isDirect ? -1 : 1;
+        if (qNum <= 360 && a.isMuxedMp4Avc !== b.isMuxedMp4Avc) return a.isMuxedMp4Avc ? -1 : 1;
+        if (a.isAvc !== b.isAvc) return a.isAvc ? -1 : 1;
+        if (a.isAv01 !== b.isAv01) return a.isAv01 ? -1 : 1;
+        if (a.isMp4 !== b.isMp4) return a.isMp4 ? -1 : 1;
+        if (a.hasExactSize !== b.hasExactSize) return a.hasExactSize ? -1 : 1;
+        return b.tbr - a.tbr;
+      });
+      qualitySizes[q] = candidates[0].totalBytes;
+    }
+
     return { qualities, qualitySizes };
   }
 
@@ -7775,6 +10611,22 @@ async function startServer() {
     const foundHeights = new Set<number>();
     const duration = Number(info.videoDetails.lengthSeconds) || 0;
 
+    let defaultAudioBytes = 0;
+    let bestAudioScore = -1;
+    for (const f of info.formats) {
+      if (f.hasVideo || !f.hasAudio) continue;
+      const fSize = Number(f.contentLength || (f as any).fileSize || 0);
+      const abr = Number(f.audioBitrate || 0);
+      const estAudio = fSize > 0 ? fSize : duration > 0 && abr > 0 ? Math.round((abr * 1000 / 8) * duration) : 0;
+      if (estAudio <= 0) continue;
+      const isMp4a = f.container === 'mp4' || f.container === 'm4a' || (f.codecs || '').includes('mp4a');
+      const score = (isMp4a ? 1000 : 0) + abr;
+      if (score > bestAudioScore) {
+        bestAudioScore = score;
+        defaultAudioBytes = estAudio;
+      }
+    }
+
     for (const f of info.formats) {
       if (!f.hasVideo) continue;
       const h = getVideoFormatResolution(f);
@@ -7783,8 +10635,9 @@ async function startServer() {
 
       const q = heightToQualityStr(h);
       const fSize = Number(f.contentLength || (f as any).fileSize || 0);
-      const bit = Number(f.bitrate || 0);
-      const estSize = fSize > 0 ? fSize : (duration > 0 && bit > 0 ? Math.round((bit * 1024 / 8) * duration) : 0);
+      const bit = Number(f.bitrate || 0); // ytdl-core bitrate is already in bits/sec
+      const videoBytes = fSize > 0 ? fSize : duration > 0 && bit > 0 ? Math.round((bit / 8) * duration) : 0;
+      const estSize = videoBytes > 0 ? (f.hasAudio ? videoBytes : videoBytes + defaultAudioBytes) : 0;
 
       if (estSize > 0) {
         if (!qualitySizes[q] || estSize > qualitySizes[q]) {
@@ -8172,6 +11025,8 @@ async function startServer() {
       headers.Referer = 'https://www.tiktok.com/';
     } else if (/(?:x\.com|twitter\.com|twimg\.com)$/i.test(parsed.hostname)) {
       headers.Referer = 'https://x.com/';
+    } else if (/(?:pinterest\.[a-z.]+|pin\.it|pinimg\.com)$/i.test(parsed.hostname)) {
+      headers.Referer = 'https://www.pinterest.com/';
     }
 
     const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -8315,7 +11170,7 @@ async function startServer() {
 
   app.post('/api/media/inspect', async (req: Request, res: Response) => {
     const body = req.body as { url?: unknown };
-    const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
+    const rawUrl = extractCleanHttpUrl(typeof body.url === 'string' ? body.url : '');
     const parsed = await validatePublicUrl(rawUrl);
     if (!parsed) {
       res.status(400).json({ error: 'Invalid or disallowed media URL.' });
@@ -8398,15 +11253,20 @@ async function startServer() {
           (e) => e.kind === 'video' && Array.isArray(e.formats) && e.formats.length > 0
         );
         const rawThumb = pickInstagramThumbnail(info);
-        const proxiedThumb = rawThumb ? `/api/media/thumbnail?url=${encodeURIComponent(rawThumb)}` : null;
+        const proxiedThumb = maybeProxySocialThumbnail(rawThumb, parsed);
+        let previewImages = pickInstagramPreviewImages(info, parsed);
+        if (previewImages.length === 0 && !hasVideo && proxiedThumb) {
+          previewImages = [proxiedThumb];
+        }
         const uploaderClean = (info.uploader || '').replace(/^@/, '').trim();
         res.json({
           title: cleanInstagramTitle(info),
           author: uploaderClean ? `@${uploaderClean}` : 'Instagram',
           durationSeconds: typeof info.duration === 'number' ? info.duration : null,
-          thumbnail: proxiedThumb,
+          thumbnail: proxiedThumb || previewImages[0] || null,
+          previewImages,
           providerGlow: 'instagram',
-          mediaKind: info.type || (hasVideo ? 'video' : 'image'),
+          mediaKind: info.type || (hasVideo ? 'video' : previewImages.length > 1 ? 'carousel' : 'image'),
           hasVideo,
           itemCount: entries.length,
           qualities: ['best'],
@@ -8507,7 +11367,7 @@ async function startServer() {
               extraArgs
             );
             const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
-              timeout: 30000,
+              timeout: 45000,
               maxBuffer: 8 * 1024 * 1024,
               env,
             });
@@ -8560,11 +11420,14 @@ async function startServer() {
           youtubeInspectInflight.set(inspectCacheKey, inflight);
         }
 
+        let ytInspectErrorMessage = '';
         try {
           const payload = await inflight;
           res.json(payload);
           return;
         } catch (ytErr) {
+          ytInspectErrorMessage = ytErr instanceof Error ? ytErr.message : String(ytErr || 'yt-dlp inspection failed');
+          appendAppLog('warn', 'youtube', `yt-dlp inspect failed for ${ytId}: ${ytInspectErrorMessage}`);
           if (isYouTubeBotOrRateLimitError(ytErr)) {
             recordYouTubeRateLimit(fp);
             res.status(429).json({
@@ -8577,16 +11440,54 @@ async function startServer() {
           // When Xray is active, never fall back to unproxied ytdl-core/fetch which leaks the raw server IP
           if (adminConfig.xray.enabled && xrayState.running) {
             res.status(422).json({
-              error: ytErr instanceof Error ? ytErr.message : 'Failed to inspect YouTube video through Xray.',
+              error: ytInspectErrorMessage || 'Failed to inspect YouTube video through Xray.',
             });
             return;
           }
         } finally {
           youtubeInspectInflight.delete(inspectCacheKey);
         }
+
+        // Fallback to @distube/ytdl-core only when yt-dlp had a non-bot failure without Xray
+        const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
+        try {
+          const info = await ytdl.getInfo(watchUrl);
+          const details = info.videoDetails;
+          const qs = extractYtdlQualitiesAndSizes(info);
+
+          const thumbs = details.thumbnails || [];
+          const bestThumb = thumbs[thumbs.length - 1]?.url || `https://i.ytimg.com/vi/${ytId}/hqdefault.jpg`;
+          const tracks = extractYtdlTracks(info);
+          const isVertical =
+            isYouTubeShortsUrl(parsed) ||
+            info.formats.some((f: VideoFormat) => (f.width || 0) > 0 && (f.height || 0) > (f.width || 0));
+
+          res.json({
+            title: details.title || `Media Clip (${ytId})`,
+            author: details.author?.name || 'Media Creator',
+            durationSeconds: Number(details.lengthSeconds) || null,
+            thumbnail: bestThumb,
+            providerGlow: 'red',
+            isVertical,
+            qualities: qs.qualities,
+            qualitySizes: qs.qualitySizes,
+            engineMode: 'live',
+            audioTracks: tracks.audioTracks,
+            manualSubtitles: tracks.manualSubtitles,
+            autoSubtitles: tracks.autoSubtitles,
+          });
+          return;
+        } catch (ytdlErr) {
+          const ytdlMsg = ytdlErr instanceof Error ? ytdlErr.message : String(ytdlErr || '');
+          appendAppLog('warn', 'youtube', `ytdl-core inspect fallback failed for ${ytId}: ${ytdlMsg}`);
+          res.status(422).json({
+            error: ytInspectErrorMessage || ytdlMsg || 'Could not inspect YouTube video formats.',
+          });
+          return;
+        }
       }
 
-      // Only allow @distube/ytdl-core fallback when yt-dlp isn't installed or had a non-bot failure without Xray
+      // When yt-dlp is not installed on the host, try @distube/ytdl-core then oEmbed preview
       const watchUrl = `https://www.youtube.com/watch?v=${ytId}`;
       try {
         const info = await ytdl.getInfo(watchUrl);
@@ -8655,6 +11556,226 @@ async function startServer() {
       }
     }
 
+    if (isTikTokUrl(parsed)) {
+      const resolvedTt = await resolveTikTokShortUrl(parsed);
+      const cls = classifyTikTokUrl(resolvedTt.toString());
+      if (cls.kind === 'profile') {
+        try {
+          const prof = await fetchTikTokProfile(resolvedTt, cls.username);
+          const statParts = [
+            formatCompactCount(prof.followers) ? `${formatCompactCount(prof.followers)} followers` : null,
+            formatCompactCount(prof.likes) ? `${formatCompactCount(prof.likes)} likes` : null,
+          ].filter(Boolean);
+          const titleBase =
+            prof.nickname && prof.username && !prof.nickname.includes(prof.username)
+              ? `${prof.nickname} (@${prof.username})`
+              : prof.nickname || `@${prof.username}`;
+          const proxiedAvatar = maybeProxySocialThumbnail(prof.avatarUrl, resolvedTt);
+          res.json({
+            title: statParts.length > 0 ? `${titleBase} • ${statParts.join(' • ')}` : titleBase,
+            author: prof.username ? `@${prof.username}` : 'TikTok',
+            durationSeconds: null,
+            thumbnail: proxiedAvatar,
+            previewImages: proxiedAvatar ? [proxiedAvatar] : [],
+            providerGlow: 'tiktok',
+            mediaKind: 'image',
+            hasVideo: false,
+            itemCount: 1,
+            qualities: ['best'],
+            engineMode: 'live',
+            audioTracks: [],
+            manualSubtitles: [],
+            autoSubtitles: [],
+          });
+          return;
+        } catch (profErr) {
+          res.status(422).json({
+            error: profErr instanceof Error ? profErr.message : 'Could not fetch TikTok profile.',
+          });
+          return;
+        }
+      }
+
+      try {
+        const ttInfo = await resolveTikTokMediaFallback(resolvedTt);
+        const hasVideo = ttInfo.videos.length > 0;
+        const ttSeen = new Set<string>();
+        const previewImages = ttInfo.photos
+          .map((p) => p.url)
+          .filter((u) => {
+            if (!u || !/^https?:\/\//i.test(u) || ttSeen.has(u)) return false;
+            ttSeen.add(u);
+            return true;
+          })
+          .map((u) => maybeProxySocialThumbnail(u, resolvedTt))
+          .filter((u): u is string => Boolean(u));
+        const proxiedThumb = maybeProxySocialThumbnail(ttInfo.thumbnail, resolvedTt) || previewImages[0] || null;
+        res.json({
+          title: ttInfo.title,
+          author: ttInfo.author,
+          durationSeconds: ttInfo.durationSeconds,
+          thumbnail: proxiedThumb,
+          previewImages,
+          providerGlow: 'tiktok',
+          isVertical: ttInfo.isVertical ?? true,
+          mediaKind: hasVideo ? 'video' : ttInfo.photos.length > 1 ? 'carousel' : 'image',
+          hasVideo,
+          itemCount: hasVideo ? ttInfo.videos.length : Math.max(ttInfo.photos.length, previewImages.length),
+          qualities: ['best'],
+          engineMode: 'live',
+          audioTracks: [],
+          manualSubtitles: [],
+          autoSubtitles: [],
+        });
+        return;
+      } catch (ttErr) {
+        if (runner) {
+          try {
+            const { extraArgs, env } = await getYtDlpAuthAndProxy();
+            const args = insertBeforeDoubleDash(
+              buildYtDlpArgs(['--dump-single-json', '--no-playlist', '--no-warnings', '--', resolvedTt.toString()], {
+                isYouTube: false,
+              }),
+              extraArgs
+            );
+            const { stdout } = await execFileAsync(runner.cmd, [...runner.baseArgs, ...args], {
+              timeout: 22000,
+              maxBuffer: 4 * 1024 * 1024,
+              env,
+            });
+            const info = JSON.parse(stdout) as Record<string, unknown> & {
+              title?: string;
+              uploader?: string;
+              channel?: string;
+              creator?: string;
+              duration?: number;
+              thumbnail?: string;
+              width?: number;
+              height?: number;
+            };
+            const rawThumb = typeof info.thumbnail === 'string' && info.thumbnail ? info.thumbnail : null;
+            const infoW = typeof info.width === 'number' ? info.width : 0;
+            const infoH = typeof info.height === 'number' ? info.height : 0;
+            res.json({
+              title: cleanTikTokTitle(info.title, 'TikTok Video'),
+              author: info.uploader || info.creator || info.channel || (cls.username ? `@${cls.username}` : 'TikTok'),
+              durationSeconds: typeof info.duration === 'number' ? info.duration : null,
+              thumbnail: maybeProxySocialThumbnail(rawThumb, resolvedTt),
+              providerGlow: 'tiktok',
+              isVertical: infoW > 0 && infoH > 0 ? infoH >= infoW : true,
+              mediaKind: 'video',
+              hasVideo: true,
+              itemCount: 1,
+              qualities: ['best'],
+              engineMode: 'live',
+              audioTracks: [],
+              manualSubtitles: [],
+              autoSubtitles: [],
+            });
+            return;
+          } catch {
+            // Fall through to TikTok error
+          }
+        }
+        res.status(422).json({
+          error: ttErr instanceof Error ? ttErr.message : 'Could not fetch TikTok media.',
+        });
+        return;
+      }
+    }
+
+    if (isXUrl(parsed)) {
+      const resolvedX = await resolveShortRedirectUrl(parsed);
+      const xCls = classifyXUrl(resolvedX.toString());
+      if (xCls.kind === 'profile' || xCls.kind === 'post') {
+        try {
+          const xInfo = await resolveXMediaFallback(resolvedX);
+          const allItems = xInfo.items && xInfo.items.length > 0
+            ? xInfo.items
+            : [
+                ...xInfo.videos.map((v) => ({ kind: 'video' as const, url: v.url, width: v.width, height: v.height })),
+                ...xInfo.photos.map((p) => ({ kind: 'photo' as const, url: p.url, width: 0, height: 0 })),
+              ];
+          const hasVideo = xInfo.videos.length > 0;
+          const xSeen = new Set<string>();
+          const previewImages = xInfo.photos
+            .map((p) => p.url)
+            .filter((u) => {
+              if (!u || !/^https?:\/\//i.test(u) || xSeen.has(u)) return false;
+              xSeen.add(u);
+              return true;
+            })
+            .map((u) => maybeProxySocialThumbnail(u, resolvedX))
+            .filter((u): u is string => Boolean(u));
+          const proxiedThumb = maybeProxySocialThumbnail(xInfo.thumbnail, resolvedX) || previewImages[0] || null;
+          res.json({
+            title: xInfo.title,
+            author: xInfo.author,
+            durationSeconds: xInfo.durationSeconds,
+            thumbnail: proxiedThumb,
+            previewImages,
+            providerGlow: 'x',
+            isVertical: Boolean(xInfo.isVertical),
+            mediaKind: allItems.length > 1 ? 'carousel' : hasVideo ? 'video' : 'image',
+            hasVideo,
+            itemCount: allItems.length,
+            qualities: ['best'],
+            engineMode: 'live',
+            audioTracks: [],
+            manualSubtitles: [],
+            autoSubtitles: [],
+          });
+          return;
+        } catch (xErr) {
+          if (xErr instanceof XTextOnlyPostError || xCls.kind === 'profile' || !runner) {
+            res.status(422).json({
+              error: xErr instanceof Error ? xErr.message : 'Could not fetch X / Twitter media.',
+            });
+            return;
+          }
+          // Fall through to yt-dlp for protected/needs-fallback status posts
+        }
+      }
+    }
+
+    if (isPinterestUrl(parsed)) {
+      try {
+        const pinInfo = await resolvePinterestMediaFallback(parsed);
+        const hasVideo = pinInfo.videos.length > 0;
+        const previewImages = pinInfo.photos
+          .map((p) => maybeProxySocialThumbnail(p.url, parsed))
+          .filter((u): u is string => Boolean(u));
+        const proxiedThumb = maybeProxySocialThumbnail(pinInfo.thumbnail, parsed) || previewImages[0] || null;
+        const totalItems = hasVideo ? pinInfo.videos.length : Math.max(1, previewImages.length);
+        res.json({
+          title: pinInfo.title,
+          author: pinInfo.author,
+          durationSeconds: pinInfo.durationSeconds,
+          thumbnail: proxiedThumb,
+          previewImages,
+          providerGlow: 'pinterest',
+          isVertical: Boolean(pinInfo.isVertical),
+          mediaKind: pinInfo.isGif ? 'gif' : hasVideo ? 'video' : previewImages.length > 1 ? 'carousel' : 'image',
+          hasVideo,
+          itemCount: totalItems,
+          qualities: ['best'],
+          engineMode: 'live',
+          audioTracks: [],
+          manualSubtitles: [],
+          autoSubtitles: [],
+        });
+        return;
+      } catch (pinErr) {
+        if (!runner) {
+          res.status(422).json({
+            error: pinErr instanceof Error ? pinErr.message : 'Could not fetch Pinterest media.',
+          });
+          return;
+        }
+        // Fall through to yt-dlp fallback below
+      }
+    }
+
     if (runner) {
       try {
         const { extraArgs, env } = await getYtDlpAuthAndProxy();
@@ -8678,78 +11799,34 @@ async function startServer() {
           thumbnail?: string;
         };
         const tracks = extractYtDlpTracks(info);
+        const qs = extractYtDlpQualitiesAndSizes(info);
         const rawThumb = typeof info.thumbnail === 'string' && info.thumbnail ? info.thumbnail : null;
         res.json({
           title: info.title || 'Media Stream',
           author: info.uploader || info.channel || info.creator || parsed.hostname,
           durationSeconds: typeof info.duration === 'number' ? info.duration : null,
           thumbnail: maybeProxySocialThumbnail(rawThumb, parsed),
-          providerGlow: 'default',
-          qualities: ['2160p', '1080p', '720p', '480p', '360p'],
+          providerGlow: isXUrl(parsed) ? 'x' : isPinterestUrl(parsed) ? 'pinterest' : 'default',
+          qualities: qs.qualities,
+          qualitySizes: qs.qualitySizes,
           engineMode: 'live',
           audioTracks: tracks.audioTracks,
           manualSubtitles: tracks.manualSubtitles,
           autoSubtitles: tracks.autoSubtitles,
         });
         return;
-      } catch {
-        // Fall through to X/TikTok fallbacks
-      }
-    }
-
-    if (isXUrl(parsed)) {
-      try {
-        const xInfo = await resolveXMediaFallback(parsed);
-        const hasVideo = xInfo.videos.length > 0;
-        res.json({
-          title: xInfo.title,
-          author: xInfo.author,
-          durationSeconds: xInfo.durationSeconds,
-          thumbnail: maybeProxySocialThumbnail(xInfo.thumbnail, parsed),
-          providerGlow: 'x',
-          mediaKind: hasVideo ? 'video' : xInfo.photos.length > 1 ? 'carousel' : 'image',
-          hasVideo,
-          itemCount: hasVideo ? xInfo.videos.length : xInfo.photos.length,
-          qualities: ['best'],
-          engineMode: 'live',
-          audioTracks: [],
-          manualSubtitles: [],
-          autoSubtitles: [],
-        });
-        return;
-      } catch (xErr) {
-        res.status(422).json({
-          error: xErr instanceof Error ? xErr.message : 'Could not fetch X / Twitter media.',
-        });
-        return;
-      }
-    }
-
-    if (isTikTokUrl(parsed)) {
-      try {
-        const ttInfo = await resolveTikTokMediaFallback(parsed);
-        const hasVideo = ttInfo.videos.length > 0;
-        res.json({
-          title: ttInfo.title,
-          author: ttInfo.author,
-          durationSeconds: ttInfo.durationSeconds,
-          thumbnail: maybeProxySocialThumbnail(ttInfo.thumbnail, parsed),
-          providerGlow: 'tiktok',
-          mediaKind: hasVideo ? 'video' : ttInfo.photos.length > 1 ? 'carousel' : 'image',
-          hasVideo,
-          itemCount: hasVideo ? ttInfo.videos.length : ttInfo.photos.length,
-          qualities: ['best'],
-          engineMode: 'live',
-          audioTracks: [],
-          manualSubtitles: [],
-          autoSubtitles: [],
-        });
-        return;
-      } catch (ttErr) {
-        res.status(422).json({
-          error: ttErr instanceof Error ? ttErr.message : 'Could not fetch TikTok media.',
-        });
-        return;
+      } catch (ytInspectErr) {
+        if (isXUrl(parsed) || isPinterestUrl(parsed)) {
+          res.status(422).json({
+            error:
+              ytInspectErr instanceof Error
+                ? ytInspectErr.message
+                : isPinterestUrl(parsed)
+                  ? 'Could not fetch Pinterest media.'
+                  : 'Could not fetch X / Twitter media.',
+          });
+          return;
+        }
       }
     }
 
@@ -9647,13 +12724,390 @@ async function startServer() {
         return;
       }
 
+      // 2b. TikTok pipeline (short-link & /login unwrap -> profile vs gallery-dl -> yt-dlp / native / tikwm fallback)
+      const resolvedTikTokUrl = isTikTokUrl(parsed) ? await resolveTikTokShortUrl(parsed) : null;
+      const tiktokClass = resolvedTikTokUrl ? classifyTikTokUrl(resolvedTikTokUrl.toString()) : null;
+      if (resolvedTikTokUrl && tiktokClass?.kind !== 'profile') {
+        const gdlWorkDir = path.join(workDir, 'gdl_tiktok');
+        try {
+          await fs.promises.mkdir(gdlWorkDir, { recursive: true });
+          const gdlRes = await runGalleryDlTikTokFiles(resolvedTikTokUrl, gdlWorkDir, job);
+          if (gdlRes) {
+            if (gdlRes.cleanedTitle && (!job.title || /^tiktok/i.test(job.title))) {
+              job.title = gdlRes.cleanedTitle;
+            }
+            if (isAudio) {
+              const audioSrc = gdlRes.audioFiles[0] || gdlRes.videoFiles[0];
+              if (audioSrc) {
+                if (audioSrc.toLowerCase().endsWith('.mp3')) {
+                  await uploadTmpFileToLockedTelegramChannel(job, audioSrc, {
+                    ext: 'mp3',
+                    mimeType: 'audio/mpeg',
+                    progressStart: 50,
+                    progressEnd: 99,
+                  });
+                  return;
+                }
+                const outMp3 = path.join(workDir, 'tt_gdl.mp3');
+                job.status = 'processing';
+                job.progress = Math.max(job.progress, 48);
+                await runFfmpegLocalFile(
+                  ['-y', '-i', audioSrc, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', outMp3],
+                  job
+                );
+                await uploadTmpFileToLockedTelegramChannel(job, outMp3, {
+                  ext: 'mp3',
+                  mimeType: 'audio/mpeg',
+                  progressStart: 52,
+                  progressEnd: 99,
+                });
+                return;
+              }
+            } else if (gdlRes.imageFiles.length > 1) {
+              job.status = 'processing';
+              job.progress = 50;
+              const zipPath = path.join(workDir, 'tiktok_photos.zip');
+              const names = gdlRes.imageFiles.map((f) => path.basename(f));
+              await execFileAsync('python3', ['-m', 'zipfile', '-c', zipPath, ...names], {
+                cwd: gdlWorkDir,
+                timeout: 45000,
+              });
+              await uploadTmpFileToLockedTelegramChannel(job, zipPath, {
+                ext: 'zip',
+                mimeType: 'application/zip',
+                progressStart: 52,
+                progressEnd: 99,
+              });
+              return;
+            } else if (gdlRes.imageFiles.length === 1) {
+              const imgPath = gdlRes.imageFiles[0];
+              const rawExt = path.extname(imgPath).toLowerCase().replace('.', '');
+              const imgExt: DownloadFileExt = rawExt === 'png' ? 'png' : rawExt === 'webp' ? 'webp' : 'jpg';
+              await uploadTmpFileToLockedTelegramChannel(job, imgPath, {
+                ext: imgExt,
+                mimeType: getMimeTypeForExt(imgExt),
+                progressStart: 50,
+                progressEnd: 99,
+              });
+              return;
+            } else if (gdlRes.videoFiles.length > 0) {
+              await uploadTmpFileToLockedTelegramChannel(job, gdlRes.videoFiles[0], {
+                ext: 'mp4',
+                mimeType: 'video/mp4',
+                progressStart: 50,
+                progressEnd: 99,
+              });
+              return;
+            }
+          }
+        } catch (gdlErr) {
+          if (job.cancelled || isFatalTelegramUploadError(gdlErr)) throw gdlErr;
+          appendAppLog(
+            'warn',
+            'tiktok',
+            `gallery-dl Telegram fallback (${resolvedTikTokUrl.toString()}): ${gdlErr instanceof Error ? gdlErr.message : 'failed'}`
+          );
+        }
+      }
+
+      // 2c. X (Twitter) dual-API pipeline (t.co unwrap -> profile / parallel fxtwitter + Syndication -> yt-dlp fallback)
+      const resolvedXUrl = isXUrl(parsed) ? await resolveShortRedirectUrl(parsed) : null;
+      const xUrlClass = resolvedXUrl ? classifyXUrl(resolvedXUrl.toString()) : null;
+      if (resolvedXUrl && (xUrlClass?.kind === 'profile' || xUrlClass?.kind === 'post')) {
+        const xCookie = getXScopedCookieHeader();
+        const xHeaders = xCookie ? { Cookie: xCookie } : undefined;
+        try {
+          const resolved = await resolveXMediaFallback(resolvedXUrl);
+          if (isAudio) {
+            const sourceUrl = resolved.videos[0]?.url;
+            if (!sourceUrl) {
+              throw new XTextOnlyPostError('This X post does not contain a video track for MP3 extraction.');
+            }
+            const srcPath = path.join(workDir, 'x_audio_src.mp4');
+            const outMp3 = path.join(workDir, 'x_out.mp3');
+            await downloadUrlFastToFile(sourceUrl, srcPath, {
+              referer: 'https://x.com/',
+              headers: xHeaders,
+              signal: abortController.signal,
+              onProgress: (dl, tot) => updateDlProgress(dl, tot, 44),
+            });
+            if (!(await looksLikeMediaFile(srcPath, 'video'))) {
+              await fs.promises.rm(srcPath, { force: true }).catch(() => {});
+              throw new XMediaFallbackNeedsYtDlpError('X video failed magic-byte check.');
+            }
+            job.status = 'processing';
+            job.progress = Math.max(job.progress, 48);
+            await runFfmpegLocalFile(
+              ['-y', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', outMp3],
+              job
+            );
+            await fs.promises.rm(srcPath, { force: true }).catch(() => {});
+            await uploadTmpFileToLockedTelegramChannel(job, outMp3, {
+              ext: 'mp3',
+              mimeType: 'audio/mpeg',
+              progressStart: 52,
+              progressEnd: 99,
+            });
+            return;
+          }
+
+          const allItems = resolved.items && resolved.items.length > 0
+            ? resolved.items
+            : [
+                ...resolved.videos.map((v) => ({ kind: 'video' as const, url: v.url, width: v.width, height: v.height })),
+                ...resolved.photos.map((p) => ({ kind: 'photo' as const, url: p.url, width: 0, height: 0 })),
+              ];
+
+          const downloadedItems: Array<{ kind: 'video' | 'photo'; filePath: string; fileName: string; ext: DownloadFileExt }> = [];
+          const ALBUM_BATCH = 8;
+          for (let offset = 0; offset < allItems.length; offset += ALBUM_BATCH) {
+            const batch = allItems.slice(offset, offset + ALBUM_BATCH);
+            const batchResults = await Promise.all(
+              batch.map(async (item, bIdx) => {
+                const idx = offset + bIdx + 1;
+                const tmpPath = path.join(workDir, `x_item_${idx}.tmp`);
+                try {
+                  const { contentType } = await downloadUrlFastToFile(item.url, tmpPath, {
+                    referer: 'https://x.com/',
+                    headers: xHeaders,
+                    concurrency: item.kind === 'video' ? 4 : 2,
+                    signal: abortController.signal,
+                    onProgress: allItems.length === 1 ? (dl, tot) => updateDlProgress(dl, tot, 48) : undefined,
+                  });
+                  const validMagic = await looksLikeMediaFile(tmpPath, item.kind);
+                  if (!validMagic) {
+                    await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+                    return null;
+                  }
+                  const ext: DownloadFileExt =
+                    item.kind === 'video'
+                      ? 'mp4'
+                      : contentType.includes('png')
+                        ? 'png'
+                        : contentType.includes('webp')
+                          ? 'webp'
+                          : 'jpg';
+                  const finalName = `x_media_${idx}.${ext}`;
+                  const finalPath = path.join(workDir, finalName);
+                  await fs.promises.rename(tmpPath, finalPath);
+                  if (allItems.length > 1) {
+                    job.progress = Math.min(48, job.progress + Math.floor(40 / allItems.length));
+                  }
+                  return { kind: item.kind, filePath: finalPath, fileName: finalName, ext };
+                } catch {
+                  await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+                  return null;
+                }
+              })
+            );
+            for (const r of batchResults) {
+              if (r) downloadedItems.push(r);
+            }
+          }
+
+          if (downloadedItems.length === 0) {
+            throw new XMediaFallbackNeedsYtDlpError('All downloaded X media items failed validation.');
+          }
+
+          if (downloadedItems.length === 1) {
+            const single = downloadedItems[0];
+            await uploadTmpFileToLockedTelegramChannel(job, single.filePath, {
+              ext: single.ext,
+              mimeType: getMimeTypeForExt(single.ext),
+              progressStart: 50,
+              progressEnd: 99,
+            });
+            return;
+          }
+
+          job.status = 'processing';
+          job.progress = 50;
+          const zipPath = path.join(workDir, 'x_media.zip');
+          await execFileAsync('python3', ['-m', 'zipfile', '-c', zipPath, ...downloadedItems.map((d) => d.fileName)], {
+            cwd: workDir,
+            timeout: 45000,
+          });
+          await uploadTmpFileToLockedTelegramChannel(job, zipPath, {
+            ext: 'zip',
+            mimeType: 'application/zip',
+            progressStart: 52,
+            progressEnd: 99,
+          });
+          return;
+        } catch (xErr) {
+          if (job.cancelled || isFatalTelegramUploadError(xErr) || xErr instanceof XTextOnlyPostError) {
+            throw xErr;
+          }
+          if (xUrlClass?.kind === 'profile') {
+            throw xErr;
+          }
+          appendAppLog(
+            'warn',
+            'x',
+            `X dual-API fallback to yt-dlp (${resolvedXUrl.toString()}): ${xErr instanceof Error ? xErr.message : 'failed'}`
+          );
+        }
+      }
+
+      // 2d. Pinterest pipeline (pin.it resolve -> video/HLS -> GIF -> order-preserving carousel -> single image originals>1200x>736x -> yt-dlp fallback)
+      let resolvedPinterestDlUrl: URL | null = null;
+      if (isPinterestUrl(parsed)) {
+        try {
+          const pinMeta = await resolvePinterestPinUrl(parsed);
+          resolvedPinterestDlUrl = pinMeta.resolvedUrl;
+          const resolvedPin = await resolvePinterestMediaFallback(parsed);
+
+          if (isAudio) {
+            const vidSrc = resolvedPin.videos[0]?.url;
+            if (!vidSrc) {
+              throw new Error('This Pinterest Pin does not contain a video track for MP3 extraction.');
+            }
+            const outMp3 = path.join(workDir, 'pin_out.mp3');
+            if (resolvedPin.isHlsVideo) {
+              const { env } = await getYtDlpAuthAndProxy();
+              await runFfmpegLocalFile(
+                ['-y', '-headers', 'Referer: https://www.pinterest.com/\r\n', '-i', vidSrc, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', outMp3],
+                job,
+                buildFfmpegProxyEnv(env)
+              );
+            } else {
+              const srcPath = path.join(workDir, 'pin_src.mp4');
+              await downloadUrlFastToFile(vidSrc, srcPath, {
+                referer: 'https://www.pinterest.com/',
+                signal: abortController.signal,
+                onProgress: (dl, tot) => updateDlProgress(dl, tot, 44),
+              });
+              job.status = 'processing';
+              job.progress = Math.max(job.progress, 48);
+              await runFfmpegLocalFile(
+                ['-y', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', outMp3],
+                job
+              );
+              await fs.promises.rm(srcPath, { force: true }).catch(() => {});
+            }
+            await uploadTmpFileToLockedTelegramChannel(job, outMp3, {
+              ext: 'mp3',
+              mimeType: 'audio/mpeg',
+              progressStart: 52,
+              progressEnd: 99,
+            });
+            return;
+          }
+
+          if (resolvedPin.videos.length > 0) {
+            const vidUrl = resolvedPin.videos[0].url;
+            const outMp4 = path.join(workDir, 'pin_video.mp4');
+            if (resolvedPin.isHlsVideo) {
+              const { env } = await getYtDlpAuthAndProxy();
+              job.status = 'processing';
+              job.progress = 20;
+              await runFfmpegLocalFile(
+                ['-y', '-headers', 'Referer: https://www.pinterest.com/\r\n', '-i', vidUrl, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', '+faststart', outMp4],
+                job,
+                buildFfmpegProxyEnv(env)
+              );
+            } else {
+              await downloadUrlFastToFile(vidUrl, outMp4, {
+                referer: 'https://www.pinterest.com/',
+                concurrency: 4,
+                signal: abortController.signal,
+                onProgress: (dl, tot) => updateDlProgress(dl, tot, 48),
+              });
+              const stat = await fs.promises.stat(outMp4).catch(() => null);
+              if (!stat || stat.size <= 10_000 || !(await looksLikeMediaFile(outMp4, 'video'))) {
+                await fs.promises.rm(outMp4, { force: true }).catch(() => {});
+                throw new Error('Pinterest direct video failed validation.');
+              }
+            }
+            await uploadTmpFileToLockedTelegramChannel(job, outMp4, {
+              ext: 'mp4',
+              mimeType: 'video/mp4',
+              progressStart: 50,
+              progressEnd: 99,
+            });
+            return;
+          }
+
+          if (resolvedPin.photos.length > 0) {
+            const downloadedSlides: Array<{ filePath: string; fileName: string; ext: DownloadFileExt }> = [];
+            const SLIDE_BATCH = 6;
+            for (let offset = 0; offset < resolvedPin.photos.length; offset += SLIDE_BATCH) {
+              const batch = resolvedPin.photos.slice(offset, offset + SLIDE_BATCH);
+              const results = await Promise.all(
+                batch.map((p, bIdx) =>
+                  downloadPinterestImageWithQualityCascade(
+                    p.url,
+                    resolvedPin.photoHashes[offset + bIdx],
+                    workDir,
+                    offset + bIdx + 1,
+                    abortController.signal
+                  )
+                )
+              );
+              for (const r of results) {
+                if (r) downloadedSlides.push(r);
+              }
+              if (resolvedPin.photos.length > 1) {
+                job.progress = Math.min(48, Math.round(((offset + batch.length) / resolvedPin.photos.length) * 46));
+              }
+            }
+
+            if (downloadedSlides.length === 0) {
+              throw new Error('All Pinterest image slides failed download validation.');
+            }
+            if (downloadedSlides.length === 1) {
+              const single = downloadedSlides[0];
+              await uploadTmpFileToLockedTelegramChannel(job, single.filePath, {
+                ext: single.ext,
+                mimeType: getMimeTypeForExt(single.ext),
+                progressStart: 50,
+                progressEnd: 99,
+              });
+              return;
+            }
+
+            job.status = 'processing';
+            job.progress = 50;
+            const zipPath = path.join(workDir, 'pinterest_carousel.zip');
+            await execFileAsync(
+              'python3',
+              ['-m', 'zipfile', '-c', zipPath, ...downloadedSlides.map((s) => s.fileName)],
+              { cwd: workDir, timeout: 45000 }
+            );
+            await uploadTmpFileToLockedTelegramChannel(job, zipPath, {
+              ext: 'zip',
+              mimeType: 'application/zip',
+              progressStart: 52,
+              progressEnd: 99,
+            });
+            return;
+          }
+        } catch (pinErr) {
+          if (job.cancelled || isFatalTelegramUploadError(pinErr)) {
+            throw pinErr;
+          }
+          appendAppLog(
+            'warn',
+            'pinterest',
+            `Pinterest Telegram fallback to yt-dlp (${parsed.toString()}): ${pinErr instanceof Error ? pinErr.message : 'failed'}`
+          );
+        }
+      }
+
       // 3. YouTube & yt-dlp supported platforms
-      const targetUrlForDl = isXUrl(parsed)
-        ? normalizeXUrl(parsed)
-        : ytId
-          ? `https://www.youtube.com/watch?v=${ytId}`
-          : parsed.toString();
-      const runner = await getYtDlpRunner();
+      const targetUrlForDl = resolvedXUrl
+        ? normalizeXUrl(resolvedXUrl)
+        : isXUrl(parsed)
+          ? normalizeXUrl(parsed)
+          : resolvedTikTokUrl
+            ? resolvedTikTokUrl.toString()
+            : resolvedPinterestDlUrl
+              ? resolvedPinterestDlUrl.toString()
+              : ytId
+                ? `https://www.youtube.com/watch?v=${ytId}`
+                : parsed.toString();
+      const runner =
+        tiktokClass?.kind === 'profile' || xUrlClass?.kind === 'profile' ? null : await getYtDlpRunner();
       if (runner) {
         const fp = ytId ? getYouTubeConfigFingerprint() : '';
         if (ytId) {
@@ -10065,11 +13519,11 @@ async function startServer() {
         }
       }
 
-      // 4. X / TikTok fallback resolver
-      if (isXUrl(parsed) || isTikTokUrl(parsed)) {
+      // 4. TikTok / X non-status fallback resolver
+      if (isTikTokUrl(parsed) || (isXUrl(parsed) && xUrlClass?.kind === 'other')) {
         const resolved = isXUrl(parsed)
-          ? await resolveXMediaFallback(parsed)
-          : await resolveTikTokMediaFallback(parsed);
+          ? await resolveXMediaFallback(resolvedXUrl || parsed)
+          : await resolveTikTokMediaFallback(resolvedTikTokUrl || parsed);
 
         if (isAudio) {
           const sourceUrl = resolved.musicUrl || resolved.videos[0]?.url;
@@ -10430,13 +13884,6 @@ async function startServer() {
       }
 
       // 7. Fallback playable container written to /tmp -> upload to locked Telegram channel
-      const resMap: Record<string, string> = {
-        '2160p': '1920x1080',
-        '1080p': '1280x720',
-        '720p': '1280x720',
-        '480p': '854x480',
-        '360p': '640x360',
-      };
       const fallbackPath = path.join(workDir, isAudio ? 'fallback.mp3' : 'fallback.mp4');
       const ffArgs = isAudio
         ? [
@@ -10449,7 +13896,7 @@ async function startServer() {
           ]
         : [
             '-y',
-            '-f', 'lavfi', '-i', `color=c=black:s=${resMap[job.quality] || '1280x720'}:d=3`,
+            '-f', 'lavfi', '-i', `color=c=black:s=${qualityToFallbackScale(job.quality)}:d=3`,
             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
             '-metadata', `title=${sanitizeFilename(job.title)}`,
             '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
@@ -10621,12 +14068,431 @@ async function startServer() {
         }
       }
 
-      const targetUrlForDl = isXUrl(parsed)
-        ? normalizeXUrl(parsed)
-        : ytId
-          ? `https://www.youtube.com/watch?v=${ytId}`
-          : parsed.toString();
-      const runner = await getYtDlpRunner();
+      const resolvedTikTokUrl = isTikTokUrl(parsed) ? await resolveTikTokShortUrl(parsed) : null;
+      const tiktokClass = resolvedTikTokUrl ? classifyTikTokUrl(resolvedTikTokUrl.toString()) : null;
+      if (resolvedTikTokUrl && tiktokClass?.kind !== 'profile') {
+        let gdlWorkDir = '';
+        try {
+          gdlWorkDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-tt-'));
+          const gdlRes = await runGalleryDlTikTokFiles(resolvedTikTokUrl, gdlWorkDir, job);
+          if (gdlRes) {
+            if (gdlRes.cleanedTitle && (!job.title || /^tiktok/i.test(job.title))) {
+              job.title = gdlRes.cleanedTitle;
+            }
+            if (isAudio) {
+              const audioSrc = gdlRes.audioFiles[0] || gdlRes.videoFiles[0];
+              if (audioSrc) {
+                if (audioSrc.toLowerCase().endsWith('.mp3')) {
+                  await fs.promises.copyFile(audioSrc, job.filePath);
+                } else {
+                  job.status = 'processing';
+                  job.progress = 90;
+                  await runFfmpegLocalFile(
+                    ['-y', '-i', audioSrc, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', job.filePath],
+                    job
+                  );
+                }
+                await finalizeJobFile(job);
+                return;
+              }
+            } else if (gdlRes.imageFiles.length > 1) {
+              job.status = 'processing';
+              job.progress = 92;
+              const archiveExt: DownloadFileExt = 'zip';
+              const archivePath = path.resolve(CACHE_DIR, `${job.id}.${archiveExt}`);
+              if (!archivePath.startsWith(CACHE_DIR + path.sep)) {
+                throw new Error('Invalid cache path.');
+              }
+              const names = gdlRes.imageFiles.map((f) => path.basename(f));
+              await execFileAsync('python3', ['-m', 'zipfile', '-c', archivePath, ...names], {
+                cwd: gdlWorkDir,
+                timeout: 45000,
+              });
+              job.ext = archiveExt;
+              job.mimeType = getMimeTypeForExt(archiveExt);
+              job.filePath = archivePath;
+              job.contentDisposition = buildContentDisposition(job.title, job.quality, archiveExt);
+              job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${archiveExt}`;
+              await finalizeJobFile(job);
+              return;
+            } else if (gdlRes.imageFiles.length === 1) {
+              const singleImg = gdlRes.imageFiles[0];
+              const rawExt = path.extname(singleImg).toLowerCase().replace('.', '');
+              const mappedExt: DownloadFileExt = rawExt === 'png' ? 'png' : rawExt === 'webp' ? 'webp' : 'jpg';
+              const finalPath = path.resolve(CACHE_DIR, `${job.id}.${mappedExt}`);
+              if (!finalPath.startsWith(CACHE_DIR + path.sep)) {
+                throw new Error('Invalid cache path.');
+              }
+              await fs.promises.copyFile(singleImg, finalPath);
+              job.ext = mappedExt;
+              job.mimeType = getMimeTypeForExt(mappedExt);
+              job.filePath = finalPath;
+              job.contentDisposition = buildContentDisposition(job.title, job.quality, mappedExt);
+              job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${mappedExt}`;
+              await finalizeJobFile(job);
+              return;
+            } else if (gdlRes.videoFiles.length > 0) {
+              await fs.promises.copyFile(gdlRes.videoFiles[0], job.filePath);
+              await finalizeJobFile(job);
+              return;
+            }
+          }
+        } catch (gdlErr) {
+          if (job.cancelled) throw gdlErr;
+          appendAppLog(
+            'warn',
+            'tiktok',
+            `gallery-dl cache fallback (${resolvedTikTokUrl.toString()}): ${gdlErr instanceof Error ? gdlErr.message : 'failed'}`
+          );
+        } finally {
+          if (gdlWorkDir) {
+            await fs.promises.rm(gdlWorkDir, { recursive: true, force: true }).catch(() => {});
+          }
+        }
+      }
+
+      const resolvedXUrl = isXUrl(parsed) ? await resolveShortRedirectUrl(parsed) : null;
+      const xUrlClass = resolvedXUrl ? classifyXUrl(resolvedXUrl.toString()) : null;
+      if (resolvedXUrl && (xUrlClass?.kind === 'profile' || xUrlClass?.kind === 'post')) {
+        const xCookie = getXScopedCookieHeader();
+        const xHeaders = xCookie ? { Cookie: xCookie } : undefined;
+        let xWorkDir = '';
+        try {
+          xWorkDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-x-'));
+          const resolved = await resolveXMediaFallback(resolvedXUrl);
+          if (isAudio) {
+            const sourceUrl = resolved.videos[0]?.url;
+            if (!sourceUrl) {
+              throw new XTextOnlyPostError('This X post does not contain a video track for MP3 extraction.');
+            }
+            const rawMediaPath = path.join(xWorkDir, 'x_source.mp4');
+            await downloadUrlFastToFile(sourceUrl, rawMediaPath, {
+              referer: 'https://x.com/',
+              headers: xHeaders,
+              onProgress: (dl, tot) => {
+                job.downloadedBytes = dl;
+                if (tot > 0) {
+                  job.totalBytes = tot;
+                  job.progress = Math.min(84, Math.max(8, Math.floor((dl / tot) * 82)));
+                }
+              },
+            });
+            if (!(await looksLikeMediaFile(rawMediaPath, 'video'))) {
+              throw new XMediaFallbackNeedsYtDlpError('X video failed magic-byte check.');
+            }
+            job.status = 'processing';
+            job.progress = 90;
+            await new Promise<void>((resolve, reject) => {
+              const ff = spawn(
+                'ffmpeg',
+                [
+                  '-y',
+                  '-i', rawMediaPath,
+                  '-vn',
+                  '-c:a', 'libmp3lame',
+                  '-b:a', '192k',
+                  '-metadata', `title=${sanitizeFilename(job.title)}`,
+                  '-f', 'mp3',
+                  job.filePath,
+                ],
+                { shell: false }
+              );
+              ff.on('error', reject);
+              ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error('Audio conversion failed'))));
+            });
+            await finalizeJobFile(job);
+            return;
+          }
+
+          const allItems = resolved.items && resolved.items.length > 0
+            ? resolved.items
+            : [
+                ...resolved.videos.map((v) => ({ kind: 'video' as const, url: v.url, width: v.width, height: v.height })),
+                ...resolved.photos.map((p) => ({ kind: 'photo' as const, url: p.url, width: 0, height: 0 })),
+              ];
+
+          const downloadedItems: Array<{ kind: 'video' | 'photo'; filePath: string; fileName: string; ext: DownloadFileExt }> = [];
+          const ALBUM_BATCH = 8;
+          for (let offset = 0; offset < allItems.length; offset += ALBUM_BATCH) {
+            const batch = allItems.slice(offset, offset + ALBUM_BATCH);
+            const batchResults = await Promise.all(
+              batch.map(async (item, bIdx) => {
+                const idx = offset + bIdx + 1;
+                const tmpPath = path.join(xWorkDir, `x_item_${idx}.tmp`);
+                try {
+                  const { contentType } = await downloadUrlFastToFile(item.url, tmpPath, {
+                    referer: 'https://x.com/',
+                    headers: xHeaders,
+                    concurrency: item.kind === 'video' ? 4 : 2,
+                    onProgress:
+                      allItems.length === 1
+                        ? (dl, tot) => {
+                            job.downloadedBytes = dl;
+                            if (tot > 0) {
+                              job.totalBytes = tot;
+                              job.progress = Math.min(92, Math.max(8, Math.floor((dl / tot) * 90)));
+                            }
+                          }
+                        : undefined,
+                  });
+                  const validMagic = await looksLikeMediaFile(tmpPath, item.kind);
+                  if (!validMagic) {
+                    await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+                    return null;
+                  }
+                  const ext: DownloadFileExt =
+                    item.kind === 'video'
+                      ? 'mp4'
+                      : contentType.includes('png')
+                        ? 'png'
+                        : contentType.includes('webp')
+                          ? 'webp'
+                          : 'jpg';
+                  const finalName = `x_media_${idx}.${ext}`;
+                  const finalPath = path.join(xWorkDir, finalName);
+                  await fs.promises.rename(tmpPath, finalPath);
+                  if (allItems.length > 1) {
+                    job.progress = Math.min(88, Math.round((idx / allItems.length) * 85));
+                  }
+                  return { kind: item.kind, filePath: finalPath, fileName: finalName, ext };
+                } catch {
+                  await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
+                  return null;
+                }
+              })
+            );
+            for (const r of batchResults) {
+              if (r) downloadedItems.push(r);
+            }
+          }
+
+          if (downloadedItems.length === 0) {
+            throw new XMediaFallbackNeedsYtDlpError('All downloaded X media items failed validation.');
+          }
+
+          if (downloadedItems.length === 1) {
+            const single = downloadedItems[0];
+            const finalPath = path.resolve(CACHE_DIR, `${job.id}.${single.ext}`);
+            if (!finalPath.startsWith(CACHE_DIR + path.sep)) {
+              throw new Error('Invalid cache path.');
+            }
+            await fs.promises.copyFile(single.filePath, finalPath);
+            job.ext = single.ext;
+            job.mimeType = getMimeTypeForExt(single.ext);
+            job.filePath = finalPath;
+            job.contentDisposition = buildContentDisposition(job.title, job.quality, single.ext);
+            job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${single.ext}`;
+            await finalizeJobFile(job);
+            return;
+          }
+
+          job.status = 'processing';
+          job.progress = 92;
+          const archiveExt: DownloadFileExt = 'zip';
+          const archivePath = path.resolve(CACHE_DIR, `${job.id}.${archiveExt}`);
+          if (!archivePath.startsWith(CACHE_DIR + path.sep)) {
+            throw new Error('Invalid cache path.');
+          }
+          await execFileAsync('python3', ['-m', 'zipfile', '-c', archivePath, ...downloadedItems.map((d) => d.fileName)], {
+            cwd: xWorkDir,
+            timeout: 45000,
+          });
+          job.ext = archiveExt;
+          job.mimeType = getMimeTypeForExt(archiveExt);
+          job.filePath = archivePath;
+          job.contentDisposition = buildContentDisposition(job.title, job.quality, archiveExt);
+          job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${archiveExt}`;
+          await finalizeJobFile(job);
+          return;
+        } catch (xErr) {
+          if (job.cancelled || xErr instanceof XTextOnlyPostError || xUrlClass?.kind === 'profile') {
+            throw xErr;
+          }
+          appendAppLog(
+            'warn',
+            'x',
+            `X dual-API cache fallback to yt-dlp (${resolvedXUrl.toString()}): ${xErr instanceof Error ? xErr.message : 'failed'}`
+          );
+        } finally {
+          if (xWorkDir) {
+            await fs.promises.rm(xWorkDir, { recursive: true, force: true }).catch(() => {});
+          }
+        }
+      }
+
+      let resolvedPinterestDlUrl: URL | null = null;
+      if (isPinterestUrl(parsed)) {
+        let pinWorkDir = '';
+        try {
+          const pinMeta = await resolvePinterestPinUrl(parsed);
+          resolvedPinterestDlUrl = pinMeta.resolvedUrl;
+          pinWorkDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-pin-'));
+          const resolvedPin = await resolvePinterestMediaFallback(parsed);
+
+          if (isAudio) {
+            const vidSrc = resolvedPin.videos[0]?.url;
+            if (!vidSrc) {
+              throw new Error('This Pinterest Pin does not contain a video track for MP3 extraction.');
+            }
+            if (resolvedPin.isHlsVideo) {
+              const { env } = await getYtDlpAuthAndProxy();
+              job.status = 'processing';
+              job.progress = 45;
+              await runFfmpegLocalFile(
+                ['-y', '-headers', 'Referer: https://www.pinterest.com/\r\n', '-i', vidSrc, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', job.filePath],
+                job,
+                buildFfmpegProxyEnv(env)
+              );
+            } else {
+              const srcPath = path.join(pinWorkDir, 'pin_source.mp4');
+              await downloadUrlFastToFile(vidSrc, srcPath, {
+                referer: 'https://www.pinterest.com/',
+                onProgress: (dl, tot) => {
+                  job.downloadedBytes = dl;
+                  if (tot > 0) {
+                    job.totalBytes = tot;
+                    job.progress = Math.min(84, Math.max(8, Math.floor((dl / tot) * 82)));
+                  }
+                },
+              });
+              job.status = 'processing';
+              job.progress = 90;
+              await new Promise<void>((resolve, reject) => {
+                const ff = spawn(
+                  'ffmpeg',
+                  ['-y', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', '-metadata', `title=${sanitizeFilename(job.title)}`, '-f', 'mp3', job.filePath],
+                  { shell: false }
+                );
+                ff.on('error', reject);
+                ff.on('close', (code) => (code === 0 ? resolve() : reject(new Error('Audio conversion failed'))));
+              });
+            }
+            await finalizeJobFile(job);
+            return;
+          }
+
+          if (resolvedPin.videos.length > 0) {
+            const vidUrl = resolvedPin.videos[0].url;
+            if (resolvedPin.isHlsVideo) {
+              const { env } = await getYtDlpAuthAndProxy();
+              job.status = 'processing';
+              job.progress = 35;
+              await runFfmpegLocalFile(
+                ['-y', '-headers', 'Referer: https://www.pinterest.com/\r\n', '-i', vidUrl, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', '-movflags', '+faststart', job.filePath],
+                job,
+                buildFfmpegProxyEnv(env)
+              );
+            } else {
+              await downloadUrlFastToFile(vidUrl, job.filePath, {
+                referer: 'https://www.pinterest.com/',
+                concurrency: 4,
+                onProgress: (dl, tot) => {
+                  job.downloadedBytes = dl;
+                  if (tot > 0) {
+                    job.totalBytes = tot;
+                    job.progress = Math.min(92, Math.max(8, Math.floor((dl / tot) * 90)));
+                  }
+                },
+              });
+              const stat = await fs.promises.stat(job.filePath).catch(() => null);
+              if (!stat || stat.size <= 10_000 || !(await looksLikeMediaFile(job.filePath, 'video'))) {
+                await fs.promises.rm(job.filePath, { force: true }).catch(() => {});
+                throw new Error('Pinterest direct video failed validation.');
+              }
+            }
+            await finalizeJobFile(job);
+            return;
+          }
+
+          if (resolvedPin.photos.length > 0) {
+            const downloadedSlides: Array<{ filePath: string; fileName: string; ext: DownloadFileExt }> = [];
+            const SLIDE_BATCH = 6;
+            for (let offset = 0; offset < resolvedPin.photos.length; offset += SLIDE_BATCH) {
+              const batch = resolvedPin.photos.slice(offset, offset + SLIDE_BATCH);
+              const results = await Promise.all(
+                batch.map((p, bIdx) =>
+                  downloadPinterestImageWithQualityCascade(
+                    p.url,
+                    resolvedPin.photoHashes[offset + bIdx],
+                    pinWorkDir,
+                    offset + bIdx + 1
+                  )
+                )
+              );
+              for (const r of results) {
+                if (r) downloadedSlides.push(r);
+              }
+              if (resolvedPin.photos.length > 1) {
+                job.progress = Math.min(88, Math.round(((offset + batch.length) / resolvedPin.photos.length) * 85));
+              }
+            }
+
+            if (downloadedSlides.length === 0) {
+              throw new Error('All Pinterest image slides failed validation.');
+            }
+            if (downloadedSlides.length === 1) {
+              const single = downloadedSlides[0];
+              const finalPath = path.resolve(CACHE_DIR, `${job.id}.${single.ext}`);
+              if (!finalPath.startsWith(CACHE_DIR + path.sep)) {
+                throw new Error('Invalid cache path.');
+              }
+              await fs.promises.copyFile(single.filePath, finalPath);
+              job.ext = single.ext;
+              job.mimeType = getMimeTypeForExt(single.ext);
+              job.filePath = finalPath;
+              job.contentDisposition = buildContentDisposition(job.title, job.quality, single.ext);
+              job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${single.ext}`;
+              await finalizeJobFile(job);
+              return;
+            }
+
+            job.status = 'processing';
+            job.progress = 92;
+            const archiveExt: DownloadFileExt = 'zip';
+            const archivePath = path.resolve(CACHE_DIR, `${job.id}.${archiveExt}`);
+            if (!archivePath.startsWith(CACHE_DIR + path.sep)) {
+              throw new Error('Invalid cache path.');
+            }
+            await execFileAsync(
+              'python3',
+              ['-m', 'zipfile', '-c', archivePath, ...downloadedSlides.map((s) => s.fileName)],
+              { cwd: pinWorkDir, timeout: 45000 }
+            );
+            job.ext = archiveExt;
+            job.mimeType = getMimeTypeForExt(archiveExt);
+            job.filePath = archivePath;
+            job.contentDisposition = buildContentDisposition(job.title, job.quality, archiveExt);
+            job.fileName = `${sanitizeFilename(job.title)}-${job.quality}.${archiveExt}`;
+            await finalizeJobFile(job);
+            return;
+          }
+        } catch (pinErr) {
+          if (job.cancelled) throw pinErr;
+          appendAppLog(
+            'warn',
+            'pinterest',
+            `Pinterest cache fallback to yt-dlp (${parsed.toString()}): ${pinErr instanceof Error ? pinErr.message : 'failed'}`
+          );
+        } finally {
+          if (pinWorkDir) {
+            await fs.promises.rm(pinWorkDir, { recursive: true, force: true }).catch(() => {});
+          }
+        }
+      }
+
+      const targetUrlForDl = resolvedXUrl
+        ? normalizeXUrl(resolvedXUrl)
+        : isXUrl(parsed)
+          ? normalizeXUrl(parsed)
+          : resolvedTikTokUrl
+            ? resolvedTikTokUrl.toString()
+            : resolvedPinterestDlUrl
+              ? resolvedPinterestDlUrl.toString()
+              : ytId
+                ? `https://www.youtube.com/watch?v=${ytId}`
+                : parsed.toString();
+      const runner =
+        tiktokClass?.kind === 'profile' || xUrlClass?.kind === 'profile' ? null : await getYtDlpRunner();
       if (runner) {
         const fp = ytId ? getYouTubeConfigFingerprint() : '';
         if (ytId) {
@@ -10735,10 +14601,10 @@ async function startServer() {
         }
       }
 
-      if (isXUrl(parsed) || isTikTokUrl(parsed)) {
+      if (isTikTokUrl(parsed) || (isXUrl(parsed) && xUrlClass?.kind === 'other')) {
         const resolved = isXUrl(parsed)
-          ? await resolveXMediaFallback(parsed)
-          : await resolveTikTokMediaFallback(parsed);
+          ? await resolveXMediaFallback(resolvedXUrl || parsed)
+          : await resolveTikTokMediaFallback(resolvedTikTokUrl || parsed);
         let workDir = '';
         try {
           workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'grovesave-social-'));
@@ -11086,13 +14952,6 @@ async function startServer() {
       // Fallback playable container written cleanly to cache
       job.status = 'processing';
       job.progress = 55;
-      const resMap: Record<string, string> = {
-        '2160p': '1920x1080',
-        '1080p': '1280x720',
-        '720p': '1280x720',
-        '480p': '854x480',
-        '360p': '640x360',
-      };
       const ffArgs = isAudio
         ? [
             '-y',
@@ -11104,7 +14963,7 @@ async function startServer() {
           ]
         : [
             '-y',
-            '-f', 'lavfi', '-i', `color=c=black:s=${resMap[job.quality] || '1280x720'}:d=3`,
+            '-f', 'lavfi', '-i', `color=c=black:s=${qualityToFallbackScale(job.quality)}:d=3`,
             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
             '-metadata', `title=${sanitizeFilename(job.title)}`,
             '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
@@ -11145,12 +15004,8 @@ async function startServer() {
       author?: unknown;
       audioFormatId?: unknown;
     };
-    const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
-    const rawQuality =
-      typeof body.quality === 'string' &&
-      ['2160p', '1080p', '720p', '480p', '360p', 'best', 'audio'].includes(body.quality.trim())
-        ? body.quality.trim()
-        : '1080p';
+    const rawUrl = extractCleanHttpUrl(typeof body.url === 'string' ? body.url : '');
+    const rawQuality = normalizeDownloadQuality(body.quality);
     const rawTitle = typeof body.title === 'string' ? body.title : 'grove-save-media';
     const rawAuthor = typeof body.author === 'string' ? body.author.slice(0, 200) : '';
     const audioFormatId = validateAudioFormatId(body.audioFormatId);
@@ -11162,7 +15017,7 @@ async function startServer() {
     }
 
     const quality =
-      (isInstagramUrl(parsed) || isTikTokUrl(parsed) || isXUrl(parsed)) && rawQuality !== 'audio'
+      (isInstagramUrl(parsed) || isTikTokUrl(parsed) || isXUrl(parsed) || isPinterestUrl(parsed)) && rawQuality !== 'audio'
         ? 'best'
         : rawQuality;
     const id = crypto.randomUUID();
@@ -11344,7 +15199,8 @@ async function startServer() {
       res.status(503).json({ error: 'Telegram storage is not configured.' });
       return;
     }
-    await streamTelegramFile(stored, req, res);
+    const inline = req.query.inline === '1' || req.query.inline === 'true';
+    await streamTelegramFile(stored, req, res, inline);
   });
 
   // Metadata for a stored file, used by the UI to build the shareable link.
@@ -11556,7 +15412,7 @@ async function startServer() {
 
   // Online inline player streaming endpoint (supports Range requests, audio track switching, and Xray VPN proxy)
   app.get('/api/media/stream', async (req: Request, res: Response) => {
-    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    const rawUrl = extractCleanHttpUrl(typeof req.query.url === 'string' ? req.query.url : '');
     const rawQuality = typeof req.query.quality === 'string' ? req.query.quality.trim() : '720p';
     const quality = rawQuality === 'audio' ? '360p' : rawQuality;
     const audioFormatId = validateAudioFormatId(req.query.audioFormatId);
@@ -11574,6 +15430,15 @@ async function startServer() {
     }
 
     // 0. If a matching prepared/ready file already exists in cache or Telegram, stream it directly with full Range seeking
+    const requestedFileId = typeof req.query.fileId === 'string' ? req.query.fileId.trim() : '';
+    if (requestedFileId && /^[0-9a-f-]{36}$/i.test(requestedFileId) && telegramIsConfigured(adminConfig.telegram)) {
+      const storedById = lookupTelegramFile(requestedFileId);
+      if (storedById) {
+        await streamTelegramFile(storedById, req, res, true);
+        return;
+      }
+    }
+
     const matchingJob =
       startSeconds === 0
         ? (requestedJobId && /^[0-9a-f-]{36}$/i.test(requestedJobId) ? downloadJobs.get(requestedJobId) : undefined) ||
@@ -11599,6 +15464,28 @@ async function startServer() {
         res.setHeader('Content-Type', 'video/mp4');
         res.setHeader('Content-Disposition', 'inline');
         res.sendFile(resolvedFile);
+        return;
+      }
+    }
+
+    // 0b. Also resolve persisted Telegram files even after in-memory downloadJobs are cleared on restart
+    if (startSeconds === 0 && !audioFormatId && telegramIsConfigured(adminConfig.telegram)) {
+      const persistedJobFileId =
+        requestedJobId && /^[0-9a-f-]{36}$/i.test(requestedJobId)
+          ? telegramFileIdForJob(requestedJobId)
+          : null;
+      const persistedRow = persistedJobFileId
+        ? lookupTelegramFile(persistedJobFileId)
+        : (db
+            .prepare(
+              `SELECT * FROM telegram_files
+               WHERE source_url = ? AND quality = ? AND deleted_at IS NULL
+                 AND (mime_type LIKE 'video/%' OR mime_type LIKE 'audio/%' OR file_name LIKE '%.mp4' OR file_name LIKE '%.mp3')
+               ORDER BY created_at DESC LIMIT 1`
+            )
+            .get(parsed.toString(), rawQuality) as TelegramFileRow | undefined) ?? null;
+      if (persistedRow) {
+        await streamTelegramFile(persistedRow, req, res, true);
         return;
       }
     }
@@ -11659,12 +15546,94 @@ async function startServer() {
     }
 
     const ytId = extractYouTubeId(parsed);
-    const streamTargetUrl = isXUrl(parsed)
-      ? normalizeXUrl(parsed)
-      : ytId
-        ? `https://www.youtube.com/watch?v=${ytId}`
-        : parsed.toString();
     const isTikTok = isTikTokUrl(parsed);
+    const resolvedTikTokStreamUrl = isTikTok ? await resolveTikTokShortUrl(parsed) : null;
+    if (resolvedTikTokStreamUrl && classifyTikTokUrl(resolvedTikTokStreamUrl.toString()).kind === 'profile') {
+      res.status(422).json({
+        error: 'This post contains images only.',
+        code: 'TIKTOK_IMAGE_ONLY',
+      });
+      return;
+    }
+    const resolvedXStreamUrl = isXUrl(parsed) ? await resolveShortRedirectUrl(parsed) : null;
+    const xStreamClass = resolvedXStreamUrl ? classifyXUrl(resolvedXStreamUrl.toString()) : null;
+    if (resolvedXStreamUrl && xStreamClass?.kind === 'profile') {
+      res.status(422).json({
+        error: 'This post contains images only.',
+        code: 'X_IMAGE_ONLY',
+      });
+      return;
+    }
+    if (resolvedXStreamUrl && xStreamClass?.kind === 'post') {
+      try {
+        const xResolved = await resolveXMediaFallback(resolvedXStreamUrl);
+        if (xResolved.videos.length > 0) {
+          const xCookie = getXScopedCookieHeader();
+          await proxyRemoteMediaWithRange(xResolved.videos[0].url, req, res, {
+            Referer: 'https://x.com/',
+            ...(xCookie ? { Cookie: xCookie } : {}),
+          });
+          return;
+        }
+        if (xResolved.photos.length > 0) {
+          res.status(422).json({
+            error: 'This post contains images only.',
+            code: 'X_IMAGE_ONLY',
+          });
+          return;
+        }
+      } catch (xStreamErr) {
+        if (xStreamErr instanceof XTextOnlyPostError) {
+          res.status(422).json({ error: xStreamErr.message, code: 'X_TEXT_ONLY' });
+          return;
+        }
+        if (res.headersSent) return;
+        // Fall through to yt-dlp stream fallback
+      }
+    }
+    if (isPinterestUrl(parsed)) {
+      try {
+        const pinResolved = await resolvePinterestMediaFallback(parsed);
+        if (pinResolved.videos.length > 0) {
+          const vidUrl = pinResolved.videos[0].url;
+          if (pinResolved.isHlsVideo) {
+            const { env } = await getYtDlpAuthAndProxy();
+            await spawnFfmpegStream(
+              [{ url: vidUrl, headers: { Referer: 'https://www.pinterest.com/' } }],
+              env,
+              req,
+              res,
+              startSeconds
+            );
+            return;
+          }
+          await proxyRemoteMediaWithRange(vidUrl, req, res, { Referer: 'https://www.pinterest.com/' });
+          return;
+        }
+        if (pinResolved.photos.length > 0) {
+          res.status(422).json({
+            error: 'This post contains images only.',
+            code: 'PINTEREST_IMAGE_ONLY',
+          });
+          return;
+        }
+      } catch {
+        if (res.headersSent) return;
+        // Fall through to yt-dlp stream fallback
+      }
+    }
+    const resolvedPinterestStreamMeta = isPinterestUrl(parsed) ? await resolvePinterestPinUrl(parsed) : null;
+    const streamTargetUrl = resolvedXStreamUrl
+      ? normalizeXUrl(resolvedXStreamUrl)
+      : isXUrl(parsed)
+        ? normalizeXUrl(parsed)
+        : resolvedTikTokStreamUrl
+          ? resolvedTikTokStreamUrl.toString()
+          : resolvedPinterestStreamMeta
+            ? resolvedPinterestStreamMeta.resolvedUrl.toString()
+            : ytId
+              ? `https://www.youtube.com/watch?v=${ytId}`
+              : parsed.toString();
     const runner = await getYtDlpRunner();
     let lastStreamError = '';
     let suppressYtdlFallback = Boolean(adminConfig.xray.enabled && xrayState.running);
@@ -11861,8 +15830,8 @@ async function startServer() {
     if (isXUrl(parsed) || isTikTokUrl(parsed)) {
       try {
         const resolved = isXUrl(parsed)
-          ? await resolveXMediaFallback(parsed)
-          : await resolveTikTokMediaFallback(parsed);
+          ? await resolveXMediaFallback(resolvedXStreamUrl || parsed)
+          : await resolveTikTokMediaFallback(resolvedTikTokStreamUrl || parsed);
         if (resolved.videos.length > 0) {
           await proxyRemoteMediaWithRange(resolved.videos[0].url, req, res, {
             ...(resolved.referer ? { Referer: resolved.referer } : {}),
@@ -12297,11 +16266,14 @@ async function startServer() {
       }
     }
 
+    const resolvedPinterestDirect = isPinterestUrl(parsed) ? await resolvePinterestPinUrl(parsed) : null;
     const dlTargetUrl = isXUrl(parsed)
       ? normalizeXUrl(parsed)
-      : ytId
-        ? `https://www.youtube.com/watch?v=${ytId}`
-        : parsed.toString();
+      : resolvedPinterestDirect
+        ? resolvedPinterestDirect.resolvedUrl.toString()
+        : ytId
+          ? `https://www.youtube.com/watch?v=${ytId}`
+          : parsed.toString();
     const runner = await getYtDlpRunner();
     if (runner) {
       const targetH = String(selectTargetHeight(quality));
@@ -12521,14 +16493,6 @@ async function startServer() {
     res.setHeader('Content-Disposition', contentDisposition);
     res.setHeader('X-Grove-Stream-Mode', 'preview-container');
 
-    const resMap: Record<string, string> = {
-      '2160p': '1920x1080',
-      '1080p': '1280x720',
-      '720p': '1280x720',
-      '480p': '854x480',
-      '360p': '640x360',
-    };
-
     const ffArgs = isAudio
       ? [
           '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
@@ -12537,7 +16501,7 @@ async function startServer() {
           '-f', 'mp3', 'pipe:1',
         ]
       : [
-          '-f', 'lavfi', '-i', `color=c=black:s=${resMap[quality] || '1280x720'}:d=3`,
+          '-f', 'lavfi', '-i', `color=c=black:s=${qualityToFallbackScale(quality)}:d=3`,
           '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
           '-metadata', `title=${sanitizeFilename(rawTitle)}`,
           '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
@@ -12640,6 +16604,10 @@ export class ErrorOverlay {}
         await startXrayProcess();
       }
       await getYtDlpRunner({ autoInstall: true }).catch(() => null);
+      const denoStatus = await getDenoStatus().catch(() => ({ installed: false, path: null, version: null }));
+      if (!denoStatus.installed && process.platform === 'linux') {
+        await installDenoBinary().catch(() => null);
+      }
       await getParthDlRunner({ autoInstall: true }).catch(() => false);
       syncBgutilPluginFromRepo();
       if (adminConfig.potProvider.enabled && adminConfig.potProvider.mode === 'managed') {

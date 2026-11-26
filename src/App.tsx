@@ -337,6 +337,24 @@ export default function App() {
     }
   };
 
+  const handleDeleteHistoryItem = (itemId: string) => {
+    setHistory((prev) => prev.filter((h) => h.id !== itemId));
+    if (user) {
+      fetch(`${apiBase}/api/user/history/${encodeURIComponent(itemId)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: buildAuthHeaders(),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { items?: SavedItem[] } | null) => {
+          if (data?.items) {
+            setHistory(data.items);
+          }
+        })
+        .catch(() => {});
+    }
+  };
+
   const handleSignOut = async () => {
     authEpochRef.current += 1;
     try {
@@ -430,7 +448,9 @@ export default function App() {
               ? 'bg-red-500/25 dark:bg-red-600/30'
               : providerGlow === 'instagram'
                 ? 'bg-gradient-to-r from-[#f58529]/30 via-[#dd2a7b]/35 to-[#8134af]/30 dark:from-[#f58529]/30 dark:via-[#dd2a7b]/35 dark:to-[#8134af]/32'
-                : 'bg-zinc-400/25 dark:bg-white/15'
+                : providerGlow === 'pinterest'
+                  ? 'bg-gradient-to-r from-[#e60023]/28 via-[#bd081c]/30 to-[#ff4d5a]/25 dark:from-[#e60023]/30 dark:via-[#bd081c]/32 dark:to-[#ff4d5a]/25'
+                  : 'bg-zinc-400/25 dark:bg-white/15'
           }`}
         />
         <div
@@ -439,7 +459,9 @@ export default function App() {
               ? 'bg-red-500/15 dark:bg-red-600/15'
               : providerGlow === 'instagram'
                 ? 'bg-gradient-to-r from-[#8134af]/20 via-[#dd2a7b]/22 to-[#f58529]/18 dark:from-[#8134af]/22 dark:via-[#dd2a7b]/24 dark:to-[#f58529]/18'
-                : 'bg-zinc-300/20 dark:bg-white/10'
+                : providerGlow === 'pinterest'
+                  ? 'bg-gradient-to-r from-[#bd081c]/20 via-[#e60023]/22 to-[#ff4d5a]/16 dark:from-[#bd081c]/22 dark:via-[#e60023]/24 dark:to-[#ff4d5a]/18'
+                  : 'bg-zinc-300/20 dark:bg-white/10'
           }`}
         />
       </div>
@@ -533,6 +555,7 @@ export default function App() {
                 defaultQuality={defaultQuality}
                 history={history}
                 onAddHistory={handleAddHistory}
+                onDeleteHistoryItem={handleDeleteHistoryItem}
                 onProviderGlowChange={setProviderGlow}
                 isGuest={!user}
                 isAdmin={user?.role === 'admin'}

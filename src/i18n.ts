@@ -30,6 +30,13 @@ export interface TranslationDict {
   hidePlayer: string;
   viewImage: string;
   hideImage: string;
+  viewPhotos: string;
+  hidePhotos: string;
+  previousPage: string;
+  nextPage: string;
+  pageLabel: string;
+  videoTab: string;
+  photosTab: string;
   carouselZipLabel: string;
   imagePostLabel: string;
   audioTracksSection: string;
@@ -47,6 +54,12 @@ export interface TranslationDict {
   emptySavesDesc: string;
   emptySavesDescGuest: string;
   reDownload: string;
+  historyPlay: string;
+  historyDelete: string;
+  historyTelegramStream: string;
+  historyStreamLoading: string;
+  historyStreamError: string;
+  historyZipUnsupported: string;
   invalidUrlError: string;
   inspectFailed: string;
   downloadFailed: string;
@@ -150,6 +163,9 @@ export interface TranslationDict {
   xrayProfilesEmpty: string;
   xrayTestedPass: string;
   xrayTestedFail: string;
+  xrayTestConcurrencyLabel: string;
+  xrayCancelTestBtn: string;
+  xrayTestCancelledMsg: string;
   // bgutil PO Token Server Settings
   sectionPotProvider: string;
   potEnableLabel: string;
@@ -170,6 +186,19 @@ export interface TranslationDict {
   potInstalledMsg: string;
   potTestSuccess: string;
   potTestFailed: string;
+  potJsRuntimeSection: string;
+  potJsRuntimeDesc: string;
+  potJsRuntimeModeLabel: string;
+  potJsRuntimeAuto: string;
+  potJsRuntimeDeno: string;
+  potJsRuntimeNode: string;
+  potDenoReady: string;
+  potDenoMissing: string;
+  potNodeReady: string;
+  potInstallDenoBtn: string;
+  potDenoInstalledMsg: string;
+  potEjsRemoteLabel: string;
+  potEjsRemoteDesc: string;
   // Admin sub-page navigation & moved cookies section
   backToSettings: string;
   potPluginReady: string;
@@ -259,6 +288,23 @@ export interface TranslationDict {
   infoBotMusicDesc: string;
   infoBotYoutubeDesc: string;
   infoBotPhDesc: string;
+  infoFeaturesBtn: string;
+  infoFeaturesTabAll: string;
+  infoFeaturesTabPlatforms: string;
+  infoFeaturesTabGeneral: string;
+  infoFeaturesPlatformsTitle: string;
+  infoFeaturesGeneralTitle: string;
+  infoFeaturesPlatforms: {
+    id: 'youtube' | 'instagram' | 'tiktok' | 'x' | 'pinterest' | 'telegram' | 'other';
+    name: string;
+    badge: string;
+    items: string[];
+  }[];
+  infoFeaturesGeneral: {
+    id: string;
+    title: string;
+    items: string[];
+  }[];
   adminAnnouncementsSection: string;
   adminAnnouncementsDesc: string;
   announcementTitleLabel: string;
@@ -297,11 +343,15 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     analyzing: 'Checking link...',
     selectQuality: 'Choose quality',
     qualityLabels: {
+      '4320p': { label: '4320p', sub: '8K Ultra HD' },
       '2160p': { label: '2160p', sub: '4K Ultra HD' },
+      '1440p': { label: '1440p', sub: '2K QHD' },
       '1080p': { label: '1080p', sub: 'Full HD' },
       '720p': { label: '720p', sub: 'HD' },
       '480p': { label: '480p', sub: 'Standard' },
       '360p': { label: '360p', sub: 'Compact' },
+      '240p': { label: '240p', sub: 'Low' },
+      '144p': { label: '144p', sub: 'Minimal' },
       best: { label: 'Original', sub: 'Best' },
       audio: { label: 'Audio', sub: 'MP3 320k' },
     },
@@ -322,6 +372,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     hidePlayer: 'Hide Player',
     viewImage: 'Preview Photo',
     hideImage: 'Hide Photo',
+    viewPhotos: 'View Photos',
+    hidePhotos: 'Hide Photos',
+    previousPage: 'Previous',
+    nextPage: 'Next',
+    pageLabel: 'Page',
+    videoTab: 'Video',
+    photosTab: 'Photos',
     carouselZipLabel: 'items · ZIP',
     imagePostLabel: 'Photo',
     audioTracksSection: 'Audio Tracks',
@@ -340,6 +397,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     emptySavesDescGuest:
       'Guests do not keep a history. Sign in and saved files will appear here.',
     reDownload: 'Save again',
+    historyPlay: 'Play',
+    historyDelete: 'Remove from history',
+    historyTelegramStream: 'Telegram Stream',
+    historyStreamLoading: 'Connecting to Telegram stream...',
+    historyStreamError: 'Could not stream this file from Telegram.',
+    historyZipUnsupported: 'ZIP archives cannot be streamed. Use Download instead.',
     invalidUrlError: 'Please enter a valid http or https media link.',
     inspectFailed: 'Could not read link details. Check the link and try again.',
     downloadFailed: 'Download failed. Please check the link or backend connection.',
@@ -442,6 +505,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     xrayProfilesEmpty: 'No server configs imported yet. Paste one or multiple links above and click Import.',
     xrayTestedPass: 'Downloaded',
     xrayTestedFail: 'Failed',
+    xrayTestConcurrencyLabel: 'Concurrency',
+    xrayCancelTestBtn: 'Cancel Test',
+    xrayTestCancelledMsg: 'Test cancelled',
     sectionPotProvider: 'PO Token Server (bgutil-ytdlp-pot-provider)',
     potEnableLabel: 'Auto-generate YouTube PO Tokens',
     potEnableDesc: 'Runs bgutil-ytdlp-pot-provider HTTP server and supplies fresh PO Tokens to yt-dlp.',
@@ -461,6 +527,19 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'bgutil server & yt-dlp plugin installed',
     potTestSuccess: 'PO Token minted',
     potTestFailed: 'PO Token test failed',
+    potJsRuntimeSection: 'YouTube JS Runtimes (Deno & Node.js)',
+    potJsRuntimeDesc: 'Controls which JavaScript engine yt-dlp uses to solve YouTube player challenges (EJS).',
+    potJsRuntimeModeLabel: 'Active JS Runtime',
+    potJsRuntimeAuto: 'Deno + Node.js (Auto)',
+    potJsRuntimeDeno: 'Deno Only',
+    potJsRuntimeNode: 'Node.js Only',
+    potDenoReady: 'Deno ready',
+    potDenoMissing: 'Deno not installed',
+    potNodeReady: 'Node.js ready',
+    potInstallDenoBtn: 'Install Deno',
+    potDenoInstalledMsg: 'Deno runtime installed and activated',
+    potEjsRemoteLabel: 'Download EJS challenge scripts (ejs:github)',
+    potEjsRemoteDesc: 'Allows yt-dlp to fetch the latest YouTube signature solver components from GitHub.',
     backToSettings: 'Back to Settings',
     potPluginReady: 'yt-dlp plugin ready',
     youtubeCookiesSection: 'YouTube Cookies',
@@ -548,6 +627,123 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     infoBotMusicDesc: 'Music & Spotify Downloader',
     infoBotYoutubeDesc: 'YouTube Video Downloader',
     infoBotPhDesc: 'Adult Video Downloader',
+    infoFeaturesBtn: 'App Features',
+    infoFeaturesTabAll: 'All',
+    infoFeaturesTabPlatforms: 'Platforms',
+    infoFeaturesTabGeneral: 'General',
+    infoFeaturesPlatformsTitle: 'Supported Platforms & Download Features',
+    infoFeaturesGeneralTitle: 'General Public Features',
+    infoFeaturesPlatforms: [
+      {
+        id: 'youtube',
+        name: 'YouTube',
+        badge: 'Videos & Shorts',
+        items: [
+          'Download videos & Shorts from 144p up to 4K / 8K (when available) or Original quality',
+          'Extract audio-only MP3 (320k) and choose between dubbed or original audio tracks',
+          'Download manual & auto-generated subtitles (VTT) or view captions in-player',
+          'Inline online video playback with vertical Shorts view and player fallback',
+        ],
+      },
+      {
+        id: 'instagram',
+        name: 'Instagram',
+        badge: 'Reels, Posts & Stories',
+        items: [
+          'Save Reels, video posts, and Stories at original quality',
+          'Download single photo posts with instant inline photo preview',
+          'Bundle multi-item carousels (photos & videos) into a single ZIP file',
+          'Stream videos online directly before saving to your device',
+        ],
+      },
+      {
+        id: 'tiktok',
+        name: 'TikTok',
+        badge: 'Videos & Slideshows',
+        items: [
+          'Download watermark-free TikTok videos at best available quality',
+          'Save photo slideshows (packaged as ZIP) and single image posts',
+          'Extract MP3 audio directly from TikTok clips',
+          'Instant online video playback and thumbnail preview',
+        ],
+      },
+      {
+        id: 'x',
+        name: 'X (Twitter)',
+        badge: 'Videos, GIFs & Photos',
+        items: [
+          'Download tweet videos and GIFs at highest quality',
+          'Save single photos or multi-photo posts (bundled as ZIP)',
+          'Works seamlessly with x.com, twitter.com, fxtwitter.com, vxtwitter.com, and t.co links',
+          'Built-in video streaming and photo preview',
+        ],
+      },
+      {
+        id: 'pinterest',
+        name: 'Pinterest',
+        badge: 'Pins, Videos, GIFs & Carousels',
+        items: [
+          'Save single image pins at highest resolution (Originals > 1200x > 736x)',
+          'Download multi-slide carousel pins as ZIP with paginated all-image preview',
+          'Download video pins (MP4 & HLS streams), animated GIFs, or extract MP3 audio',
+          'Supports pinterest.com, international Pinterest domains, and pin.it short links',
+        ],
+      },
+      {
+        id: 'telegram',
+        name: 'Telegram',
+        badge: 'Public Posts',
+        items: [
+          'Download media from public Telegram channel & post links (t.me/...)',
+          'Supports videos, audio tracks, photos, and shared files',
+          'Inline streaming preview for compatible video posts',
+        ],
+      },
+      {
+        id: 'other',
+        name: 'Other Platforms',
+        badge: '100+ Public Sites',
+        items: [
+          'Supports SoundCloud, Vimeo, Reddit, Facebook, Twitch, Dailymotion, and direct media links',
+          'Automatic quality selection, MP3 audio conversion, and subtitle downloads where available',
+          'Fast link inspection showing title, creator, duration, and estimated file size',
+        ],
+      },
+    ],
+    infoFeaturesGeneral: [
+      {
+        id: 'download-flow',
+        title: 'Smart Link & Download Flow',
+        items: [
+          'One-tap paste, automatic URL inspection, and live download progress with cancel support',
+          'Save directly to device storage or copy the direct download link',
+        ],
+      },
+      {
+        id: 'player-tools',
+        title: 'Built-in Player & Media Tools',
+        items: [
+          'Custom online video player with subtitle overlay and multi-audio track switching',
+          'MP3 (320k) audio-only mode and searchable VTT subtitle list',
+        ],
+      },
+      {
+        id: 'account-history',
+        title: 'Account & Saved History',
+        items: [
+          'Use instantly as a guest without signing in, or sign in with email/Google',
+          'Keep your personal Saved History synced for quick re-downloads',
+        ],
+      },
+      {
+        id: 'ui-pwa',
+        title: 'Design, Languages & App Install',
+        items: [
+          'Ad-free interface with Pure Black and Pure White themes',
+          'Full support for English, Persian (RTL), Russian, and Chinese + installable PWA for Android & iOS',
+        ],
+      },
+    ],
     adminAnnouncementsSection: 'Announcements',
     adminAnnouncementsDesc: 'Publish notices displayed in the Info tab for all users',
     announcementTitleLabel: 'Title (optional)',
@@ -584,11 +780,15 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     analyzing: 'در حال بررسی لینک...',
     selectQuality: 'انتخاب کیفیت',
     qualityLabels: {
+      '4320p': { label: '4320p', sub: 'کیفیت 8K' },
       '2160p': { label: '2160p', sub: 'کیفیت 4K' },
+      '1440p': { label: '1440p', sub: 'کیفیت 2K' },
       '1080p': { label: '1080p', sub: 'فول اچ‌دی' },
       '720p': { label: '720p', sub: 'اچ‌دی' },
       '480p': { label: '480p', sub: 'معمولی' },
       '360p': { label: '360p', sub: 'کم‌حجم' },
+      '240p': { label: '240p', sub: 'حجم پایین' },
+      '144p': { label: '144p', sub: 'حداقل حجم' },
       best: { label: 'اصلی', sub: 'بهترین کیفیت' },
       audio: { label: 'صوت', sub: 'MP3 320k' },
     },
@@ -609,6 +809,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     hidePlayer: 'بستن پخش‌کننده',
     viewImage: 'نمایش تصویر',
     hideImage: 'بستن تصویر',
+    viewPhotos: 'نمایش تصاویر',
+    hidePhotos: 'بستن تصاویر',
+    previousPage: 'قبلی',
+    nextPage: 'بعدی',
+    pageLabel: 'صفحه',
+    videoTab: 'ویدیو',
+    photosTab: 'تصاویر',
     carouselZipLabel: 'مورد · ZIP',
     imagePostLabel: 'تصویر',
     audioTracksSection: 'زبان‌های صدا',
@@ -627,6 +834,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     emptySavesDescGuest:
       'حالت مهمان تاریخچه‌ای ندارد. پس از ورود، فایل‌های ذخیره‌شده اینجا نمایش داده می‌شوند.',
     reDownload: 'دانلود مجدد',
+    historyPlay: 'پخش',
+    historyDelete: 'حذف از تاریخچه',
+    historyTelegramStream: 'استریم تلگرام',
+    historyStreamLoading: 'در حال اتصال به استریم تلگرام...',
+    historyStreamError: 'پخش استریم از تلگرام انجام نشد.',
+    historyZipUnsupported: 'فایل ZIP قابل پخش نیست؛ از دکمه دانلود استفاده کنید.',
     invalidUrlError: 'لطفاً یک لینک معتبر با http یا https وارد کنید.',
     inspectFailed: 'دریافت اطلاعات لینک انجام نشد. لینک را بررسی کنید.',
     downloadFailed: 'دانلود ناموفق بود. اتصال سرور یا لینک را بررسی کنید.',
@@ -729,6 +942,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     xrayProfilesEmpty: 'هنوز کانفیگی اضافه نشده است. لینک‌ها را خط‌به‌خط بالا وارد کنید و دکمه افزودن را بزنید.',
     xrayTestedPass: 'دانلود موفق',
     xrayTestedFail: 'ناموفق',
+    xrayTestConcurrencyLabel: 'همزمانی تست',
+    xrayCancelTestBtn: 'لغو تست',
+    xrayTestCancelledMsg: 'تست لغو شد',
     sectionPotProvider: 'سرور PO Token (bgutil-ytdlp-pot-provider)',
     potEnableLabel: 'تولید خودکار PO Token برای یوتیوب',
     potEnableDesc: 'سرور bgutil-ytdlp-pot-provider را اجرا کرده و هنگام دانلود به yt-dlp متصل می‌کند.',
@@ -748,6 +964,19 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'سرور bgutil و افزونه yt-dlp نصب شد',
     potTestSuccess: 'توکن PO با موفقیت تولید شد',
     potTestFailed: 'تست سرور PO Token ناموفق بود',
+    potJsRuntimeSection: 'موتورهای جاوااسکریپت یوتیوب (Deno و Node.js)',
+    potJsRuntimeDesc: 'تعیین می‌کند yt-dlp برای حل چالش‌های پخش‌کننده یوتیوب (EJS) از کدام موتور استفاده کند.',
+    potJsRuntimeModeLabel: 'موتور جاوااسکریپت فعال',
+    potJsRuntimeAuto: 'Deno + Node.js (خودکار)',
+    potJsRuntimeDeno: 'فقط Deno',
+    potJsRuntimeNode: 'فقط Node.js',
+    potDenoReady: 'Deno آماده است',
+    potDenoMissing: 'Deno نصب نیست',
+    potNodeReady: 'Node.js آماده است',
+    potInstallDenoBtn: 'نصب Deno',
+    potDenoInstalledMsg: 'موتور Deno نصب و فعال شد',
+    potEjsRemoteLabel: 'دریافت اسکریپت‌های EJS از گیت‌هاب (ejs:github)',
+    potEjsRemoteDesc: 'به yt-dlp اجازه می‌دهد جدیدترین ماژول‌های حل امضای یوتیوب را دریافت کند.',
     backToSettings: 'بازگشت به تنظیمات',
     potPluginReady: 'افزونه yt-dlp آماده است',
     youtubeCookiesSection: 'کوکی‌های یوتیوب',
@@ -836,6 +1065,123 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     infoBotMusicDesc: 'دانلودر موزیک و اسپاتیفای',
     infoBotYoutubeDesc: 'دانلودر ویدیو یوتیوب',
     infoBotPhDesc: 'دانلودر ویدیو پورن',
+    infoFeaturesBtn: 'قابلیت‌های برنامه',
+    infoFeaturesTabAll: 'همه بخش‌ها',
+    infoFeaturesTabPlatforms: 'پلتفرم‌ها',
+    infoFeaturesTabGeneral: 'امکانات عمومی',
+    infoFeaturesPlatformsTitle: 'قابلیت‌های دانلود بر اساس پلتفرم',
+    infoFeaturesGeneralTitle: 'قابلیت‌های عمومی برنامه',
+    infoFeaturesPlatforms: [
+      {
+        id: 'youtube',
+        name: 'یوتیوب (YouTube)',
+        badge: 'ویدیو و شورتس',
+        items: [
+          'دانلود ویدیوها و Shorts از کیفیت 144p تا 4K و 8K (در صورت وجود) یا کیفیت اصلی',
+          'استخراج صوت خالص با فرمت MP3 (320k) و امکان انتخاب زبان صدای دوبله یا اصلی',
+          'دریافت زیرنویس‌های دستی و خودکار (فرمت VTT) و نمایش زیرنویس روی پخش‌کننده',
+          'پخش آنلاین مستقیم درون برنامه با نمایش عمودی برای Shorts',
+        ],
+      },
+      {
+        id: 'instagram',
+        name: 'اینستاگرام (Instagram)',
+        badge: 'ریلز، پست و استوری',
+        items: [
+          'دانلود ریلز، ویدیوها و استوری‌ها با کیفیت اصلی',
+          'ذخیره تک‌عکس‌ها همراه با پیش‌نمایش مستقیم تصویر درون برنامه',
+          'دانلود پست‌های چنداسلایدی (عکس و ویدیو) به‌صورت یکجا در قالب فایل ZIP',
+          'امکان پخش آنلاین ویدیو پیش از ذخیره در حافظه گوشی',
+        ],
+      },
+      {
+        id: 'tiktok',
+        name: 'تیک‌تاک (TikTok)',
+        badge: 'ویدیو و اسلایدشو',
+        items: [
+          'دانلود ویدیوهای تیک‌تاک بدون واترمارک با بالاترین کیفیت موجود',
+          'ذخیره پست‌های چندتصویری (در قالب ZIP) و تک‌تصویرها',
+          'استخراج فایل صوتی MP3 از کلیپ‌های تیک‌تاک',
+          'پخش آنلاین فوری و پیش‌نمایش تصویر بندانگشتی',
+        ],
+      },
+      {
+        id: 'x',
+        name: 'ایکس / توییتر (X)',
+        badge: 'ویدیو، گیف و تصویر',
+        items: [
+          'دانلود ویدیوها و گیف‌های پست‌ها با بهترین کیفیت',
+          'ذخیره تک‌عکس و پست‌های چندتصویری (بسته‌بندی شده در فایل ZIP)',
+          'پشتیبانی از لینک‌های x.com، twitter.com، fxtwitter.com، vxtwitter.com و t.co',
+          'پیش‌نمایش عکس و پخش آنلاین ویدیو درون برنامه',
+        ],
+      },
+      {
+        id: 'pinterest',
+        name: 'پینترست (Pinterest)',
+        badge: 'پین، ویدیو، گیف و کاروسل',
+        items: [
+          'دانلود تک‌عکس پین‌ها با بالاترین کیفیت موجود (Originals > 1200x > 736x)',
+          'دانلود کاروسل‌های چندتصویری با فایل ZIP همراه با پیش‌نمایش صفحه‌ای همه تصاویر',
+          'دانلود پین‌های ویدیویی (MP4 و استریم HLS)، گیف متحرک و استخراج صوت MP3',
+          'پشتیبانی کامل از لینک‌های pinterest و لینک‌های کوتاه pin.it',
+        ],
+      },
+      {
+        id: 'telegram',
+        name: 'تلگرام (Telegram)',
+        badge: 'پست‌های عمومی',
+        items: [
+          'دانلود مستقیم رسانه از لینک پست‌ها و کانال‌های عمومی تلگرام (t.me/...)',
+          'پشتیبانی از ویدیو، فایل صوتی، عکس و فایل‌های رسانه‌ای اشتراک‌گذاری شده',
+          'پخش آنلاین برای پست‌های ویدیویی سازگار',
+        ],
+      },
+      {
+        id: 'other',
+        name: 'سایر پلتفرم‌ها',
+        badge: 'صدها سایت پشتیبانی‌شده',
+        items: [
+          'پشتیبانی از SoundCloud، Vimeo، Reddit، Facebook، Twitch، Dailymotion و لینک‌های مستقیم رسانه',
+          'تشخیص خودکار کیفیت‌ها، تبدیل به صوت MP3 و دریافت زیرنویس در صورت پشتیبانی پلتفرم',
+          'نمایش مشخصات کامل لینک شامل عنوان، سازنده، مدت‌زمان و حجم تقریبی فایل',
+        ],
+      },
+    ],
+    infoFeaturesGeneral: [
+      {
+        id: 'download-flow',
+        title: 'بررسی لینک و دانلود هوشمند',
+        items: [
+          'جایگذاری سریع لینک، نمایش حجم و جزئیات فایل و نوار پیشرفت زنده با امکان لغو دانلود',
+          'ذخیره مستقیم در حافظه دستگاه یا کپی لینک دانلود با یک لمس',
+        ],
+      },
+      {
+        id: 'player-tools',
+        title: 'پخش‌کننده داخلی و ابزارهای رسانه',
+        items: [
+          'پخش‌کننده اختصاصی آنلاین با پشتیبانی از زیرنویس و تغییر زبان صدا',
+          'حالت دانلود فقط صوت (MP3 320k) و جستجوی سریع میان زبان‌های زیرنویس',
+        ],
+      },
+      {
+        id: 'account-history',
+        title: 'حساب کاربری و تاریخچه',
+        items: [
+          'استفاده سریع به‌عنوان مهمان بدون نیاز به ثبت‌نام یا ورود با ایمیل و گوگل',
+          'نگهداری تاریخچه دانلودها در حساب کاربری برای دسترسی و دانلود مجدد سریع',
+        ],
+      },
+      {
+        id: 'ui-pwa',
+        title: 'طراحی، زبان و نصب برنامه',
+        items: [
+          'محیط کاملاً بدون تبلیغات با دو تم کاملاً سیاه و کاملاً سفید',
+          'پشتیبانی از ۴ زبان (فارسی، انگلیسی، روسی، چینی) و قابلیت نصب به‌صورت وب‌اپ (PWA) روی اندروید و آیفون',
+        ],
+      },
+    ],
     adminAnnouncementsSection: 'مدیریت اطلاعیه‌ها',
     adminAnnouncementsDesc: 'انتشار اطلاعیه در بخش اطلاعات برای نمایش به همه کاربران',
     announcementTitleLabel: 'عنوان اطلاعیه (اختیاری)',
@@ -872,11 +1218,15 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     analyzing: 'Проверка ссылки...',
     selectQuality: 'Выберите качество',
     qualityLabels: {
+      '4320p': { label: '4320p', sub: '8K Ultra HD' },
       '2160p': { label: '2160p', sub: '4K Ultra HD' },
+      '1440p': { label: '1440p', sub: '2K QHD' },
       '1080p': { label: '1080p', sub: 'Full HD' },
       '720p': { label: '720p', sub: 'HD' },
       '480p': { label: '480p', sub: 'Стандарт' },
       '360p': { label: '360p', sub: 'Компакт' },
+      '240p': { label: '240p', sub: 'Низкое' },
+      '144p': { label: '144p', sub: 'Минимум' },
       best: { label: 'Оригинал', sub: 'Лучшее' },
       audio: { label: 'Аудио', sub: 'MP3 320k' },
     },
@@ -897,6 +1247,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     hidePlayer: 'Скрыть плеер',
     viewImage: 'Показать фото',
     hideImage: 'Скрыть фото',
+    viewPhotos: 'Показать все фото',
+    hidePhotos: 'Скрыть фото',
+    previousPage: 'Назад',
+    nextPage: 'Вперёд',
+    pageLabel: 'Страница',
+    videoTab: 'Видео',
+    photosTab: 'Фото',
     carouselZipLabel: 'шт. · ZIP',
     imagePostLabel: 'Фото',
     audioTracksSection: 'Аудиодорожки',
@@ -915,6 +1272,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     emptySavesDescGuest:
       'У гостей история не сохраняется. Войдите, и файлы появятся здесь.',
     reDownload: 'Скачать снова',
+    historyPlay: 'Воспроизвести',
+    historyDelete: 'Удалить из истории',
+    historyTelegramStream: 'Поток Telegram',
+    historyStreamLoading: 'Подключение к потоку Telegram...',
+    historyStreamError: 'Не удалось запустить поток из Telegram.',
+    historyZipUnsupported: 'ZIP-архив нельзя воспроизвести в плеере — нажмите «Скачать».',
     invalidUrlError: 'Введите корректную ссылку http или https.',
     inspectFailed: 'Не удалось получить данные по ссылке.',
     downloadFailed: 'Ошибка загрузки. Проверьте ссылку или сервер.',
@@ -1017,6 +1380,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     xrayProfilesEmpty: 'Список конфигов пуст. Вставьте ссылки построчно выше и нажмите «Добавить в список».',
     xrayTestedPass: 'Скачано',
     xrayTestedFail: 'Ошибка',
+    xrayTestConcurrencyLabel: 'Потоки теста',
+    xrayCancelTestBtn: 'Отменить тест',
+    xrayTestCancelledMsg: 'Тест отменён',
     sectionPotProvider: 'Сервер PO Token (bgutil-ytdlp-pot-provider)',
     potEnableLabel: 'Автогенерация YouTube PO Token',
     potEnableDesc: 'Запускает HTTP-сервер bgutil-ytdlp-pot-provider и передаёт токены в yt-dlp.',
@@ -1036,6 +1402,19 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'Сервер bgutil и плагин yt-dlp установлены',
     potTestSuccess: 'PO Token получен',
     potTestFailed: 'Ошибка теста PO Token',
+    potJsRuntimeSection: 'JS-рантаймы YouTube (Deno и Node.js)',
+    potJsRuntimeDesc: 'Определяет, какой движок JavaScript использует yt-dlp для решения задач плеера YouTube (EJS).',
+    potJsRuntimeModeLabel: 'Активный JS-рантайм',
+    potJsRuntimeAuto: 'Deno + Node.js (Авто)',
+    potJsRuntimeDeno: 'Только Deno',
+    potJsRuntimeNode: 'Только Node.js',
+    potDenoReady: 'Deno готов',
+    potDenoMissing: 'Deno не установлен',
+    potNodeReady: 'Node.js готов',
+    potInstallDenoBtn: 'Установить Deno',
+    potDenoInstalledMsg: 'Рантайм Deno установлен и активирован',
+    potEjsRemoteLabel: 'Загружать скрипты EJS (ejs:github)',
+    potEjsRemoteDesc: 'Разрешает yt-dlp загружать актуальные компоненты решения подписей YouTube с GitHub.',
     backToSettings: 'Назад к настройкам',
     potPluginReady: 'Плагин yt-dlp готов',
     youtubeCookiesSection: 'Cookies YouTube',
@@ -1124,6 +1503,123 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     infoBotMusicDesc: 'Загрузчик музыки и Spotify',
     infoBotYoutubeDesc: 'Загрузчик видео YouTube',
     infoBotPhDesc: 'Загрузчик видео 18+',
+    infoFeaturesBtn: 'Возможности приложения',
+    infoFeaturesTabAll: 'Все',
+    infoFeaturesTabPlatforms: 'Платформы',
+    infoFeaturesTabGeneral: 'Общие',
+    infoFeaturesPlatformsTitle: 'Поддерживаемые платформы и загрузка',
+    infoFeaturesGeneralTitle: 'Общие возможности приложения',
+    infoFeaturesPlatforms: [
+      {
+        id: 'youtube',
+        name: 'YouTube',
+        badge: 'Видео и Shorts',
+        items: [
+          'Загрузка видео и Shorts от 144p до 4K / 8K (при наличии) или в оригинальном качестве',
+          'Извлечение аудио в MP3 (320k) и выбор дубляжа или оригинальной аудиодорожки',
+          'Скачивание ручных и автосубтитров (VTT) и отображение субтитров в плеере',
+          'Онлайн-просмотр внутри приложения, включая вертикальный режим для Shorts',
+        ],
+      },
+      {
+        id: 'instagram',
+        name: 'Instagram',
+        badge: 'Reels, посты и Stories',
+        items: [
+          'Сохранение Reels, видеопостов и Stories в оригинальном качестве',
+          'Загрузка одиночных фото с мгновенным предпросмотром в приложении',
+          'Упаковка каруселей (фото и видео) в единый ZIP-архив',
+          'Онлайн-воспроизведение видео перед сохранением на устройство',
+        ],
+      },
+      {
+        id: 'tiktok',
+        name: 'TikTok',
+        badge: 'Видео и слайд-шоу',
+        items: [
+          'Загрузка видео TikTok без водяного знака в лучшем качестве',
+          'Сохранение фото-слайд-шоу (в ZIP) и одиночных изображений',
+          'Извлечение аудиодорожки в MP3 из роликов TikTok',
+          'Мгновенный онлайн-просмотр видео и обложки',
+        ],
+      },
+      {
+        id: 'x',
+        name: 'X (Twitter)',
+        badge: 'Видео, GIF и фото',
+        items: [
+          'Загрузка видео и GIF из постов в максимальном качестве',
+          'Сохранение одного или нескольких фото из поста (в ZIP-архиве)',
+          'Поддержка ссылок x.com, twitter.com, fxtwitter.com, vxtwitter.com и t.co',
+          'Встроенный видеоплеер и предпросмотр изображений',
+        ],
+      },
+      {
+        id: 'pinterest',
+        name: 'Pinterest',
+        badge: 'Пины, видео, GIF и карусели',
+        items: [
+          'Загрузка одиночных пинов в максимальном качестве (Originals > 1200x > 736x)',
+          'Скачивание каруселей в ZIP-архиве с постраничным предпросмотром всех фото',
+          'Сохранение видео-пинов (MP4 и HLS), анимированных GIF и извлечение MP3',
+          'Поддержка доменов pinterest.* и коротких ссылок pin.it',
+        ],
+      },
+      {
+        id: 'telegram',
+        name: 'Telegram',
+        badge: 'Публичные посты',
+        items: [
+          'Прямая загрузка медиа из публичных постов и каналов Telegram (t.me/...)',
+          'Поддержка видео, аудиофайлов, фото и медиадокументов',
+          'Онлайн-просмотр совместимых видеопостов',
+        ],
+      },
+      {
+        id: 'other',
+        name: 'Другие платформы',
+        badge: 'Сотни сайтов',
+        items: [
+          'Поддержка SoundCloud, Vimeo, Reddit, Facebook, Twitch, Dailymotion и прямых медиассылок',
+          'Автовыбор доступных качеств, конвертация в MP3 и загрузка субтитров',
+          'Быстрый анализ ссылки: название, автор, длительность и примерный размер файла',
+        ],
+      },
+    ],
+    infoFeaturesGeneral: [
+      {
+        id: 'download-flow',
+        title: 'Умная загрузка по ссылке',
+        items: [
+          'Вставка в одно касание, проверка размера и прогресс загрузки с возможностью отмены',
+          'Прямое сохранение на устройство или копирование ссылки для скачивания',
+        ],
+      },
+      {
+        id: 'player-tools',
+        title: 'Встроенный плеер и медиаинструменты',
+        items: [
+          'Собственный онлайн-плеер с субтитрами и переключением аудиодорожек',
+          'Режим только аудио MP3 (320k) и поиск по языкам субтитров',
+        ],
+      },
+      {
+        id: 'account-history',
+        title: 'Аккаунт и история загрузок',
+        items: [
+          'Работа без регистрации в гостевом режиме или вход через Email / Google',
+          'Синхронизация истории загрузок для быстрого повторного сохранения',
+        ],
+      },
+      {
+        id: 'ui-pwa',
+        title: 'Интерфейс, языки и установка',
+        items: [
+          'Полностью без рекламы, с чисто чёрной и чисто белой темами',
+          '4 языка (русский, английский, персидский, китайский) и установка как PWA на Android и iOS',
+        ],
+      },
+    ],
     adminAnnouncementsSection: 'Объявления',
     adminAnnouncementsDesc: 'Публикация уведомлений во вкладке «Инфо» для всех пользователей',
     announcementTitleLabel: 'Заголовок (необязательно)',
@@ -1160,11 +1656,15 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     analyzing: '正在解析...',
     selectQuality: '选择画质',
     qualityLabels: {
+      '4320p': { label: '4320p', sub: '8K 超清' },
       '2160p': { label: '2160p', sub: '4K 超清' },
+      '1440p': { label: '1440p', sub: '2K 超清' },
       '1080p': { label: '1080p', sub: '全高清' },
       '720p': { label: '720p', sub: '高清' },
       '480p': { label: '480p', sub: '标清' },
       '360p': { label: '360p', sub: '流畅' },
+      '240p': { label: '240p', sub: '省流' },
+      '144p': { label: '144p', sub: '极速' },
       best: { label: '原画', sub: '最佳' },
       audio: { label: '音频', sub: 'MP3 320k' },
     },
@@ -1185,6 +1685,13 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     hidePlayer: '收起播放器',
     viewImage: '预览图片',
     hideImage: '收起图片',
+    viewPhotos: '查看全部图片',
+    hidePhotos: '收起图片',
+    previousPage: '上一页',
+    nextPage: '下一页',
+    pageLabel: '第',
+    videoTab: '视频',
+    photosTab: '图片',
     carouselZipLabel: '项 · ZIP',
     imagePostLabel: '图片',
     audioTracksSection: '音轨语言',
@@ -1202,6 +1709,12 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     emptySavesDesc: '解析后的媒体和已下载的文件将显示在这里，方便再次保存。',
     emptySavesDescGuest: '访客不保留历史记录。登录后，保存的文件会显示在这里。',
     reDownload: '重新保存',
+    historyPlay: '播放',
+    historyDelete: '从历史记录删除',
+    historyTelegramStream: 'Telegram 串流',
+    historyStreamLoading: '正在连接 Telegram 串流...',
+    historyStreamError: '无法从 Telegram 串流播放此文件。',
+    historyZipUnsupported: 'ZIP 压缩包无法在线播放，请使用下载按钮。',
     invalidUrlError: '请输入有效的 http 或 https 链接。',
     inspectFailed: '无法读取链接信息，请检查后重试。',
     downloadFailed: '下载失败，请检查链接或服务器连接。',
@@ -1304,6 +1817,9 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     xrayProfilesEmpty: '暂无已保存的节点配置。请在上方粘贴单条或多条链接并点击导入。',
     xrayTestedPass: '已下载',
     xrayTestedFail: '失败',
+    xrayTestConcurrencyLabel: '测试并发数',
+    xrayCancelTestBtn: '取消测试',
+    xrayTestCancelledMsg: '测试已取消',
     sectionPotProvider: 'PO Token 服务器 (bgutil-ytdlp-pot-provider)',
     potEnableLabel: '自动生成 YouTube PO Token',
     potEnableDesc: '运行 bgutil-ytdlp-pot-provider 服务并在下载时为 yt-dlp 提供 PO Token。',
@@ -1323,6 +1839,19 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     potInstalledMsg: 'bgutil 服务器与 yt-dlp 插件安装完成',
     potTestSuccess: 'PO Token 生成成功',
     potTestFailed: 'PO Token 测试失败',
+    potJsRuntimeSection: 'YouTube JS 运行时 (Deno 与 Node.js)',
+    potJsRuntimeDesc: '控制 yt-dlp 解析 YouTube 播放器签名挑战 (EJS) 时使用的 JavaScript 引擎。',
+    potJsRuntimeModeLabel: '启用的 JS 运行时',
+    potJsRuntimeAuto: 'Deno + Node.js (自动)',
+    potJsRuntimeDeno: '仅 Deno',
+    potJsRuntimeNode: '仅 Node.js',
+    potDenoReady: 'Deno 已就绪',
+    potDenoMissing: '未安装 Deno',
+    potNodeReady: 'Node.js 已就绪',
+    potInstallDenoBtn: '安装 Deno',
+    potDenoInstalledMsg: 'Deno 运行时已安装并启用',
+    potEjsRemoteLabel: '允许下载 EJS 挑战组件 (ejs:github)',
+    potEjsRemoteDesc: '允许 yt-dlp 从 GitHub 获取最新的 YouTube 签名求解组件。',
     backToSettings: '返回设置',
     potPluginReady: 'yt-dlp 插件已就绪',
     youtubeCookiesSection: 'YouTube Cookies',
@@ -1410,6 +1939,123 @@ export const TRANSLATIONS: Record<AppLanguage, TranslationDict> = {
     infoBotMusicDesc: '音乐与 Spotify 下载器',
     infoBotYoutubeDesc: 'YouTube 视频下载器',
     infoBotPhDesc: '成人视频下载器',
+    infoFeaturesBtn: '应用功能',
+    infoFeaturesTabAll: '全部',
+    infoFeaturesTabPlatforms: '支持平台',
+    infoFeaturesTabGeneral: '通用功能',
+    infoFeaturesPlatformsTitle: '各平台下载支持与功能',
+    infoFeaturesGeneralTitle: '通用公开功能',
+    infoFeaturesPlatforms: [
+      {
+        id: 'youtube',
+        name: 'YouTube',
+        badge: '视频与 Shorts',
+        items: [
+          '支持下载 144p 至 4K / 8K（视视频源而定）或原画质视频与 Shorts',
+          '提取纯音频 MP3 (320k)，并支持切换配音或原声音轨',
+          '下载人工与自动生成字幕 (VTT)，并可在内置播放器中开启字幕',
+          '支持应用内直接在线播放（含 Shorts 竖屏视图）',
+        ],
+      },
+      {
+        id: 'instagram',
+        name: 'Instagram',
+        badge: 'Reels、帖子与快拍',
+        items: [
+          '原画质保存 Reels、视频帖子和 Stories 快拍',
+          '下载单张图片帖子并支持应用内即时预览',
+          '将多图/视频轮播帖子自动打包为单个 ZIP 文件下载',
+          '保存前可在应用内直接在线播放视频',
+        ],
+      },
+      {
+        id: 'tiktok',
+        name: 'TikTok',
+        badge: '视频与图集',
+        items: [
+          '以最佳画质下载无水印 TikTok 视频',
+          '保存多图幻灯片（打包为 ZIP）及单张图片帖子',
+          '直接从 TikTok 短视频中提取 MP3 音频',
+          '即时在线播放视频与封面预览',
+        ],
+      },
+      {
+        id: 'x',
+        name: 'X (Twitter)',
+        badge: '视频、GIF 与图片',
+        items: [
+          '以最高画质下载推文视频和 GIF 动图',
+          '保存单张或多张推文图片（多图自动打包为 ZIP）',
+          '兼容 x.com、twitter.com、fxtwitter.com、vxtwitter.com 与 t.co 链接',
+          '内置视频在线播放与图片预览',
+        ],
+      },
+      {
+        id: 'pinterest',
+        name: 'Pinterest',
+        badge: '图钉、视频、GIF 与轮播',
+        items: [
+          '以最高可用清晰度保存单张图片（Originals > 1200x > 736x）',
+          '多图轮播自动打包为 ZIP 下载，并支持应用内分页浏览全部图片',
+          '支持下载视频图钉（MP4 与 HLS 流）、GIF 动图或提取 MP3 音频',
+          '完整支持 pinterest.* 各地区域名及 pin.it 短链接',
+        ],
+      },
+      {
+        id: 'telegram',
+        name: 'Telegram',
+        badge: '公开频道与帖子',
+        items: [
+          '支持通过公开 Telegram 帖子链接 (t.me/...) 直接下载媒体',
+          '支持视频、音频、图片及共享媒体文件',
+          '兼容视频帖子支持应用内在线预览播放',
+        ],
+      },
+      {
+        id: 'other',
+        name: '其他支持平台',
+        badge: '数百个公开站点',
+        items: [
+          '支持 SoundCloud、Vimeo、Reddit、Facebook、Twitch、Dailymotion 及直链媒体',
+          '自动识别清晰度、MP3 音频提取及可用字幕下载',
+          '快速解析标题、作者、时长与预估文件大小',
+        ],
+      },
+    ],
+    infoFeaturesGeneral: [
+      {
+        id: 'download-flow',
+        title: '智能链接解析与下载',
+        items: [
+          '一键粘贴、即时解析文件大小与信息，并支持实时进度与取消下载',
+          '直接保存到设备存储，或一键复制直链地址',
+        ],
+      },
+      {
+        id: 'player-tools',
+        title: '内置播放器与媒体工具',
+        items: [
+          '自定义在线视频播放器，支持外挂字幕显示与多音轨切换',
+          '纯音频 MP3 (320k) 模式与可搜索的 VTT 字幕列表',
+        ],
+      },
+      {
+        id: 'account-history',
+        title: '账号与下载记录',
+        items: [
+          '支持免登录访客直接使用，或通过邮箱 / Google 登录同步记录',
+          '保存个人下载历史，随时快速重新获取',
+        ],
+      },
+      {
+        id: 'ui-pwa',
+        title: '界面、多语言与安装',
+        items: [
+          '完全无广告，提供纯黑与纯白双主题',
+          '支持中文、英文、波斯语 (RTL) 与俄语，可作为 PWA 安装至 Android 和 iOS 设备',
+        ],
+      },
+    ],
     adminAnnouncementsSection: '系统公告',
     adminAnnouncementsDesc: '发布展示在“信息”页顶部的全员公告',
     announcementTitleLabel: '标题（可选）',

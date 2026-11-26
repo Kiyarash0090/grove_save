@@ -61,6 +61,8 @@ function getAccentDotClass(providerGlow: ProviderGlow): string {
       return 'bg-cyan-500/70 dark:bg-cyan-300 shadow-[0_0_8px_rgba(37,244,238,0.45)] dark:shadow-[0_0_10px_rgba(165,243,252,0.85)]';
     case 'x':
       return 'bg-sky-500/70 dark:bg-sky-300 shadow-[0_0_8px_rgba(56,189,248,0.45)] dark:shadow-[0_0_10px_rgba(186,230,253,0.85)]';
+    case 'pinterest':
+      return 'bg-rose-500/75 dark:bg-rose-300 shadow-[0_0_8px_rgba(230,0,35,0.45)] dark:shadow-[0_0_10px_rgba(253,164,175,0.85)]';
     default:
       return 'bg-zinc-600/55 dark:bg-white shadow-[0_0_7px_rgba(0,0,0,0.18)] dark:shadow-[0_0_10px_rgba(255,255,255,0.85)]';
   }
